@@ -1,0 +1,39 @@
+POST /register
+Request Body:
+{
+  "email": "string",
+  "password": "string"
+}
+Description: Регистрация пользователя. Требуется email и пароль. Возвращает сообщение о необходимости подтверждения email.
+
+POST /login
+Request Body:
+{
+  "email": "string",
+  "password": "string"
+}
+Description: Вход пользователя. Требуется email и пароль. Возвращает accessToken и refreshToken.
+
+POST /token
+Request Body:
+{
+  "refreshToken": "string"
+}
+Description: Обновление accessToken по refreshToken. Возвращает новые accessToken и refreshToken.
+
+POST /logout
+Headers:
+  Authorization: Bearer <accessToken>
+Request Body:
+{
+  "refreshToken": "string"
+}
+Description: Выход пользователя, отзыв refreshToken.
+
+POST /verify
+Request Body:
+{
+  "email": "string",
+  "code": "string"
+}
+Description: Подтверждение email и активация аккаунта. Возвращает accessToken и refreshToken для автоматического входа.
