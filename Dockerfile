@@ -1,23 +1,32 @@
 # Используем официальный образ Node.js на Alpine (легковесный)
 FROM node:18-alpine
 
+# Устанавливаем зависимости для Prisma и других нативных модулей
+RUN apk add --no-cache openssl
+
 # Создаем рабочую директорию
 WORKDIR /app
 
-# Копируем package.json и package-lock.json (или yarn.lock)
+# 1. Сначала копируем только файлы, необходимые для установки зависимостей
 COPY package*.json ./
+COPY prisma ./prisma/
 
-# Устанавливаем зависимости
-RUN npm install
+# 2. Устанавливаем зависимости
+RUN npm install --production && \
+    npx prisma generate && \
+    npm cache clean --force
 
-# Копируем остальные файлы проекта
+# 3. Копируем остальной код
 COPY . .
 
-# Собираем TypeScript в JavaScript
+# 4. Собираем проект
 RUN npm run build
 
-# Открываем порт, который использует ваше приложение
+# 5. Удаляем ненужные файлы (опционально)
+RUN rm -rf src node_modules/prisma
+
+# Открываем порт
 EXPOSE 3000
 
-# Запускаем приложение
-CMD ["npm", "start"]
+# Запускаем приложение с миграциями
+CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
