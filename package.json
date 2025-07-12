@@ -1,8 +1,9 @@
 {
   "name": "server",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
+    "type-check": "tsc --noEmit",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "nodemon --watch src/**/*.ts --exec ts-node src/index.ts",
@@ -13,7 +14,7 @@
     "postinstall": "prisma generate",
     "test": "jest",
     "db:studio": "npm run prisma studio",
-    "db:seed": "ts-node prisma/seed.ts"
+    "db:seed": "ts-node -O '{\"module\":\"commonjs\"}' prisma/seed.ts"
   },
   "keywords": [],
   "author": "",
