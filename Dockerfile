@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # Установка ts-node глобально для запуска seed (если не компилируете seed)
-# Удаляем глобальную установку ts-node и typescript, так как они теперь в зависимостях проекта
+RUN npm install -g ts-node typescript
 
 ENV NODE_ENV=production
 
