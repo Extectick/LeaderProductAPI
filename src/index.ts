@@ -2,7 +2,16 @@ import express from 'express';
 import { PrismaClient } from '@prisma/client';
 
 const app = express();
-const prisma = new PrismaClient();
+
+const databaseUrl = process.env.NODE_ENV === 'development' ? process.env.DATABASE_URL_DEV : process.env.DATABASE_URL;
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: databaseUrl,
+    },
+  },
+});
+
 const port = process.env.PORT || 3000;
 
 app.use(express.json());

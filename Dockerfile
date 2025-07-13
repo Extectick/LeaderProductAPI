@@ -1,22 +1,21 @@
-# Этап сборки (builder)
-FROM node:18-alpine as builder
-
-# Устанавливаем системные зависимости + git для некоторых npm-пакетов
-RUN apk add --no-cache openssl python3 make g++ git
+FROM node:18-alpine
 
 WORKDIR /app
 
-# 1. Копируем файлы зависимостей
-COPY package.json package-lock.json ./
-COPY prisma ./prisma/
+COPY package*.json ./
+RUN npm install
 
-# 2. Устанавливаем ВСЕ зависимости (включая devDependencies)
-RUN npm install && \
-    npm install --save-dev @types/nodemailer && \
-    npm cache clean --force
+COPY . .
 
-# 3. Генерируем Prisma Client
-RUN npx prisma generate
+# Компиляция TypeScript (если нужно)
+RUN npm run build
+
+# Установка ts-node глобально для запуска seed (если не компилируете seed)
+RUN npm install -g ts-node typescript
+
+ENV NODE_ENV=production
+
+CMD ["node", "dist/index.js"]
 
 # 4. Копируем остальной код
 COPY . .
