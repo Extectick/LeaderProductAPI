@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:18-alpine AS builder
 
 WORKDIR /app
 
@@ -14,14 +14,6 @@ RUN npm run build
 RUN npm install -g ts-node typescript
 
 ENV NODE_ENV=production
-
-CMD ["node", "dist/index.js"]
-
-# 4. Копируем остальной код
-COPY . .
-
-# 5. Собираем проект
-RUN npm run build
 
 # Финальный образ (production)
 FROM node:18-alpine
