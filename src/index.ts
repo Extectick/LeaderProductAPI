@@ -1,5 +1,9 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
+import morgan from 'morgan';
+
+import authRouter from './routes/auth';
+import usersRouter from './routes/users';
 
 const app = express();
 
@@ -14,11 +18,11 @@ const prisma = new PrismaClient({
 
 const port = process.env.PORT || 3000;
 
+app.use(morgan('dev'));
 app.use(express.json());
 
-import authRouter from './routes/auth';
-
 app.use('/', authRouter);
+app.use('/users', usersRouter);
 
 app.get('/', async (req, res) => {
   try {

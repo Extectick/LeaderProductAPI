@@ -34,7 +34,7 @@ import { sendVerificationEmail } from '../services/mailService';
 import crypto from 'crypto';
 
 const MAX_VERIFICATION_ATTEMPTS = 5;
-const RESEND_CODE_INTERVAL_MS = 30 * 1000; // 30 seconds
+const RESEND_CODE_INTERVAL_MS = 25 * 1000; // 25 seconds
 const VERIFICATION_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 hour
 const ACCOUNT_DELETION_DELAY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -88,17 +88,25 @@ async function sendVerificationCodeEmail(userId: number, email: string) {
 router.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
+
+    if (!email || !password) return res.status(400).json({ message: 'Требуется email и пароль' });
 
     // Validate email format (simple regex)
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) return res.status(400).json({ message: 'Invalid email format' });
+    if (!emailRegex.test(email)) return res.status(400).json({ message: 'Неверный формат email' });
 
     // Validate password length (min 6 chars)
-    if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    if (password.length < 6) return res.status(400).json({ message: 'Пароль должен быть не менее 6 символов' });
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) return res.status(409).json({ message: 'User already exists' });
+    if (existingUser) {
+      if (!existingUser.isActive) {
+        // User exists but is not active, resend verification code
+        await sendVerificationCodeEmail(existingUser.id, email);
+        return res.status(200).json({ message: 'Пользователь уже зарегистрирован, но не активирован. Код подтверждения отправлен повторно.' });
+      }
+      return res.status(409).json({ message: 'Пользователь уже существует' });
+    }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
@@ -113,30 +121,40 @@ router.post('/register', async (req, res) => {
 
     await sendVerificationCodeEmail(user.id, email);
 
-    res.status(201).json({ message: 'User registered. Please verify your email.' });
+    res.status(201).json({ message: 'Пользователь зарегистрирован. Пожалуйста, подтвердите email.' });
   } catch (error: any) {
     if (error.message && error.message.includes('recently')) {
       return res.status(429).json({ message: error.message });
     }
-    res.status(500).json({ message: 'Registration failed', error });
+    res.status(500).json({ message: 'Ошибка регистрации', error });
   }
 });
 
 // Login endpoint
 router.post('/login', async (req, res) => {
+
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
+  if (!email || !password) return res.status(400).json({ message: 'Требуется email и пароль' });
 
   try {
     const user = await prisma.user.findUnique({
       where: { email },
       include: { role: { include: { permissions: true } } },
     });
-    if (!user) return res.status(401).json({ message: 'Invalid credentials' });
-    if (!user.isActive) return res.status(403).json({ message: 'Account not activated' });
+    if (!user) {
+      console.error(`Пользователь с email ${email} не найден`);
+      return res.status(401).json({ message: 'Неверные учетные данные' });
+    }
+    if (!user.isActive) {
+      console.error(`Пользователь с email ${email} не активирован`);
+      return res.status(403).json({ message: 'Аккаунт не активирован' });
+    }
 
     const validPassword = await bcrypt.compare(password, user.passwordHash);
-    if (!validPassword) return res.status(401).json({ message: 'Invalid credentials' });
+    if (!validPassword) {
+      console.error(`Неверный пароль для пользователя с email ${email}`);
+      return res.status(401).json({ message: 'Неверные учетные данные' });
+    }
 
     // TODO: check login attempts and block if necessary
 
@@ -148,35 +166,44 @@ router.post('/login', async (req, res) => {
       data: {
         token: refreshToken,
         userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 дней
       },
     });
 
     res.json({ accessToken, refreshToken });
   } catch (error) {
-    res.status(500).json({ message: 'Login failed', error });
+    console.error('Ошибка при входе:', error);
+    res.status(500).json({ message: 'Ошибка входа', error });
   }
 });
 
 // Token refresh endpoint
 router.post('/token', async (req, res) => {
   const { refreshToken } = req.body;
-  if (!refreshToken) return res.status(400).json({ message: 'Refresh token required' });
+
+  if (!refreshToken) return res.status(400).json({ message: 'Требуется refresh токен' });
 
   try {
     const storedToken = await prisma.refreshToken.findUnique({ where: { token: refreshToken } });
     if (!storedToken || storedToken.revoked || storedToken.expiresAt < new Date()) {
-      return res.status(403).json({ message: 'Invalid or expired refresh token' });
+      console.error('Неверный или просроченный refresh токен');
+      return res.status(403).json({ message: 'Неверный или просроченный refresh токен' });
     }
 
     jwt.verify(refreshToken, refreshTokenSecret, async (err: jwt.VerifyErrors | null, payload: any) => {
-      if (err) return res.status(403).json({ message: 'Invalid refresh token' });
+      if (err) {
+        console.error('Неверный refresh токен');
+        return res.status(403).json({ message: 'Неверный refresh токен' });
+      }
 
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
         include: { role: { include: { permissions: true } } },
       });
-      if (!user) return res.status(403).json({ message: 'User not found' });
+      if (!user) {
+        console.error('Пользователь не найден');
+        return res.status(403).json({ message: 'Пользователь не найден' });
+      }
 
       const newAccessToken = generateAccessToken(user);
       const newRefreshToken = generateRefreshToken(user);
@@ -197,7 +224,8 @@ router.post('/token', async (req, res) => {
       res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
     });
   } catch (error) {
-    res.status(500).json({ message: 'Token refresh failed', error });
+    console.error('Ошибка при обновлении токена:', error);
+    res.status(500).json({ message: 'Обновление токена не удалось', error });
   }
 });
 
@@ -221,69 +249,70 @@ router.post('/logout', authenticateToken, async (req: AuthRequest, res) => {
 router.post('/verify', async (req, res) => {
   try {
     const { email, code } = req.body;
-    if (!email || !code) return res.status(400).json({ message: 'Email and code are required' });
 
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    if (user.isActive) return res.status(400).json({ message: 'Account already activated' });
+  if (!email || !code) return res.status(400).json({ message: 'Требуется email и код' });
 
-    const verification = await prisma.emailVerification.findFirst({
-      where: { userId: user.id, code, used: false, expiresAt: { gt: new Date() } },
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return res.status(404).json({ message: 'Пользователь не найден' });
+  if (user.isActive) return res.status(400).json({ message: 'Аккаунт уже активирован' });
+
+  const verification = await prisma.emailVerification.findFirst({
+    where: { userId: user.id, code, used: false, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (!verification) {
+    // Increment attemptsCount if possible
+    const lastVerification = await prisma.emailVerification.findFirst({
+      where: { userId: user.id, used: false },
       orderBy: { createdAt: 'desc' },
     });
-
-    if (!verification) {
-      // Increment attemptsCount if possible
-      const lastVerification = await prisma.emailVerification.findFirst({
-        where: { userId: user.id, used: false },
-        orderBy: { createdAt: 'desc' },
-      });
-      if (lastVerification) {
-        const newAttempts = (lastVerification.attemptsCount || 0) + 1;
-        if (newAttempts >= MAX_VERIFICATION_ATTEMPTS) {
-          return res.status(429).json({ message: 'Maximum verification attempts exceeded' });
-        }
-        await prisma.emailVerification.update({
-          where: { id: lastVerification.id },
-          data: { attemptsCount: newAttempts },
-        });
+    if (lastVerification) {
+      const newAttempts = (lastVerification.attemptsCount || 0) + 1;
+      if (newAttempts >= MAX_VERIFICATION_ATTEMPTS) {
+        return res.status(429).json({ message: 'Превышено максимальное количество попыток подтверждения' });
       }
-      return res.status(400).json({ message: 'Invalid or expired verification code' });
+      await prisma.emailVerification.update({
+        where: { id: lastVerification.id },
+        data: { attemptsCount: newAttempts },
+      });
     }
-
-    // Mark verification as used and activate user
-    await prisma.emailVerification.update({
-      where: { id: verification.id },
-      data: { used: true },
-    });
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { isActive: true },
-    });
-
-    // Generate tokens for automatic login
-    const userWithRole = await prisma.user.findUnique({
-      where: { id: user.id },
-      include: { role: { include: { permissions: true } } },
-    });
-    if (!userWithRole) return res.status(500).json({ message: 'User data retrieval failed' });
-
-    const accessToken = generateAccessToken(userWithRole);
-    const refreshToken = generateRefreshToken(userWithRole);
-
-    // Store refresh token in DB
-    await prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-      },
-    });
-
-    res.json({ message: 'Account verified and activated', accessToken, refreshToken });
-  } catch (error) {
-    res.status(500).json({ message: 'Verification failed', error });
+    return res.status(400).json({ message: 'Неверный или просроченный код подтверждения' });
   }
+
+  // Mark verification as used and activate user
+  await prisma.emailVerification.update({
+    where: { id: verification.id },
+    data: { used: true },
+  });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { isActive: true },
+  });
+
+  // Generate tokens for automatic login
+  const userWithRole = await prisma.user.findUnique({
+    where: { id: user.id },
+    include: { role: { include: { permissions: true } } },
+  });
+  if (!userWithRole) return res.status(500).json({ message: 'Ошибка получения данных пользователя' });
+
+  const accessToken = generateAccessToken(userWithRole);
+  const refreshToken = generateRefreshToken(userWithRole);
+
+  // Store refresh token in DB
+  await prisma.refreshToken.create({
+    data: {
+      token: refreshToken,
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 дней
+    },
+  });
+
+  res.json({ message: 'Аккаунт подтвержден и активирован', accessToken, refreshToken });
+} catch (error) {
+  res.status(500).json({ message: 'Ошибка подтверждения', error });
+}
 });
 
 export default router;

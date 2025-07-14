@@ -18,9 +18,18 @@ async function sendVerificationEmail(to, code) {
     const mailOptions = {
         from: process.env.SMTP_FROM || '"No Reply" <no-reply@example.com>',
         to,
-        subject: 'Email Verification Code',
-        text: `Your verification code is: ${code}`,
-        html: `<p>Your verification code is: <b>${code}</b></p>`,
+        subject: 'Код подтверждения регистрации',
+        text: `Ваш код подтверждения: ${code}`,
+        html: `
+            <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+                <h2 style="color: #333;">Код подтверждения регистрации</h2>
+                <p style="font-size: 18px; color: #555;">Ваш код подтверждения:</p>
+                <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; background-color: #f0f0f0; border-radius: 8px; padding: 10px 20px; display: inline-block; user-select: all;">
+                    ${code}
+                </div>
+                <p style="font-size: 14px; color: #999; margin-top: 20px;">Если вы не запрашивали этот код, просто проигнорируйте это письмо.</p>
+            </div>
+        `,
     };
     try {
         await transporter.sendMail(mailOptions);
