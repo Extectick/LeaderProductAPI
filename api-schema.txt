@@ -1,39 +1,88 @@
-POST /register
-Request Body:
-{
-  "email": "string",
-  "password": "string"
-}
-Description: Регистрация пользователя. Требуется email и пароль. Возвращает сообщение о необходимости подтверждения email.
+# API Документация
 
-POST /login
-Request Body:
-{
-  "email": "string",
-  "password": "string"
-}
-Description: Вход пользователя. Требуется email и пароль. Возвращает accessToken и refreshToken.
+## POST /register
+- Описание: Регистрация нового пользователя.
+- Тело запроса:
+  ```json
+  {
+    "email": "string",       // Email пользователя (обязательный)
+    "password": "string"     // Пароль пользователя (обязательный, минимум 6 символов)
+  }
+  ```
+- Ответ:
+  - 201 Created: Пользователь зарегистрирован, требуется подтверждение email.
+  - 400 Bad Request: Неверный формат email или пароль слишком короткий.
+  - 409 Conflict: Пользователь с таким email уже существует.
+  - 429 Too Many Requests: Код подтверждения был отправлен недавно, повторная отправка невозможна.
+  - 500 Internal Server Error: Ошибка сервера.
 
-POST /token
-Request Body:
-{
-  "refreshToken": "string"
-}
-Description: Обновление accessToken по refreshToken. Возвращает новые accessToken и refreshToken.
+## POST /login
+- Описание: Вход пользователя в систему.
+- Тело запроса:
+  ```json
+  {
+    "email": "string",       // Email пользователя (обязательный)
+    "password": "string"     // Пароль пользователя (обязательный)
+  }
+  ```
+- Ответ:
+  - 200 OK: Возвращает `accessToken` и `refreshToken`.
+  - 400 Bad Request: Отсутствует email или пароль.
+  - 401 Unauthorized: Неверные учетные данные.
+  - 403 Forbidden: Аккаунт не активирован.
+  - 500 Internal Server Error: Ошибка сервера.
 
-POST /logout
-Headers:
-  Authorization: Bearer <accessToken>
-Request Body:
-{
-  "refreshToken": "string"
-}
-Description: Выход пользователя, отзыв refreshToken.
+## POST /token
+- Описание: Обновление accessToken с использованием refreshToken.
+- Тело запроса:
+  ```json
+  {
+    "refreshToken": "string"  // Токен обновления (обязательный)
+  }
+  ```
+- Ответ:
+  - 200 OK: Возвращает новые `accessToken` и `refreshToken`.
+  - 400 Bad Request: Отсутствует refreshToken.
+  - 403 Forbidden: Неверный или просроченный refreshToken.
+  - 500 Internal Server Error: Ошибка сервера.
 
-POST /verify
-Request Body:
-{
-  "email": "string",
-  "code": "string"
-}
-Description: Подтверждение email и активация аккаунта. Возвращает accessToken и refreshToken для автоматического входа.
+## POST /logout
+- Описание: Выход пользователя, отзыв refreshToken.
+- Заголовки:
+  - Authorization: Bearer `<accessToken>`
+- Тело запроса:
+  ```json
+  {
+    "refreshToken": "string"  // Токен обновления для отзыва (обязательный)
+  }
+  ```
+- Ответ:
+  - 200 OK: Успешный выход.
+  - 400 Bad Request: Отсутствует refreshToken.
+  - 500 Internal Server Error: Ошибка сервера.
+
+## POST /verify
+- Описание: Подтверждение email и активация аккаунта.
+- Тело запроса:
+  ```json
+  {
+    "email": "string",   // Email пользователя (обязательный)
+    "code": "string"     // Код подтверждения (обязательный)
+  }
+  ```
+- Ответ:
+  - 200 OK: Аккаунт подтвержден и активирован, возвращает `accessToken` и `refreshToken`.
+  - 400 Bad Request: Неверный или просроченный код подтверждения.
+  - 404 Not Found: Пользователь не найден.
+  - 429 Too Many Requests: Превышено максимальное количество попыток подтверждения.
+  - 500 Internal Server Error: Ошибка сервера.
+
+## GET /profile
+- Описание: Получение информации о профиле текущего авторизованного пользователя.
+- Заголовки:
+  - Authorization: Bearer `<accessToken>`
+- Ответ:
+  - 200 OK: Возвращает данные профиля пользователя, включая email, статус активации, дату создания и обновления, роль и отдел.
+  - 401 Unauthorized: Отсутствует или неверный токен авторизации.
+  - 404 Not Found: Пользователь не найден.
+  - 500 Internal Server Error: Ошибка сервера.
