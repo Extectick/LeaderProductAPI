@@ -109,4 +109,43 @@ router.post('/:userId/department/:departmentId/manager', authenticateToken, auth
   }
 });
 
+
+// Новый маршрут: получение информации о профиле пользователя
+router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.userId;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+        role: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+        department: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    res.json({ profile: user });
+  } catch (error) {
+    res.status(500).json({ message: 'Ошибка получения профиля', error });
+  }
+});
+
 export default router;
