@@ -23,10 +23,12 @@ router.put('/me/department', authenticateToken, auditLog('Update own department'
       return res.status(404).json({ message: 'Department not found' });
     }
 
+
     // Обновляем отдел пользователя
-    await prisma.user.update({
-      where: { id: userId },
-      data: { departmentId },
+    // Теперь отдел связан с EmployeeProfile, обновим там
+    await prisma.employeeProfile.updateMany({
+      where: { userId: Number(userId) },
+      data: { departmentId: Number(departmentId) },
     });
 
     res.json({ message: 'Department updated for current user' });
@@ -51,9 +53,11 @@ router.put('/:userId/department', authenticateToken, authorizeRoles(['admin']), 
       return res.status(404).json({ message: 'Department not found' });
     }
 
+
     // Обновляем отдел пользователя
-    await prisma.user.update({
-      where: { id: Number(userId) },
+    // Теперь отдел связан с EmployeeProfile, обновим там
+    await prisma.employeeProfile.updateMany({
+      where: { userId: Number(userId) },
       data: { departmentId: Number(departmentId) },
     });
 
@@ -110,11 +114,12 @@ router.post('/:userId/department/:departmentId/manager', authenticateToken, auth
 });
 
 
-// Новый маршрут: получение информации о профиле пользователя
+
 router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
 
+    // Получаем базовую информацию о пользователе
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -123,16 +128,75 @@ router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
         isActive: true,
         createdAt: true,
         updatedAt: true,
+        phone: true,
+        avatarUrl: true,
+        profileStatus: true,
         role: {
           select: {
             id: true,
             name: true,
           },
         },
-        department: {
+        departmentRoles: {
+          select: {
+            department: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            role: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        },
+        clientProfile: {
           select: {
             id: true,
-            name: true,
+            phone: true,
+            status: true,
+            address: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+        supplierProfile: {
+          select: {
+            id: true,
+            phone: true,
+            status: true,
+            address: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+        employeeProfile: {
+          select: {
+            id: true,
+            phone: true,
+            status: true,
+            department: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            departmentRoles: {
+              select: {
+                id: true,
+                role: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+            createdAt: true,
+            updatedAt: true,
           },
         },
       },
