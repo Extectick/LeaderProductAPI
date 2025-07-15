@@ -12,10 +12,27 @@ export function auditLog(action: string, targetType?: string, targetId?: number)
   return async (req: AuditRequest, res: Response, next: NextFunction) => {
     try {
       const userId = req.userId || (req as any).user?.userId || null;
+
+      // Преобразуем action в enum ActionType, если возможно
+      const actionEnum = (() => {
+        const upperAction = action.toUpperCase();
+        const validActions = [
+          'CREATE',
+          'UPDATE',
+          'DELETE',
+          'LOGIN',
+          'LOGOUT',
+          'PASSWORD_RESET',
+          'EMAIL_VERIFICATION',
+          'OTHER',
+        ];
+        return validActions.includes(upperAction) ? upperAction : 'OTHER';
+      })();
+
       await prisma.auditLog.create({
         data: {
           userId,
-          action,
+          action: actionEnum as any,
           targetType,
           targetId,
           details: JSON.stringify({

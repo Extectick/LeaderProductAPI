@@ -60,6 +60,14 @@ model Department {
 }
 
 
+
+
+enum ProfileType {
+  CLIENT
+  SUPPLIER
+  EMPLOYEE
+}
+
 model User {
   id                 Int                 @id @default(autoincrement())
   email              String              @unique
@@ -69,6 +77,7 @@ model User {
   phone              String?             // Телефон пользователя
   avatarUrl          String?             // Ссылка на аватар пользователя
   deletedAt          DateTime?           // Для soft delete
+  currentProfileType ProfileType?        // Текущий активный профиль
   emailVerifications EmailVerification[]
   loginAttempts      LoginAttempt[]
   passwordResets     PasswordReset[]

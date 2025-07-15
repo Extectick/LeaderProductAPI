@@ -131,6 +131,7 @@ router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
         phone: true,
         avatarUrl: true,
         profileStatus: true,
+        currentProfileType: true,
         role: {
           select: {
             id: true,
