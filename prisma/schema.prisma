@@ -7,24 +7,118 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ProfileStatus {
+  PENDING
+  ACTIVE
+  BLOCKED
+}
+
+
+model ClientProfile {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id])
+  addressId Int?
+  address   Address? @relation(fields: [addressId], references: [id])
+  phone     String?
+  status    ProfileStatus @default(PENDING)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SupplierProfile {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id])
+  addressId Int?
+  address   Address? @relation(fields: [addressId], references: [id])
+  phone     String?
+  status    ProfileStatus @default(PENDING)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model EmployeeProfile {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id])
+  departmentId Int?
+  department Department? @relation(fields: [departmentId], references: [id])
+  departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
+  phone     String?
+  status    ProfileStatus @default(PENDING)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+
+model Department {
+  id    Int     @id @default(autoincrement())
+  name  String  @unique
+  departmentRoles DepartmentRole[]
+  employeeProfiles EmployeeProfile[]  // Добавлено обратное отношение
+}
+
+
 model User {
   id                 Int                 @id @default(autoincrement())
   email              String              @unique
   passwordHash       String
   isActive           Boolean             @default(false)
-  roleId             Int
-  departmentId       Int?                // Связь с отделом, может быть null
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  roleId             Int 
+  phone              String?             // Телефон пользователя
+  avatarUrl          String?             // Ссылка на аватар пользователя
+  deletedAt          DateTime?           // Для soft delete
   emailVerifications EmailVerification[]
   loginAttempts      LoginAttempt[]
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
   role               Role                @relation(fields: [roleId], references: [id])
-  department         Department?         @relation(fields: [departmentId], references: [id])
   departmentRoles    DepartmentRole[]
   auditLogs          AuditLog[]          @relation("UserAuditLogs")
+  clientProfile      ClientProfile?
+  supplierProfile    SupplierProfile?
+  employeeProfile    EmployeeProfile?
+  profileStatus      ProfileStatus       @default(PENDING)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([email])
 }
+
+
+
+model DepartmentRole {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  roleId       Int
+  departmentId Int
+
+  user       User       @relation(fields: [userId], references: [id])
+  role       Role       @relation(fields: [roleId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+
+  employeeProfiles EmployeeProfile[] @relation("EmployeeDepartmentRoles") // Добавлено обратное отношение
+
+  @@unique([userId, roleId, departmentId])
+}
+
+
+model Address {
+  id        Int      @id @default(autoincrement())
+  street    String
+  city      String
+  state     String?
+  postalCode String?
+  country   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clientProfiles   ClientProfile[]
+  supplierProfiles SupplierProfile[]
+}
+
+
 
 model Role {
   id            Int               @id @default(autoincrement())
@@ -94,34 +188,26 @@ model PasswordReset {
   user      User     @relation(fields: [userId], references: [id])
 }
 
+
+enum ActionType {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  PASSWORD_RESET
+  EMAIL_VERIFICATION
+  OTHER
+}
+
 model AuditLog {
-  id         Int      @id @default(autoincrement())
+  id         Int        @id @default(autoincrement())
   userId     Int?
-  action     String
+  action     ActionType
   targetType String?
   targetId   Int?
-  timestamp  DateTime @default(now())
+  timestamp  DateTime   @default(now())
   details    String?
 
-  user       User?    @relation("UserAuditLogs", fields: [userId], references: [id])
-}
-
-model Department {
-  id    Int     @id @default(autoincrement())
-  name  String  @unique
-  users User[]
-  departmentRoles DepartmentRole[]
-}
-
-model DepartmentRole {
-  id           Int       @id @default(autoincrement())
-  userId       Int
-  roleId       Int
-  departmentId Int
-
-  user       User       @relation(fields: [userId], references: [id])
-  role       Role       @relation(fields: [roleId], references: [id])
-  department Department @relation(fields: [departmentId], references: [id])
-
-  @@unique([userId, roleId, departmentId])
+  user       User?      @relation("UserAuditLogs", fields: [userId], references: [id])
 }
