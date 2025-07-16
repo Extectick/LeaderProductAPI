@@ -17,12 +17,28 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 
 export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) return res.status(401).json({ message: 'Требуется токен авторизации' });
+  // console.log('Authorization header:', authHeader);
+
+  if (!authHeader) {
+    return res.status(401).json({ message: 'Требуется токен авторизации' });
+  }
+
+  const parts = authHeader.split(' ');
+
+  if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    return res.status(401).json({ message: 'Неверный формат токена авторизации' });
+  }
+
+  const token = parts[1];
+
+  // console.log('Extracted token:', token);
 
   jwt.verify(token, accessTokenSecret, (err: any, user: any) => {
-    if (err) return res.status(403).json({ message: 'Ошибка в токене авторизации или он истек' });
+    if (err) {
+      console.error('JWT verification error:', err);
+      return res.status(403).json({ message: 'Ошибка в токене авторизации или он истек' });
+    }
     req.user = user as JwtPayload;
     next();
   });

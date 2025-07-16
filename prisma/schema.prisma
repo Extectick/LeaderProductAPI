@@ -74,6 +74,9 @@ model User {
   passwordHash       String
   isActive           Boolean             @default(false)
   roleId             Int 
+  firstName          String?             // Имя
+  lastName           String?             // Фамилия
+  middleName         String?             // Отчество
   phone              String?             // Телефон пользователя
   avatarUrl          String?             // Ссылка на аватар пользователя
   deletedAt          DateTime?           // Для soft delete

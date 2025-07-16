@@ -11,6 +11,8 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || 'yourrefreshtokensecret';
 const accessTokenLife = '15m';
 const refreshTokenLife = '14d';
+// Максимальное количество попыток для входа и после блокировка + 1 количество
+const MAX_FAILED_LOGIN_ATTEMPTS = 19;
 
 // Helper to generate tokens
 function generateAccessToken(user: any) {
@@ -132,34 +134,124 @@ router.post('/register', async (req, res) => {
 
 // Login endpoint
 router.post('/login', async (req, res) => {
-
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ message: 'Требуется email и пароль' });
 
   try {
     const user = await prisma.user.findUnique({
       where: { email },
-      include: { role: { include: { permissions: true } } },
+      include: { 
+        role: { include: { permissions: true } },
+        loginAttempts: {
+          orderBy: { createdAt: 'desc' },
+          take: 5
+        },
+        clientProfile: true,
+        supplierProfile: true,
+        employeeProfile: true
+      },
     });
+    
     if (!user) {
       console.error(`Пользователь с email ${email} не найден`);
       return res.status(401).json({ message: 'Неверные учетные данные' });
     }
+
+    // Проверка блокировки основного пользователя
+    if (user.profileStatus === 'BLOCKED') {
+      console.error(`Пользователь с email ${email} заблокирован`);
+      return res.status(403).json({ message: 'Ваш аккаунт заблокирован. Обратитесь в поддержку.' });
+    }
+
+    // Проверка активации аккаунта
     if (!user.isActive) {
       console.error(`Пользователь с email ${email} не активирован`);
-      return res.status(403).json({ message: 'Аккаунт не активирован' });
+      return res.status(403).json({ message: 'Аккаунт не активирован. Пожалуйста, подтвердите email.' });
+    }
+
+    // Проверка блокировки профиля в зависимости от типа профиля
+    let activeProfileStatus;
+    switch (user.currentProfileType) {
+      case 'CLIENT':
+        activeProfileStatus = user.clientProfile?.status;
+        break;
+      case 'SUPPLIER':
+        activeProfileStatus = user.supplierProfile?.status;
+        break;
+      case 'EMPLOYEE':
+        activeProfileStatus = user.employeeProfile?.status;
+        break;
+      default:
+        // Если тип профиля не установлен, считаем его активным
+        activeProfileStatus = 'ACTIVE';
+    }
+
+    if (activeProfileStatus === 'BLOCKED') {
+      console.error(`Профиль пользователя с email ${email} заблокирован`);
+      return res.status(403).json({ message: 'Ваш профиль заблокирован. Обратитесь в поддержку.' });
     }
 
     const validPassword = await bcrypt.compare(password, user.passwordHash);
     if (!validPassword) {
       console.error(`Неверный пароль для пользователя с email ${email}`);
+      
+      // Записываем неудачную попытку входа
+      await prisma.loginAttempt.create({
+        data: {
+          userId: user.id,
+          success: false,
+          ip: req.ip
+        }
+      });
+      
+      // Проверяем количество неудачных попыток
+      const failedAttempts = user.loginAttempts.filter(a => !a.success).length;
+      if (failedAttempts >= MAX_FAILED_LOGIN_ATTEMPTS) { // 5 попыток (текущая + 4 предыдущих)
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { profileStatus: 'BLOCKED' }
+        });
+        
+        // Записываем в аудит-лог
+        await prisma.auditLog.create({
+          data: {
+            userId: user.id,
+            action: 'OTHER',
+            targetType: 'USER',
+            targetId: user.id,
+            details: 'Автоматическая блокировка из-за множества неудачных попыток входа'
+          }
+        });
+        
+        return res.status(403).json({ message: 'Слишком много неудачных попыток. Ваш аккаунт заблокирован.' });
+      }
+      
       return res.status(401).json({ message: 'Неверные учетные данные' });
     }
 
-    // TODO: check login attempts and block if necessary
-
+    // Если пароль верный, создаем токены
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
+
+    // Записываем успешную попытку входа
+    await prisma.loginAttempt.create({
+      data: {
+        userId: user.id,
+        success: true,
+        ip: req.ip
+      }
+    });
+
+    // Записываем в аудит-лог
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: 'LOGIN',
+        targetType: 'USER',
+        targetId: user.id,
+        details: 'Успешный вход в систему'
+      }
+    });
 
     // Store refresh token in DB
     await prisma.refreshToken.create({
@@ -231,7 +323,9 @@ router.post('/token', async (req, res) => {
 
 // Logout endpoint (revoke refresh token)
 router.post('/logout', authenticateToken, async (req: AuthRequest, res) => {
+  
   const { refreshToken } = req.body;
+  // console.log(refreshToken)
   if (!refreshToken) return res.status(400).json({ message: 'Refresh token required' });
 
   try {

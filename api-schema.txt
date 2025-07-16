@@ -1,88 +1,366 @@
-# API Документация
+# API Schema Description
 
-## POST /register
-- Описание: Регистрация нового пользователя.
-- Тело запроса:
-  ```json
-  {
-    "email": "string",       // Email пользователя (обязательный)
-    "password": "string"     // Пароль пользователя (обязательный, минимум 6 символов)
+## User Profile Endpoints
+
+### GET /users/profile
+Получение информации о профиле текущего пользователя.
+
+**Запрос:**
+```
+GET /users/profile
+Authorization: Bearer <JWT_TOKEN>
+```
+
+**Пример ответа (200 OK):**
+```json
+{
+  "profile": {
+    "id": 1,
+    "email": "user@example.com",
+    "isActive": true,
+    "createdAt": "2025-07-16T10:00:00Z",
+    "updatedAt": "2025-07-16T10:00:00Z",
+    "phone": "+79001234567",
+    "avatarUrl": "https://example.com/avatar.jpg",
+    "profileStatus": "ACTIVE",
+    "currentProfileType": "EMPLOYEE",
+    "role": {
+      "id": 2,
+      "name": "user"
+    },
+    "departmentRoles": [
+      {
+        "department": {
+          "id": 1,
+          "name": "IT"
+        },
+        "role": {
+          "id": 3,
+          "name": "department_manager"
+        }
+      }
+    ],
+    "employeeProfile": {
+      "id": 1,
+      "phone": "+79001234567",
+      "status": "ACTIVE",
+      "department": {
+        "id": 1,
+        "name": "IT"
+      },
+      "departmentRoles": [
+        {
+          "id": 1,
+          "role": {
+            "id": 3,
+            "name": "department_manager"
+          }
+        }
+      ],
+      "createdAt": "2025-07-16T10:00:00Z",
+      "updatedAt": "2025-07-16T10:00:00Z"
+    }
   }
-  ```
-- Ответ:
-  - 201 Created: Пользователь зарегистрирован, требуется подтверждение email.
-  - 400 Bad Request: Неверный формат email или пароль слишком короткий.
-  - 409 Conflict: Пользователь с таким email уже существует.
-  - 429 Too Many Requests: Код подтверждения был отправлен недавно, повторная отправка невозможна.
-  - 500 Internal Server Error: Ошибка сервера.
+}
+```
 
-## POST /login
-- Описание: Вход пользователя в систему.
-- Тело запроса:
-  ```json
-  {
-    "email": "string",       // Email пользователя (обязательный)
-    "password": "string"     // Пароль пользователя (обязательный)
+**Пример ошибки (401 Unauthorized):**
+```json
+{
+  "message": "Требуется аутентификация"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка получения профиля",
+  "error": "Детали ошибки"
+}
+```
+
+### PUT /users/me/department
+Обновление отдела текущего пользователя.
+
+**Пример запроса:**
+```json
+{
+  "departmentId": 2
+}
+```
+
+**Пример успешного ответа (200 OK):**
+```json
+{
+  "message": "Отдел пользователя обновлен"
+}
+```
+
+**Пример ошибки (400 Bad Request):**
+```json
+{
+  "message": "ID отдела обязателен"
+}
+```
+
+**Пример ошибки (404 Not Found):**
+```json
+{
+  "message": "Отдел не найден"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка обновления отдела",
+  "error": "Детали ошибки"
+}
+```
+
+### PUT /users/:userId/department
+Обновление отдела пользователя администратором.
+
+**Пример запроса:**
+```json
+{
+  "departmentId": 3
+}
+```
+
+**Пример успешного ответа (200 OK):**
+```json
+{
+  "message": "Отдел пользователя 5 обновлен"
+}
+```
+
+**Пример ошибки (400 Bad Request):**
+```json
+{
+  "message": "ID отдела обязателен"
+}
+```
+
+**Пример ошибки (404 Not Found):**
+```json
+{
+  "message": "Отдел не найден"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка обновления отдела",
+  "error": "Детали ошибки"
+}
+```
+
+### POST /users/:userId/department/:departmentId/manager
+Назначение пользователя начальником отдела.
+
+**Пример запроса:**
+```
+POST /users/5/department/2/manager
+Authorization: Bearer <ADMIN_JWT_TOKEN>
+```
+
+**Пример успешного ответа (200 OK):**
+```json
+{
+  "message": "Пользователь 5 назначен менеджером отдела 2"
+}
+```
+
+**Пример ошибки (404 Not Found):**
+```json
+{
+  "message": "Пользователь не найден"
+}
+```
+
+**Или:**
+```json
+{
+  "message": "Отдел не найден"
+}
+```
+
+**Или:**
+```json
+{
+  "message": "Роль \"менеджер отдела\" не найдена"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка назначения менеджера отдела",
+  "error": "Детали ошибки"
+}
+```
+
+### POST /users/profiles/client
+Создание клиентского профиля.
+
+**Пример запроса:**
+```json
+{
+  "firstName": "Иван",
+  "lastName": "Иванов",
+  "middleName": "Иванович",
+  "phone": "+79001234567",
+  "address": {
+    "street": "ул. Примерная",
+    "city": "Москва",
+    "state": "Московская область",
+    "postalCode": "123456",
+    "country": "Россия"
   }
-  ```
-- Ответ:
-  - 200 OK: Возвращает `accessToken` и `refreshToken`.
-  - 400 Bad Request: Отсутствует email или пароль.
-  - 401 Unauthorized: Неверные учетные данные.
-  - 403 Forbidden: Аккаунт не активирован.
-  - 500 Internal Server Error: Ошибка сервера.
+}
+```
 
-## POST /token
-- Описание: Обновление accessToken с использованием refreshToken.
-- Тело запроса:
-  ```json
-  {
-    "refreshToken": "string"  // Токен обновления (обязательный)
+**Пример успешного ответа (201 Created):**
+```json
+{
+  "id": 1,
+  "userId": 5,
+  "phone": "+79001234567",
+  "status": "ACTIVE",
+  "createdAt": "2025-07-16T10:00:00Z",
+  "updatedAt": "2025-07-16T10:00:00Z"
+}
+```
+
+**Пример ошибки (400 Bad Request):**
+```json
+{
+  "message": "Клиентский профиль уже существует"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка создания клиентского профиля",
+  "error": "Детали ошибки"
+}
+```
+
+### POST /users/profiles/supplier
+Создание профиля поставщика.
+
+**Пример запроса:**
+```json
+{
+  "firstName": "Петр",
+  "lastName": "Петров",
+  "middleName": "Петрович",
+  "phone": "+79007654321",
+  "address": {
+    "street": "ул. Тестовая",
+    "city": "Санкт-Петербург",
+    "state": "Ленинградская область",
+    "postalCode": "654321",
+    "country": "Россия"
   }
-  ```
-- Ответ:
-  - 200 OK: Возвращает новые `accessToken` и `refreshToken`.
-  - 400 Bad Request: Отсутствует refreshToken.
-  - 403 Forbidden: Неверный или просроченный refreshToken.
-  - 500 Internal Server Error: Ошибка сервера.
+}
+```
 
-## POST /logout
-- Описание: Выход пользователя, отзыв refreshToken.
-- Заголовки:
-  - Authorization: Bearer `<accessToken>`
-- Тело запроса:
-  ```json
-  {
-    "refreshToken": "string"  // Токен обновления для отзыва (обязательный)
-  }
-  ```
-- Ответ:
-  - 200 OK: Успешный выход.
-  - 400 Bad Request: Отсутствует refreshToken.
-  - 500 Internal Server Error: Ошибка сервера.
+**Пример успешного ответа (201 Created):**
+```json
+{
+  "id": 2,
+  "userId": 6,
+  "phone": "+79007654321",
+  "status": "ACTIVE",
+  "createdAt": "2025-07-16T10:00:00Z",
+  "updatedAt": "2025-07-16T10:00:00Z"
+}
+```
 
-## POST /verify
-- Описание: Подтверждение email и активация аккаунта.
-- Тело запроса:
-  ```json
-  {
-    "email": "string",   // Email пользователя (обязательный)
-    "code": "string"     // Код подтверждения (обязательный)
-  }
-  ```
-- Ответ:
-  - 200 OK: Аккаунт подтвержден и активирован, возвращает `accessToken` и `refreshToken`.
-  - 400 Bad Request: Неверный или просроченный код подтверждения.
-  - 404 Not Found: Пользователь не найден.
-  - 429 Too Many Requests: Превышено максимальное количество попыток подтверждения.
-  - 500 Internal Server Error: Ошибка сервера.
+**Пример ошибки (400 Bad Request):**
+```json
+{
+  "message": "Профиль поставщика уже существует"
+}
+```
 
-## GET /profile
-- Описание: Получение информации о профиле текущего авторизованного пользователя.
-- Заголовки:
-  - Authorization: Bearer `<accessToken>`
-- Ответ:
-  - 200 OK: Возвращает данные профиля пользователя, включая email, статус активации, дату создания и обновления, роль и отдел.
-  - 401 Unauthorized: Отсутствует или неверный токен авторизации.
-  - 404 Not Found: Пользователь не найден.
-  - 500 Internal Server Error: Ошибка сервера.
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка создания профиля поставщика",
+  "error": "Детали ошибки"
+}
+```
+
+### POST /users/profiles/employee
+Создание профиля сотрудника.
+
+**Пример запроса:**
+```json
+{
+  "firstName": "Сергей",
+  "lastName": "Сергеев",
+  "middleName": "Сергеевич",
+  "phone": "+79009876543",
+  "departmentId": 1
+}
+```
+
+**Пример успешного ответа (201 Created):**
+```json
+{
+  "id": 3,
+  "userId": 7,
+  "phone": "+79009876543",
+  "status": "ACTIVE",
+  "departmentId": 1,
+  "createdAt": "2025-07-16T10:00:00Z",
+  "updatedAt": "2025-07-16T10:00:00Z"
+}
+```
+
+**Пример ошибки (400 Bad Request):**
+```json
+{
+  "message": "Обязательные поля: имя, фамилия и ID отдела"
+}
+```
+
+**Или:**
+```json
+{
+  "message": "Профиль сотрудника уже существует"
+}
+```
+
+**Пример ошибки (404 Not Found):**
+```json
+{
+  "message": "Отдел не найден"
+}
+```
+
+**Пример ошибки (500 Internal Server Error):**
+```json
+{
+  "message": "Ошибка создания профиля сотрудника",
+  "error": "Детали ошибки"
+}
+```
+
+## Audit Logging Middleware
+
+- Логирует действия пользователей с типами действий, соответствующими enum ActionType:
+  CREATE, UPDATE, DELETE, LOGIN, LOGOUT, PASSWORD_RESET, EMAIL_VERIFICATION, OTHER.
+
+- Лог содержит информацию о пользователе, типе действия, целевом объекте, а также детали HTTP запроса.
+
+## Примечания
+
+- В схеме данных используется поле currentProfileType в модели User для хранения текущего активного профиля пользователя.
+- Отдел пользователя хранится в модели EmployeeProfile.
+- Все операции с отделами и ролями учитывают новую структуру данных.
