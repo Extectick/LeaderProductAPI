@@ -1,7 +1,8 @@
-
 import express from 'express';
 import { PrismaClient, ProfileType, ProfileStatus } from '@prisma/client';
 import { authenticateToken, authorizeRoles, AuthRequest } from '../middleware/auth';
+import { checkUserStatus } from '../middleware/checkUserStatus';
+import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 
 interface UserProfile {
   id: number;
@@ -74,13 +75,12 @@ interface UserProfile {
     updatedAt: Date;
   };
 }
-import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
 // Обычный пользователь может назначать или изменять только свой отдел
-router.put('/me/department', authenticateToken, auditLog('Пользователь обновил свой отдел'), async (req: AuthRequest, res) => {
+router.put('/me/department', authenticateToken, checkUserStatus, auditLog('Пользователь обновил свой отдел'), async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
     const { departmentId } = req.body;
@@ -89,15 +89,11 @@ router.put('/me/department', authenticateToken, auditLog('Пользовател
       return res.status(400).json({ message: 'ID отдела обязателен' });
     }
 
-    // Проверяем, существует ли отдел
     const department = await prisma.department.findUnique({ where: { id: departmentId } });
     if (!department) {
       return res.status(404).json({ message: 'Отдел не найден' });
     }
 
-
-    // Обновляем отдел пользователя
-    // Теперь отдел связан с EmployeeProfile, обновим там
     await prisma.employeeProfile.updateMany({
       where: { userId: Number(userId) },
       data: { departmentId: Number(departmentId) },
@@ -110,7 +106,7 @@ router.put('/me/department', authenticateToken, auditLog('Пользовател
 });
 
 // Администратор может назначить отдел любому пользователю
-router.put('/:userId/department', authenticateToken, authorizeRoles(['admin']), auditLog('Админ обновил отдел пользователя'), async (req: AuthRequest, res) => {
+router.put('/:userId/department', authenticateToken, checkUserStatus, authorizeRoles(['admin']), auditLog('Админ обновил отдел пользователя'), async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const { departmentId } = req.body;
@@ -119,15 +115,11 @@ router.put('/:userId/department', authenticateToken, authorizeRoles(['admin']), 
       return res.status(400).json({ message: 'ID отдела обязателен' });
     }
 
-    // Проверяем, существует ли отдел
     const department = await prisma.department.findUnique({ where: { id: Number(departmentId) } });
     if (!department) {
       return res.status(404).json({ message: 'Отдел не найден' });
     }
 
-
-    // Обновляем отдел пользователя
-    // Теперь отдел связан с EmployeeProfile, обновим там
     await prisma.employeeProfile.updateMany({
       where: { userId: Number(userId) },
       data: { departmentId: Number(departmentId) },
@@ -139,30 +131,26 @@ router.put('/:userId/department', authenticateToken, authorizeRoles(['admin']), 
   }
 });
 
-// Администратор может назначить пользователя начальником отдела (через DepartmentRole)
-router.post('/:userId/department/:departmentId/manager', authenticateToken, authorizeRoles(['admin']), auditLog('Админ назначил менеджера отдела'), async (req: AuthRequest, res) => {
+// Администратор может назначить пользователя начальником отдела
+router.post('/:userId/department/:departmentId/manager', authenticateToken, checkUserStatus, authorizeRoles(['admin']), auditLog('Админ назначил менеджера отдела'), async (req: AuthRequest, res) => {
   try {
     const { userId, departmentId } = req.params;
 
-    // Проверяем, существует ли отдел
     const department = await prisma.department.findUnique({ where: { id: Number(departmentId) } });
     if (!department) {
       return res.status(404).json({ message: 'Отдел не найден' });
     }
 
-    // Проверяем, существует ли пользователь
     const user = await prisma.user.findUnique({ where: { id: Number(userId) } });
     if (!user) {
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
 
-    // Проверяем, существует ли роль начальника отдела
     const managerRole = await prisma.role.findUnique({ where: { name: 'department_manager' } });
     if (!managerRole) {
       return res.status(404).json({ message: 'Роль "менеджер отдела" не найдена' });
     }
 
-    // Создаем или обновляем запись DepartmentRole
     await prisma.departmentRole.upsert({
       where: {
         userId_roleId_departmentId: {
@@ -185,13 +173,10 @@ router.post('/:userId/department/:departmentId/manager', authenticateToken, auth
   }
 });
 
-
-
-router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
+router.get('/profile', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
 
-    // Получаем базовую информацию о пользователе
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -289,18 +274,16 @@ router.get('/profile', authenticateToken, async (req: AuthRequest, res) => {
 });
 
 // Создание клиентского профиля
-router.post('/profiles/client', authenticateToken, async (req: AuthRequest, res) => {
+router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
     const { firstName, lastName, middleName, phone, address } = req.body;
 
-    // Проверяем, что профиль еще не создан
     const existingProfile = await prisma.clientProfile.findUnique({ where: { userId } });
     if (existingProfile) {
       return res.status(400).json({ message: 'Клиентский профиль уже существует' });
     }
 
-    // Создаем профиль
     const profile = await prisma.clientProfile.create({
       data: {
         userId,
@@ -319,7 +302,6 @@ router.post('/profiles/client', authenticateToken, async (req: AuthRequest, res)
       }
     });
 
-    // Обновляем ФИО пользователя, если передано
     await prisma.user.update({
       where: { id: userId },
       data: { 
@@ -335,7 +317,7 @@ router.post('/profiles/client', authenticateToken, async (req: AuthRequest, res)
 });
 
 // Создание профиля поставщика
-router.post('/profiles/supplier', authenticateToken, async (req: AuthRequest, res) => {
+router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
     const { firstName, lastName, middleName, phone, address } = req.body;
@@ -378,7 +360,7 @@ router.post('/profiles/supplier', authenticateToken, async (req: AuthRequest, re
 });
 
 // Создание профиля сотрудника
-router.post('/profiles/employee', authenticateToken, async (req: AuthRequest, res) => {
+router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
     const { firstName, lastName, middleName, phone, departmentId } = req.body;
@@ -392,7 +374,6 @@ router.post('/profiles/employee', authenticateToken, async (req: AuthRequest, re
       return res.status(400).json({ message: 'Профиль сотрудника уже существует' });
     }
 
-    // Проверяем существование отдела
     const department = await prisma.department.findUnique({ where: { id: departmentId } });
     if (!department) {
       return res.status(404).json({ message: 'Отдел не найден' });
@@ -406,7 +387,6 @@ router.post('/profiles/employee', authenticateToken, async (req: AuthRequest, re
       }
     });
 
-    // Обновляем ФИО и тип профиля
     await prisma.user.update({
       where: { id: userId },
       data: { firstName, lastName, middleName, currentProfileType: 'EMPLOYEE' }

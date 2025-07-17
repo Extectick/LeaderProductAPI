@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
+import { ProfileStatus } from '@prisma/client';
+
 interface JwtPayload {
   userId: number;
   role: string;
   permissions: string[];
+  profileStatus: ProfileStatus;
   iat: number;
   exp: number;
 }
