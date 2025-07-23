@@ -4,8 +4,13 @@ import morgan from 'morgan';
 
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
+import cors from 'cors';
 
 const app = express();
+app.use(cors({
+  origin: 'http://localhost:8081',
+  credentials: true,
+}));
 
 const databaseUrl = process.env.NODE_ENV === 'development' ? process.env.DATABASE_URL_DEV : process.env.DATABASE_URL;
 const prisma = new PrismaClient({

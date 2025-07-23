@@ -39,7 +39,6 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
 
   jwt.verify(token, accessTokenSecret, (err: any, user: any) => {
     if (err) {
-      console.error('JWT verification error:', err);
       return res.status(403).json({ message: 'Ошибка в токене авторизации или он истек' });
     }
     req.user = user as JwtPayload;
