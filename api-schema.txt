@@ -2,6 +2,9 @@
 
 ## User Profile Endpoints
 
+
+
+
 ### GET /users/profile
 Получение информации о профиле текущего пользователя.
 

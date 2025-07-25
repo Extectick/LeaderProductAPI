@@ -156,7 +156,7 @@ router.post('/login', async (req, res) => {
         },
         loginAttempts: {
           orderBy: { createdAt: 'desc' },
-          take: 20, // увеличить, чтобы проверять 19+ попыток
+          take: 20,
         },
         clientProfile: true,
         supplierProfile: true,
@@ -173,7 +173,7 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    if (!user.isActive) {
+    if (!user.isActive || user.profileStatus === 'PENDING') {
       return res.status(403).json({
         message: 'Аккаунт не активирован. Пожалуйста, подтвердите email.',
       });
@@ -185,11 +185,9 @@ router.post('/login', async (req, res) => {
         data: { userId: user.id, success: false, ip: req.ip },
       });
 
-      // Считаем все неудачные попытки в последних 20 (take:20)
       const failedAttemptsCount = (user.loginAttempts ?? []).filter((a) => !a.success).length;
-      
+
       if (failedAttemptsCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
-        // Блокируем пользователя
         await prisma.user.update({
           where: { id: user.id },
           data: { profileStatus: 'BLOCKED' },
@@ -213,24 +211,26 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Неверные учетные данные' });
     }
 
-    // Проверка активного профиля
+    // Определяем активный профиль по типу
     const profileType = user.currentProfileType;
-    let activeProfile = null;
 
+    // Проверяем наличие профилей
+    const hasAnyProfile =
+      user.clientProfile !== null ||
+      user.supplierProfile !== null ||
+      user.employeeProfile !== null;
+
+    // Определяем активный профиль, если есть
+    let activeProfile = null;
     if (profileType === 'CLIENT') activeProfile = user.clientProfile;
     else if (profileType === 'SUPPLIER') activeProfile = user.supplierProfile;
     else if (profileType === 'EMPLOYEE') activeProfile = user.employeeProfile;
 
-    if (!profileType || !activeProfile) {
-      return res
-        .status(400)
-        .json({ message: 'Активный профиль не установлен или не найден' });
-    }
-
-    if (activeProfile.status === 'BLOCKED') {
-      return res
-        .status(403)
-        .json({ message: 'Ваш профиль заблокирован. Обратитесь в поддержку.' });
+    // Если активный профиль есть и он заблокирован — блокируем вход
+    if (activeProfile?.status === 'BLOCKED') {
+      return res.status(403).json({
+        message: 'Ваш профиль заблокирован. Обратитесь в поддержку.',
+      });
     }
 
     const accessToken = generateAccessToken(user);
@@ -258,27 +258,33 @@ router.post('/login', async (req, res) => {
       },
     });
 
+    // Формируем профиль для ответа:
+    // если профилей нет — profile: null
+    // если есть — вернуть сами профили (client, supplier, employee),
+    // и profileData — активный профиль или null
+
+    const profileResponse = hasAnyProfile
+      ? {
+          clientProfile: user.clientProfile,
+          supplierProfile: user.supplierProfile,
+          employeeProfile: user.employeeProfile,
+          currentProfileType: profileType ?? null,
+          profileData: activeProfile ?? null,
+        }
+      : null;
+
     res.json({
       accessToken,
       refreshToken,
-      profile: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        currentProfileType: user.currentProfileType,
-        role: {
-          name: user.role.name,
-          permissions: user.role.permissions.map((p) => p.permission.name),
-        },
-        profileData: activeProfile,
-      },
+      profile: profileResponse,
     });
   } catch (error) {
     console.error('Ошибка при входе:', error);
     res.status(500).json({ message: 'Ошибка входа' });
   }
 });
+
+
 
 router.post('/token', async (req, res) => {
   const { refreshToken } = req.body;
