@@ -398,4 +398,22 @@ router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req
   }
 });
 
+router.get('/departments', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const departments = await prisma.department.findMany({
+      select: {
+        id: true,
+        name: true
+      },
+      orderBy: {
+        name: 'asc'
+      }
+    });
+
+    res.json(departments);
+  } catch (error) {
+    res.status(500).json({ message: 'Ошибка получения списка отделов', error });
+  }
+});
+
 export default router;
