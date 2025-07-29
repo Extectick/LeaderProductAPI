@@ -4,23 +4,66 @@ import { authenticateToken, authorizeRoles, AuthRequest } from '../middleware/au
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 import { customAlphabet } from 'nanoid';
+import geoip from 'geoip-lite';
+import { validateQRData } from '../utils/validateQRData';
+
+const validator = require('validator');
+const UAParser = require('ua-parser-js');
+
+
 
 const router = express.Router();
 const prisma = new PrismaClient();
 const generateShortId = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 8);
 
-// Generate qr code
+// Создание нового QR-кода
 router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
-    const { qrData, description } = req.body;
+    let { qrData, description, qrType } = req.body;
     const userId = req.user?.userId;
 
-    if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+    if (!userId) return res.status(401).json({ message: 'Не авторизован' });
+
+    if (qrData === undefined || qrData === null) {
+      return res.status(400).json({ message: 'Поле qrData обязательно' });
     }
 
-    if (!qrData) {
-      return res.status(400).json({ message: "Поле qrData обязательно" });
+    const allowedTypes = ['PHONE', 'LINK', 'EMAIL', 'TEXT', 'WHATSAPP', 'TELEGRAM', 'CONTACT'];
+    if (!qrType || !allowedTypes.includes(qrType)) {
+      return res.status(400).json({ message: 'Неверный тип qrType' });
+    }
+
+    // Если qrData — объект, сериализуем в JSON-строку (например для CONTACT)
+    if (typeof qrData === 'object') {
+      qrData = JSON.stringify(qrData);
+    } else if (typeof qrData !== 'string') {
+      return res.status(400).json({ message: 'qrData должен быть строкой или объектом' });
+    }
+
+    // Валидация qrData (строки)
+    const validationError = validateQRData(qrType, qrData);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
+
+    // Дальше для PHONE и WHATSAPP — нормализуем номер (начинается с + и max 12 символов)
+    let normalizedQRData = qrData;
+    if (qrType === 'PHONE' || qrType === 'WHATSAPP') {
+      // Убираем всё кроме цифр и плюс
+      let cleaned = normalizedQRData.replace(/[^\d+]/g, '');
+
+      if (!cleaned.startsWith('+')) {
+        cleaned = '+' + cleaned.replace(/[^\d]/g, '');
+      }
+
+      normalizedQRData = cleaned.slice(0, 12);
+    }
+
+    // Для TELEGRAM — должно начинаться с @
+    if (qrType === 'TELEGRAM') {
+      if (!normalizedQRData.startsWith('@')) {
+        normalizedQRData = '@' + normalizedQRData;
+      }
     }
 
     const generatedId = generateShortId();
@@ -28,27 +71,28 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
     const newQR = await prisma.qRList.create({
       data: {
         id: generatedId,
-        qrData,
+        qrData: normalizedQRData,
         description: description || null,
+        qrType,
         createdById: userId,
-        status: 'ACTIVE' // Устанавливаем статус по умолчанию
+        status: 'ACTIVE',
       },
       select: {
         id: true,
         qrData: true,
+        qrType: true,
         description: true,
         status: true,
-        createdAt: true
-      }
+        createdAt: true,
+      },
     });
 
     return res.status(201).json(newQR);
-
   } catch (error) {
     console.error('Ошибка создания QR кода:', error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       message: 'Ошибка создания QR кода',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
+      error: error instanceof Error ? error.message : 'Неизвестная ошибка',
     });
   }
 });
@@ -391,50 +435,133 @@ router.get('/export', authenticateToken, checkUserStatus, async (req: AuthReques
   }
 });
 
-// Трекинг сканирований (публичный эндпоинт)
-router.post('/:id/scan', async (req, res) => {
+
+function generateVCard(contact: Record<string, any>): string {
+  const escapeValue = (value: string) =>
+    value.replace(/\n/g, '\\n').replace(/,/g, '\\,');
+
+  let vCard = 'BEGIN:VCARD\nVERSION:3.0\n';
+
+  if (contact.name) vCard += `FN:${escapeValue(contact.name)}\n`;
+  if (contact.phone) vCard += `TEL:${escapeValue(contact.phone)}\n`;
+  if (contact.email) vCard += `EMAIL:${escapeValue(contact.email)}\n`;
+  if (contact.org) vCard += `ORG:${escapeValue(contact.org)}\n`;
+  if (contact.title) vCard += `TITLE:${escapeValue(contact.title)}\n`;
+  if (contact.address) vCard += `ADR:${escapeValue(contact.address)}\n`;
+  if (contact.url) vCard += `URL:${escapeValue(contact.url)}\n`;
+  if (contact.note) vCard += `NOTE:${escapeValue(contact.note)}\n`;
+  if (contact.birthday) vCard += `BDAY:${escapeValue(contact.birthday)}\n`;
+  if (contact.fax) vCard += `FAX:${escapeValue(contact.fax)}\n`;
+  if (contact.photo) vCard += `PHOTO:${escapeValue(contact.photo)}\n`;
+
+  vCard += 'END:VCARD';
+
+  return vCard;
+}
+
+// Публичный маршрут сканирования QR
+router.get('/:id/scan', async (req, res) => {
   try {
     const { id } = req.params;
-    const { device, browser } = req.body;
-    const ip = req.ip;
-    
-    // Определяем геолокацию по IP (в реальной реализации нужно использовать сервис геолокации)
-    const location = ip === '::1' ? 'localhost' : ip;
 
-    // Проверяем существование QR кода
-    const qrExists = await prisma.qRList.count({
-      where: { 
-        id,
-        status: 'ACTIVE' // Только активные QR коды
-      }
+    const ip =
+      req.headers['x-forwarded-for']?.toString().split(',')[0] ||
+      req.socket.remoteAddress ||
+      req.ip;
+
+    const geo = geoip.lookup(ip || '');
+    const location = geo
+      ? `${geo.city || 'Unknown City'}, ${geo.country || 'Unknown Country'}`
+      : 'Unknown';
+
+    const userAgent = req.headers['user-agent'] || '';
+    const parser = new UAParser();
+    parser.setUA(userAgent);
+    const result = parser.getResult();
+
+    const device = result.device.type || 'desktop';
+    const browser = `${result.browser.name || 'unknown'} ${
+      result.browser.version || ''
+    }`.trim();
+
+    const qr = await prisma.qRList.findFirst({
+      where: { id, status: 'ACTIVE' },
     });
+    if (!qr) return res.status(404).json({ message: 'QR код не найден или неактивен' });
 
-    if (!qrExists) {
-      return res.status(404).json({ message: "QR код не найден или неактивен" });
-    }
-
-    // Фиксируем сканирование
     await prisma.qRAnalytic.create({
       data: {
         qrListId: id,
         ip,
         location,
-        device: device || 'Unknown',
-        browser: browser || 'Unknown',
-        scanDuration: 0 // В реальной реализации можно передавать время сканирования
-      }
+        device,
+        browser,
+        scanDuration: 0,
+      },
     });
 
-    return res.status(200).json({ success: true });
+    // Универсальная обработка по типу
+    switch (qr.qrType) {
+      case 'PHONE': {
+        let phone = qr.qrData.trim();
+        if (!phone.startsWith('+')) {
+          phone = `+${phone}`;
+        }
+        return res.redirect(`tel:${phone}`);
+      }
 
+      case 'EMAIL':
+        return res.redirect(`mailto:${qr.qrData}`);
+
+      case 'WHATSAPP': {
+        let number = qr.qrData.replace(/\D/g, '');
+        if (!number.startsWith('+')) {
+          number = `+${number}`;
+        }
+        return res.redirect(`https://wa.me/${number}`);
+      }
+
+      case 'TELEGRAM': {
+        let username = qr.qrData.trim();
+        if (username.startsWith('@')) {
+          username = username.slice(1);
+        }
+        return res.redirect(`https://t.me/${username}`);
+      }
+
+      case 'LINK': {
+        const url =
+          qr.qrData.startsWith('http://') || qr.qrData.startsWith('https://')
+            ? qr.qrData
+            : `https://${qr.qrData}`;
+        return res.redirect(url);
+      }
+
+      case 'CONTACT': {
+        try {
+          const contact = JSON.parse(qr.qrData);
+          const vCard = generateVCard(contact);
+          res.setHeader('Content-Disposition', 'attachment; filename=contact.vcf');
+          res.setHeader('Content-Type', 'text/vcard; charset=utf-8');
+          return res.send(vCard);
+        } catch {
+          return res.status(400).json({ message: 'Неверный формат контакта' });
+        }
+      }
+
+      case 'TEXT':
+      default:
+        return res.send(`<html><body><h1>${qr.qrData}</h1></body></html>`);
+    }
   } catch (error) {
     console.error('Ошибка трекинга сканирования:', error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       message: 'Ошибка трекинга сканирования',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
+      error: error instanceof Error ? error.message : 'Неизвестная ошибка',
     });
   }
 });
+
 
 // Общая статистика
 router.get('/stats', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {

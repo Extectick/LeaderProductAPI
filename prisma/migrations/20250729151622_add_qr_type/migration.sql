@@ -1,0 +1,5 @@
+-- CreateEnum
+CREATE TYPE "QRType" AS ENUM ('PHONE', 'LINK', 'EMAIL', 'TEXT', 'WHATSAPP', 'CONTACT');
+
+-- AlterTable
+ALTER TABLE "QRList" ADD COLUMN     "qrType" "QRType" NOT NULL DEFAULT 'TEXT';

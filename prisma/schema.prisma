@@ -233,6 +233,17 @@ enum QRStatus {
   DELETED
 }
 
+enum QRType {
+  PHONE
+  LINK
+  EMAIL
+  TEXT
+  WHATSAPP
+  CONTACT
+  TELEGRAM
+}
+
+
 model QRList {
   id          String      @id
   createdAt   DateTime    @default(now())
@@ -241,6 +252,7 @@ model QRList {
   createdBy   User        @relation(fields: [createdById], references: [id])
   createdById Int
   qrData      String
+  qrType      QRType      @default(TEXT)
   description String?
   analytics   QRAnalytic[]
 }

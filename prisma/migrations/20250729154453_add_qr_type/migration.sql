@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "QRType" ADD VALUE 'TELEGRAM';
