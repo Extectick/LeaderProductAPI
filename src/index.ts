@@ -4,6 +4,7 @@ import morgan from 'morgan';
 
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
+import qrRouter from './routes/qr';
 import cors from 'cors';
 
 const app = express();
@@ -28,7 +29,7 @@ app.use(express.json());
 
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);
-
+app.use('/qr', qrRouter)
 app.get('/', async (req, res) => {
   try {
     // Simple test query to check DB connection

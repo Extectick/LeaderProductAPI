@@ -22,7 +22,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@prisma/client": "^6.11.1",
+    "@prisma/client": "^6.13.0",
     "@prisma/studio": "^0.511.0",
     "@types/bcrypt": "^5.0.2",
     "@types/bcryptjs": "^2.4.6",
@@ -35,6 +35,7 @@
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
+    "nanoid": "^5.1.5",
     "nodemailer": "^7.0.5",
     "pg": "^8.16.3",
     "prisma": "^6.11.1",
