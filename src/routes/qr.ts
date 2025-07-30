@@ -6,6 +6,7 @@ import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 import { customAlphabet } from 'nanoid';
 import geoip from 'geoip-lite';
 import { validateQRData } from '../utils/validateQRData';
+import { generateQRCode } from '../services/qrService';
 
 const validator = require('validator');
 const UAParser = require('ua-parser-js');
@@ -33,21 +34,43 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
       return res.status(400).json({ message: 'Неверный тип qrType' });
     }
 
-    // Если qrData — объект, сериализуем в JSON-строку (например для CONTACT)
-    if (typeof qrData === 'object') {
-      qrData = JSON.stringify(qrData);
-    } else if (typeof qrData !== 'string') {
-      return res.status(400).json({ message: 'qrData должен быть строкой или объектом' });
-    }
+    let normalizedQRData = qrData;
 
-    // Валидация qrData (строки)
-    const validationError = validateQRData(qrType, qrData);
-    if (validationError) {
-      return res.status(400).json({ message: validationError });
+    // Обработка CONTACT типа
+    if (qrType === 'CONTACT') {
+      // Если qrData уже в формате VCARD
+      if (typeof qrData === 'string' && qrData.startsWith('BEGIN:VCARD')) {
+        normalizedQRData = qrData;
+      } 
+      // Если qrData - объект или JSON строка
+      else {
+        try {
+          const contactData = typeof qrData === 'string' ? JSON.parse(qrData) : qrData;
+          normalizedQRData = generateVCard(contactData);
+        } catch (error) {
+          return res.status(400).json({ 
+            message: 'Неверный формат контактных данных',
+            details: error instanceof Error ? error.message : 'Ошибка парсинга'
+          });
+        }
+      }
+    } else {
+      // Обработка других типов
+      // Если qrData — объект, сериализуем в JSON-строку
+      if (typeof qrData === 'object') {
+        normalizedQRData = JSON.stringify(qrData);
+      } else if (typeof qrData !== 'string') {
+        return res.status(400).json({ message: 'qrData должен быть строкой или объектом' });
+      }
+
+      // Валидация qrData (строки)
+      const validationError = validateQRData(qrType, normalizedQRData);
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
+      }
     }
 
     // Дальше для PHONE и WHATSAPP — нормализуем номер (начинается с + и max 12 символов)
-    let normalizedQRData = qrData;
     if (qrType === 'PHONE' || qrType === 'WHATSAPP') {
       // Убираем всё кроме цифр и плюс
       let cleaned = normalizedQRData.replace(/[^\d+]/g, '');
@@ -96,6 +119,7 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
     });
   }
 });
+
 
 
 router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
@@ -232,6 +256,15 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res
 router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
+    const { 
+      simple, 
+      width = '300',
+      darkColor = '000000',
+      lightColor = 'ffffff',
+      margin = '1',
+      errorCorrection = 'M'
+    } = req.query;
+    
     const userId = req.user?.userId;
     const isAdmin = req.user?.role === 'ADMIN';
 
@@ -249,10 +282,6 @@ router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, 
             firstName: true,
             lastName: true
           }
-        },
-        analytics: {
-          orderBy: { createdAt: 'desc' },
-          take: 10
         }
       }
     });
@@ -261,12 +290,39 @@ router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, 
       return res.status(404).json({ message: "QR код не найден" });
     }
 
-    // Проверка прав доступа
     if (!isAdmin && qr.createdById !== userId) {
       return res.status(403).json({ message: "Нет прав доступа" });
     }
 
-    return res.status(200).json(qr);
+    // Генерация QR с параметрами или без
+    const options = {
+      width: parseInt(width as string),
+      color: {
+        dark: `#${darkColor}`,
+        light: `#${lightColor}`
+      },
+      margin: parseInt(margin as string),
+      errorCorrectionLevel: errorCorrection as 'L'|'M'|'Q'|'H'
+    };
+
+    const domen = process.env.DOMEN_URL || "http://192.168.30.54:3000/"
+    const urlQR = domen + "qr/" + qr.id + "/scan";
+    const qrImage = await generateQRCode(urlQR, options);
+
+    if (simple === 'true') {
+      return res.status(200).json({ qrImage });
+    }
+
+    return res.status(200).json({
+      id: qr.id,
+      qrData: qr.qrData,
+      qrType: qr.qrType,
+      description: qr.description,
+      status: qr.status,
+      createdAt: qr.createdAt,
+      createdBy: qr.createdBy,
+      qrImage
+    });
 
   } catch (error) {
     console.error('Ошибка получения QR кода:', error);
@@ -539,15 +595,28 @@ router.get('/:id/scan', async (req, res) => {
 
       case 'CONTACT': {
         try {
-          const contact = JSON.parse(qr.qrData);
-          const vCard = generateVCard(contact);
-          res.setHeader('Content-Disposition', 'attachment; filename=contact.vcf');
+          const userAgent = req.headers['user-agent'] || '';
+          const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
+          let vCard = qr.qrData.startsWith('BEGIN:VCARD') 
+            ? qr.qrData 
+            : generateVCard(JSON.parse(qr.qrData));
+          
+          const vCardData = encodeURIComponent(vCard);
+          
+          if (isIOS) {
+          }
+          
           res.setHeader('Content-Type', 'text/vcard; charset=utf-8');
+          res.setHeader('Content-Disposition', 'inline; filename="contact.vcf"');
           return res.send(vCard);
-        } catch {
-          return res.status(400).json({ message: 'Неверный формат контакта' });
+        } catch (error) {
+          return res.status(400).json({ 
+            message: 'Неверный формат контакта',
+            details: error instanceof Error ? error.message : 'Ошибка обработки VCARD'
+          });
         }
       }
+
 
       case 'TEXT':
       default:
