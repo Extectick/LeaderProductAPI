@@ -284,6 +284,9 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
       return res.status(400).json({ message: 'Клиентский профиль уже существует' });
     }
 
+    if (!firstName) {
+      return res.status(400).json({ message: 'Обязательные поля: Имя' });
+    }
     const profile = await prisma.clientProfile.create({
       data: {
         userId,
@@ -310,7 +313,8 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
       }
     });
 
-    res.status(201).json(profile);
+    const userData = await prisma.user.findUnique({ where: { id: userId } });
+    res.status(201).json(userData);
   } catch (error) {
     res.status(500).json({ message: 'Ошибка создания клиентского профиля', error });
   }
@@ -327,6 +331,10 @@ router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req
       return res.status(400).json({ message: 'Профиль поставщика уже существует' });
     }
 
+    if (!firstName) {
+      return res.status(400).json({ message: 'Обязательные поля: Имя' });
+    }
+    
     const profile = await prisma.supplierProfile.create({
       data: {
         userId,
@@ -398,7 +406,7 @@ router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req
   }
 });
 
-router.get('/departments', authenticateToken, async (req: AuthRequest, res) => {
+router.get('/departments', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const departments = await prisma.department.findMany({
       select: {

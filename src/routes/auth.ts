@@ -4,9 +4,13 @@ import jwt, { VerifyErrors } from 'jsonwebtoken';
 import { PrismaClient, User, Role, Permission } from '@prisma/client';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { sendVerificationEmail } from '../services/mailService';
-import crypto from 'crypto';
+import passwordResetRouter from './passwordReset';
+import crypto, { randomUUID } from 'crypto';
 
 const router = express.Router();
+
+router.use(passwordResetRouter);
+
 const prisma = new PrismaClient();
 
 const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
@@ -32,20 +36,28 @@ type UserWithRolePermissions = User & {
 };
 
 function generateAccessToken(user: UserWithRolePermissions) {
-  return jwt.sign(
-    {
-      userId: user.id,
-      role: user.role.name,
-      permissions: user.role.permissions.map((p) => p.permission.name),
-    },
-    accessTokenSecret,
-    { expiresIn: accessTokenLife }
-  );
+  const payload = {
+    userId: user.id,
+    role: user.role.name,
+    permissions: user.role.permissions.map((p) => p.permission.name),
+    iat: Math.floor(Date.now() / 1000),
+  };
+
+  return jwt.sign(payload, accessTokenSecret, {
+    expiresIn: accessTokenLife,
+    algorithm: 'HS256',
+  });
 }
 
 function generateRefreshToken(user: UserWithRolePermissions) {
-  return jwt.sign({ userId: user.id }, refreshTokenSecret, {
+  const payload = {
+    userId: user.id,
+    iat: Math.floor(Date.now() / 1000),
+  };
+
+  return jwt.sign(payload, refreshTokenSecret, {
     expiresIn: refreshTokenLife,
+    algorithm: 'HS256',
   });
 }
 
@@ -91,6 +103,26 @@ async function sendVerificationCodeEmail(userId: number, email: string) {
   await sendVerificationEmail(email, code);
 }
 
+function generateSecureRandomToken(length = 64) {
+  return crypto.randomBytes(length).toString('hex'); // 128-символьный строковый токен
+}
+
+// Функция создания уникального refresh токена с повтором при коллизии
+export async function createUniqueRefreshToken(userId: number): Promise<string> {
+  const jti = randomUUID(); // Гарантирует уникальность
+  const token = jwt.sign({ userId, jti }, refreshTokenSecret, { expiresIn: '30d' });
+
+  await prisma.refreshToken.create({
+    data: {
+      token,
+      userId,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    },
+  });
+
+  return token;
+}
+
 router.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -102,9 +134,7 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'Неверный формат email' });
 
     if (password.length < 6)
-      return res
-        .status(400)
-        .json({ message: 'Пароль должен быть не менее 6 символов' });
+      return res.status(400).json({ message: 'Пароль должен быть не менее 6 символов' });
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
@@ -211,22 +241,17 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Неверные учетные данные' });
     }
 
-    // Определяем активный профиль по типу
     const profileType = user.currentProfileType;
-
-    // Проверяем наличие профилей
     const hasAnyProfile =
       user.clientProfile !== null ||
       user.supplierProfile !== null ||
       user.employeeProfile !== null;
 
-    // Определяем активный профиль, если есть
     let activeProfile = null;
     if (profileType === 'CLIENT') activeProfile = user.clientProfile;
     else if (profileType === 'SUPPLIER') activeProfile = user.supplierProfile;
     else if (profileType === 'EMPLOYEE') activeProfile = user.employeeProfile;
 
-    // Если активный профиль есть и он заблокирован — блокируем вход
     if (activeProfile?.status === 'BLOCKED') {
       return res.status(403).json({
         message: 'Ваш профиль заблокирован. Обратитесь в поддержку.',
@@ -234,7 +259,8 @@ router.post('/login', async (req, res) => {
     }
 
     const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
+    // Создаём refresh токен и сохраняем сразу
+    const refreshToken = await createUniqueRefreshToken(user.id);
 
     await prisma.loginAttempt.create({
       data: { userId: user.id, success: true, ip: req.ip },
@@ -249,19 +275,6 @@ router.post('/login', async (req, res) => {
         details: 'Успешный вход в систему',
       },
     });
-
-    await prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 дней
-      },
-    });
-
-    // Формируем профиль для ответа:
-    // если профилей нет — profile: null
-    // если есть — вернуть сами профили (client, supplier, employee),
-    // и profileData — активный профиль или null
 
     const profileResponse = hasAnyProfile
       ? {
@@ -284,25 +297,33 @@ router.post('/login', async (req, res) => {
   }
 });
 
-
-
 router.post('/token', async (req, res) => {
   const { refreshToken } = req.body;
-  if (!refreshToken)
+
+  if (!refreshToken) {
     return res.status(400).json({ message: 'Требуется refresh токен' });
+  }
+
+  console.log('Получен refreshToken:', refreshToken);
 
   try {
     const storedToken = await prisma.refreshToken.findUnique({
       where: { token: refreshToken },
     });
-    if (!storedToken || storedToken.revoked || storedToken.expiresAt < new Date()) {
-      console.error('Неверный или просроченный refresh токен');
+
+    if (!storedToken) {
+      console.error('Refresh токен не найден в БД');
+      return res.status(403).json({ message: 'Неверный refresh токен' });
+    }
+
+    if (storedToken.revoked || storedToken.expiresAt < new Date()) {
+      console.error('Refresh токен отозван или просрочен');
       return res.status(403).json({ message: 'Неверный или просроченный refresh токен' });
     }
 
     jwt.verify(refreshToken, refreshTokenSecret, async (err: VerifyErrors | null, payload: any) => {
-      if (err) {
-        console.error('Неверный refresh токен');
+      if (err || !payload?.userId) {
+        console.error('Неверный refresh токен:', err?.message || 'payload.userId отсутствует');
         return res.status(403).json({ message: 'Неверный refresh токен' });
       }
 
@@ -324,29 +345,45 @@ router.post('/token', async (req, res) => {
         return res.status(403).json({ message: 'Пользователь не найден' });
       }
 
-      const newAccessToken = generateAccessToken(user as UserWithRolePermissions);
-      const newRefreshToken = generateRefreshToken(user as UserWithRolePermissions);
+      const userWithRole = user as unknown as UserWithRolePermissions;
+      const newAccessToken = generateAccessToken(userWithRole);
 
-      await prisma.refreshToken.update({
-        where: { id: storedToken.id },
-        data: { revoked: true },
-      });
+      try {
+        // Отзываем старый токен и создаём новый
+        await prisma.$transaction(async (tx) => {
+          await tx.refreshToken.update({
+            where: { id: storedToken.id },
+            data: { revoked: true },
+          });
 
-      await prisma.refreshToken.create({
-        data: {
-          token: newRefreshToken,
-          userId: user.id,
-          expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-        },
-      });
+          await createUniqueRefreshToken(user.id); // важное: сюда передаём ID
+        });
 
-      res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
+        // Получаем только что созданный токен
+        const newRefreshToken = await prisma.refreshToken.findFirst({
+          where: { userId: user.id, revoked: false },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (!newRefreshToken) {
+          throw new Error('Не удалось получить новый refresh токен после создания');
+        }
+
+        res.json({
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken.token,
+        });
+      } catch (e) {
+        console.error('Ошибка создания нового refresh токена:', e);
+        res.status(500).json({ message: 'Ошибка обновления токенов' });
+      }
     });
   } catch (error) {
     console.error('Ошибка при обновлении токена:', error);
     res.status(500).json({ message: 'Обновление токена не удалось' });
   }
 });
+
 
 router.post('/logout', authenticateToken, async (req: AuthRequest, res) => {
   const { refreshToken } = req.body;
@@ -424,15 +461,7 @@ router.post('/verify', async (req, res) => {
     }
 
     const accessToken = generateAccessToken(userWithRole as UserWithRolePermissions);
-    const refreshToken = generateRefreshToken(userWithRole as UserWithRolePermissions);
-
-    await prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
+    const refreshToken = await createUniqueRefreshToken(userWithRole.id);
 
     res.json({ message: 'Аккаунт подтвержден и активирован', accessToken, refreshToken });
   } catch (error) {

@@ -21,30 +21,52 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
 
-  // console.log('Authorization header:', authHeader);
-
   if (!authHeader) {
-    return res.status(401).json({ message: 'Требуется токен авторизации' });
+    return res.status(401).json({ message: 'Требуется токен авторизации', code: 'NO_TOKEN' });
   }
 
   const parts = authHeader.split(' ');
 
   if (parts.length !== 2 || parts[0] !== 'Bearer') {
-    return res.status(401).json({ message: 'Неверный формат токена авторизации' });
+    return res.status(401).json({ message: 'Неверный формат токена', code: 'BAD_AUTH_FORMAT' });
   }
 
-  const token = parts[1];
+  const token = parts[1].trim();
 
-  // console.log('Extracted token:', token);
+  if (!token) {
+    return res.status(401).json({ message: 'Токен отсутствует', code: 'EMPTY_TOKEN' });
+  }
 
-  jwt.verify(token, accessTokenSecret, (err: any, user: any) => {
-    if (err) {
-      return res.status(403).json({ message: 'Ошибка в токене авторизации или он истек' });
+  // Проверка символов (только ASCII)
+  if (!/^[\x00-\x7F]*$/.test(token)) {
+    return res.status(401).json({ message: 'Недопустимые символы в токене', code: 'INVALID_CHARS' });
+  }
+
+  // Структура JWT: base64.base64.base64
+  if (!/^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_.+/=]*$/.test(token)) {
+    return res.status(401).json({ message: 'Неверная структура токена', code: 'INVALID_STRUCTURE' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, accessTokenSecret) as JwtPayload;
+
+    if (!decoded?.userId || !decoded?.role) {
+      return res.status(401).json({ message: 'Неверный payload токена', code: 'INVALID_PAYLOAD' });
     }
-    req.user = user as JwtPayload;
+
+    req.user = decoded;
     next();
-  });
+  } catch (err: any) {
+    const isExpired = err?.name === 'TokenExpiredError';
+
+    return res.status(401).json({
+      message: isExpired ? 'Токен просрочен' : 'Недействительный токен',
+      code: isExpired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
 }
+
 
 async function getRoleHierarchy(roleName: string, prisma: any, rolesSet = new Set<string>()): Promise<Set<string>> {
   if (rolesSet.has(roleName)) return rolesSet;
