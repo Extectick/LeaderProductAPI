@@ -277,16 +277,25 @@ router.get('/profile', authenticateToken, checkUserStatus, async (req: AuthReque
 router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
-    const { firstName, lastName, middleName, phone, address } = req.body;
+    const { user, phone, address } = req.body;
+
+    if (!user?.firstName) {
+      return res.status(400).json({ message: 'Обязательное поле: user.firstName' });
+    }
+
+    if (address && (!address.street || !address.city || !address.country)) {
+      return res.status(400).json({ message: 'Если указан адрес, обязательные поля: address.street, address.city, address.country' });
+    }
 
     const existingProfile = await prisma.clientProfile.findUnique({ where: { userId } });
     if (existingProfile) {
-      return res.status(400).json({ message: 'Клиентский профиль уже существует' });
+      console.log(`Conflict: Client profile already exists for user ${userId}`);
+      return res.status(409).json({ 
+        message: 'Клиентский профиль уже существует',
+        code: 'PROFILE_ALREADY_EXISTS'
+      });
     }
 
-    if (!firstName) {
-      return res.status(400).json({ message: 'Обязательные поля: Имя' });
-    }
     const profile = await prisma.clientProfile.create({
       data: {
         userId,
@@ -308,15 +317,21 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
     await prisma.user.update({
       where: { id: userId },
       data: { 
-        ...(firstName || lastName || middleName ? { firstName, lastName, middleName } : {}),
+        firstName: user.firstName,
+        lastName: user.lastName,
+        middleName: user.middleName,
         currentProfileType: 'CLIENT'
       }
     });
 
-    const userData = await prisma.user.findUnique({ where: { id: userId } });
-    res.status(201).json(userData);
+    res.status(201).json(profile);
   } catch (error) {
-    res.status(500).json({ message: 'Ошибка создания клиентского профиля', error });
+    console.error('Error creating client profile:', error);
+    res.status(500).json({ 
+      message: 'Ошибка создания клиентского профиля',
+      error: process.env.NODE_ENV === 'development' ? error : undefined,
+      code: 'INTERNAL_SERVER_ERROR'
+    });
   }
 });
 
@@ -324,17 +339,25 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
 router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
-    const { firstName, lastName, middleName, phone, address } = req.body;
+    const { user, phone, address } = req.body;
+
+    if (!user?.firstName) {
+      return res.status(400).json({ message: 'Обязательное поле: user.firstName' });
+    }
+
+    if (address && (!address.street || !address.city || !address.country)) {
+      return res.status(400).json({ message: 'Если указан адрес, обязательные поля: address.street, address.city, address.country' });
+    }
 
     const existingProfile = await prisma.supplierProfile.findUnique({ where: { userId } });
     if (existingProfile) {
-      return res.status(400).json({ message: 'Профиль поставщика уже существует' });
+      console.log(`Conflict: Supplier profile already exists for user ${userId}`);
+      return res.status(409).json({ 
+        message: 'Профиль поставщика уже существует',
+        code: 'PROFILE_ALREADY_EXISTS'
+      });
     }
 
-    if (!firstName) {
-      return res.status(400).json({ message: 'Обязательные поля: Имя' });
-    }
-    
     const profile = await prisma.supplierProfile.create({
       data: {
         userId,
@@ -356,14 +379,21 @@ router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req
     await prisma.user.update({
       where: { id: userId },
       data: { 
-        ...(firstName || lastName || middleName ? { firstName, lastName, middleName } : {}),
+        firstName: user.firstName,
+        lastName: user.lastName,
+        middleName: user.middleName,
         currentProfileType: 'SUPPLIER'
       }
     });
 
     res.status(201).json(profile);
   } catch (error) {
-    res.status(500).json({ message: 'Ошибка создания профиля поставщика', error });
+    console.error('Error creating supplier profile:', error);
+    res.status(500).json({ 
+      message: 'Ошибка создания профиля поставщика',
+      error: process.env.NODE_ENV === 'development' ? error : undefined,
+      code: 'INTERNAL_SERVER_ERROR'
+    });
   }
 });
 
@@ -371,15 +401,19 @@ router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req
 router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.userId;
-    const { firstName, lastName, middleName, phone, departmentId } = req.body;
+    const { user, phone, departmentId } = req.body;
 
-    if (!firstName || !lastName || !departmentId) {
-      return res.status(400).json({ message: 'Обязательные поля: имя, фамилия и ID отдела' });
+    if (!user?.firstName || !user?.lastName || !departmentId) {
+      return res.status(400).json({ message: 'Обязательные поля: user.firstName, user.lastName и departmentId' });
     }
 
     const existingProfile = await prisma.employeeProfile.findUnique({ where: { userId } });
     if (existingProfile) {
-      return res.status(400).json({ message: 'Профиль сотрудника уже существует' });
+      console.log(`Conflict: Employee profile already exists for user ${userId}`);
+      return res.status(409).json({ 
+        message: 'Профиль сотрудника уже существует',
+        code: 'PROFILE_ALREADY_EXISTS'
+      });
     }
 
     const department = await prisma.department.findUnique({ where: { id: departmentId } });
@@ -397,12 +431,22 @@ router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req
 
     await prisma.user.update({
       where: { id: userId },
-      data: { firstName, lastName, middleName, currentProfileType: 'EMPLOYEE' }
+      data: { 
+        firstName: user.firstName,
+        lastName: user.lastName,
+        middleName: user.middleName,
+        currentProfileType: 'EMPLOYEE' 
+      }
     });
 
     res.status(201).json(profile);
   } catch (error) {
-    res.status(500).json({ message: 'Ошибка создания профиля сотрудника', error });
+    console.error('Error creating employee profile:', error);
+    res.status(500).json({ 
+      message: 'Ошибка создания профиля сотрудника',
+      error: process.env.NODE_ENV === 'development' ? error : undefined,
+      code: 'INTERNAL_SERVER_ERROR'
+    });
   }
 });
 
