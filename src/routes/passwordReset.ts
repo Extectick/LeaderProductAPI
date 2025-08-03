@@ -2,7 +2,8 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
-import { sendVerificationEmail } from '../services/mailService'; // Твой сервис отправки почты
+import { sendVerificationEmail } from '../services/mailService';
+import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -17,7 +18,9 @@ function generateResetCode() {
 router.post('/password-reset/request', async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ message: 'Требуется email' });
+    if (!email) return res.status(400).json(
+      errorResponse('Требуется email', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
@@ -41,7 +44,9 @@ router.post('/password-reset/request', async (req, res) => {
     // Отправляем email с кодом
     await sendVerificationEmail(email, code);
 
-    res.json({ message: 'Если email зарегистрирован, код отправлен' });
+    res.json(
+      successResponse(null, 'Если email зарегистрирован, код отправлен')
+    );
   } catch (error) {
     console.error('Ошибка запроса сброса пароля:', error);
     res.status(500).json({ message: 'Ошибка запроса сброса пароля' });
@@ -51,10 +56,14 @@ router.post('/password-reset/request', async (req, res) => {
 router.post('/password-reset/verify', async (req, res) => {
   try {
     const { email, code } = req.body;
-    if (!email || !code) return res.status(400).json({ message: 'Требуется email и код' });
+    if (!email || !code) return res.status(400).json(
+      errorResponse('Требуется email и код', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(400).json({ message: 'Неверные email или код' });
+    if (!user) return res.status(400).json(
+      errorResponse('Неверные email или код', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const resetRequest = await prisma.passwordReset.findFirst({
       where: {
@@ -67,13 +76,19 @@ router.post('/password-reset/verify', async (req, res) => {
     });
 
     if (!resetRequest) {
-      return res.status(400).json({ message: 'Неверный или просроченный код' });
+      return res.status(400).json(
+        errorResponse('Неверный или просроченный код', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
-    res.json({ message: 'Код подтверждён' });
+    res.json(
+      successResponse(null, 'Код подтверждён')
+    );
   } catch (error) {
     console.error('Ошибка проверки кода сброса пароля:', error);
-    res.status(500).json({ message: 'Ошибка проверки кода' });
+    res.status(500).json(
+      errorResponse('Ошибка проверки кода', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 
@@ -81,7 +96,9 @@ router.post('/password-reset/change', async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
     if (!email || !code || !newPassword) {
-      return res.status(400).json({ message: 'Требуются email, код и новый пароль' });
+      return res.status(400).json(
+        errorResponse('Требуются email, код и новый пароль', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     if (newPassword.length < 6) {
@@ -89,7 +106,9 @@ router.post('/password-reset/change', async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(400).json({ message: 'Неверные email или код' });
+    if (!user) return res.status(400).json(
+      errorResponse('Неверные email или код', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const resetRequest = await prisma.passwordReset.findFirst({
       where: {
@@ -102,7 +121,9 @@ router.post('/password-reset/change', async (req, res) => {
     });
 
     if (!resetRequest) {
-      return res.status(400).json({ message: 'Неверный или просроченный код' });
+      return res.status(400).json(
+        errorResponse('Неверный или просроченный код', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     // Хэшируем новый пароль
@@ -120,10 +141,14 @@ router.post('/password-reset/change', async (req, res) => {
       data: { used: true },
     });
 
-    res.json({ message: 'Пароль успешно изменён' });
+    res.json(
+      successResponse(null, 'Пароль успешно изменён')
+    );
   } catch (error) {
     console.error('Ошибка изменения пароля:', error);
-    res.status(500).json({ message: 'Ошибка изменения пароля' });
+    res.status(500).json(
+      errorResponse('Ошибка изменения пароля', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 

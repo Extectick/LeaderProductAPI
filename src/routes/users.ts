@@ -3,6 +3,7 @@ import { PrismaClient, ProfileType, ProfileStatus } from '@prisma/client';
 import { authenticateToken, authorizeRoles, AuthRequest } from '../middleware/auth';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
+import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 
 interface UserProfile {
   id: number;
@@ -280,20 +281,23 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
     const { user, phone, address } = req.body;
 
     if (!user?.firstName) {
-      return res.status(400).json({ message: 'Обязательное поле: user.firstName' });
+      return res.status(400).json(
+        errorResponse('Обязательное поле: user.firstName', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     if (address && (!address.street || !address.city || !address.country)) {
-      return res.status(400).json({ message: 'Если указан адрес, обязательные поля: address.street, address.city, address.country' });
+      return res.status(400).json(
+        errorResponse('Если указан адрес, обязательные поля: address.street, address.city, address.country', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     const existingProfile = await prisma.clientProfile.findUnique({ where: { userId } });
     if (existingProfile) {
       console.log(`Conflict: Client profile already exists for user ${userId}`);
-      return res.status(409).json({ 
-        message: 'Клиентский профиль уже существует',
-        code: 'PROFILE_ALREADY_EXISTS'
-      });
+      return res.status(409).json(
+        errorResponse('Клиентский профиль уже существует', ErrorCodes.CONFLICT)
+      );
     }
 
     const profile = await prisma.clientProfile.create({
@@ -324,14 +328,15 @@ router.post('/profiles/client', authenticateToken, checkUserStatus, async (req: 
       }
     });
 
-    res.status(201).json(profile);
+    res.status(201).json(
+      successResponse(profile, 'Клиентский профиль успешно создан')
+    );
   } catch (error) {
     console.error('Error creating client profile:', error);
-    res.status(500).json({ 
-      message: 'Ошибка создания клиентского профиля',
-      error: process.env.NODE_ENV === 'development' ? error : undefined,
-      code: 'INTERNAL_SERVER_ERROR'
-    });
+    res.status(500).json(
+      errorResponse('Ошибка создания клиентского профиля', ErrorCodes.INTERNAL_ERROR, 
+        process.env.NODE_ENV === 'development' ? error : undefined)
+    );
   }
 });
 
@@ -342,20 +347,23 @@ router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req
     const { user, phone, address } = req.body;
 
     if (!user?.firstName) {
-      return res.status(400).json({ message: 'Обязательное поле: user.firstName' });
+      return res.status(400).json(
+        errorResponse('Обязательное поле: user.firstName', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     if (address && (!address.street || !address.city || !address.country)) {
-      return res.status(400).json({ message: 'Если указан адрес, обязательные поля: address.street, address.city, address.country' });
+      return res.status(400).json(
+        errorResponse('Если указан адрес, обязательные поля: address.street, address.city, address.country', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     const existingProfile = await prisma.supplierProfile.findUnique({ where: { userId } });
     if (existingProfile) {
       console.log(`Conflict: Supplier profile already exists for user ${userId}`);
-      return res.status(409).json({ 
-        message: 'Профиль поставщика уже существует',
-        code: 'PROFILE_ALREADY_EXISTS'
-      });
+      return res.status(409).json(
+        errorResponse('Профиль поставщика уже существует', ErrorCodes.CONFLICT)
+      );
     }
 
     const profile = await prisma.supplierProfile.create({
@@ -386,14 +394,15 @@ router.post('/profiles/supplier', authenticateToken, checkUserStatus, async (req
       }
     });
 
-    res.status(201).json(profile);
+    res.status(201).json(
+      successResponse(profile, 'Профиль поставщика успешно создан')
+    );
   } catch (error) {
     console.error('Error creating supplier profile:', error);
-    res.status(500).json({ 
-      message: 'Ошибка создания профиля поставщика',
-      error: process.env.NODE_ENV === 'development' ? error : undefined,
-      code: 'INTERNAL_SERVER_ERROR'
-    });
+    res.status(500).json(
+      errorResponse('Ошибка создания профиля поставщика', ErrorCodes.INTERNAL_ERROR,
+        process.env.NODE_ENV === 'development' ? error : undefined)
+    );
   }
 });
 
@@ -404,21 +413,24 @@ router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req
     const { user, phone, departmentId } = req.body;
 
     if (!user?.firstName || !user?.lastName || !departmentId) {
-      return res.status(400).json({ message: 'Обязательные поля: user.firstName, user.lastName и departmentId' });
+      return res.status(400).json(
+        errorResponse('Обязательные поля: user.firstName, user.lastName и departmentId', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     const existingProfile = await prisma.employeeProfile.findUnique({ where: { userId } });
     if (existingProfile) {
       console.log(`Conflict: Employee profile already exists for user ${userId}`);
-      return res.status(409).json({ 
-        message: 'Профиль сотрудника уже существует',
-        code: 'PROFILE_ALREADY_EXISTS'
-      });
+      return res.status(409).json(
+        errorResponse('Профиль сотрудника уже существует', ErrorCodes.CONFLICT)
+      );
     }
 
     const department = await prisma.department.findUnique({ where: { id: departmentId } });
     if (!department) {
-      return res.status(404).json({ message: 'Отдел не найден' });
+      return res.status(404).json(
+        errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND)
+      );
     }
 
     const profile = await prisma.employeeProfile.create({
@@ -439,14 +451,15 @@ router.post('/profiles/employee', authenticateToken, checkUserStatus, async (req
       }
     });
 
-    res.status(201).json(profile);
+    res.status(201).json(
+      successResponse(profile, 'Профиль сотрудника успешно создан')
+    );
   } catch (error) {
     console.error('Error creating employee profile:', error);
-    res.status(500).json({ 
-      message: 'Ошибка создания профиля сотрудника',
-      error: process.env.NODE_ENV === 'development' ? error : undefined,
-      code: 'INTERNAL_SERVER_ERROR'
-    });
+    res.status(500).json(
+      errorResponse('Ошибка создания профиля сотрудника', ErrorCodes.INTERNAL_ERROR,
+        process.env.NODE_ENV === 'development' ? error : undefined)
+    );
   }
 });
 
@@ -462,9 +475,14 @@ router.get('/departments', authenticateToken, checkUserStatus, async (req: AuthR
       }
     });
 
-    res.json(departments);
+    res.json(
+      successResponse(departments, 'Список отделов успешно получен')
+    );
   } catch (error) {
-    res.status(500).json({ message: 'Ошибка получения списка отделов', error });
+    res.status(500).json(
+      errorResponse('Ошибка получения списка отделов', ErrorCodes.INTERNAL_ERROR,
+        process.env.NODE_ENV === 'development' ? error : undefined)
+    );
   }
 });
 

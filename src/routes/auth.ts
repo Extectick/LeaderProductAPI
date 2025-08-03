@@ -6,6 +6,7 @@ import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { sendVerificationEmail } from '../services/mailService';
 import passwordResetRouter from './passwordReset';
 import crypto, { randomUUID } from 'crypto';
+import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 
 const router = express.Router();
 
@@ -126,26 +127,34 @@ export async function createUniqueRefreshToken(userId: number): Promise<string> 
 router.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ message: 'Требуется email и пароль' });
+  if (!email || !password)
+    return res.status(400).json(
+      errorResponse('Требуется email и пароль', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email))
-      return res.status(400).json({ message: 'Неверный формат email' });
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
 
     if (password.length < 6)
-      return res.status(400).json({ message: 'Пароль должен быть не менее 6 символов' });
+      return res.status(400).json(
+        errorResponse('Пароль должен быть не менее 6 символов', ErrorCodes.VALIDATION_ERROR)
+      );
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       if (!existingUser.isActive) {
         await sendVerificationCodeEmail(existingUser.id, email);
-        return res.status(200).json({
-          message:
-            'Пользователь уже зарегистрирован, но не активирован. Код подтверждения отправлен повторно.',
-        });
+        return res.status(200).json(
+          successResponse(null, 
+            'Пользователь уже зарегистрирован, но не активирован. Код подтверждения отправлен повторно.')
+        );
       }
-      return res.status(409).json({ message: 'Пользователь уже существует' });
+      return res.status(409).json(
+        errorResponse('Пользователь уже существует', ErrorCodes.CONFLICT)
+      );
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -160,13 +169,20 @@ router.post('/register', async (req, res) => {
 
     await sendVerificationCodeEmail(user.id, email);
 
-    res.status(201).json({ message: 'Пользователь зарегистрирован. Пожалуйста, подтвердите email.' });
+    res.status(201).json(
+      successResponse(null, 'Пользователь зарегистрирован. Пожалуйста, подтвердите email.')
+    );
   } catch (error: any) {
     if (error.message && error.message.includes('recently')) {
-      return res.status(429).json({ message: error.message });
+      return res.status(429).json(
+        errorResponse(error.message, ErrorCodes.TOO_MANY_REQUESTS)
+      );
     }
     console.error('Ошибка регистрации:', error);
-    res.status(500).json({ message: 'Ошибка регистрации' });
+    res.status(500).json(
+      errorResponse('Ошибка регистрации', ErrorCodes.INTERNAL_ERROR,
+        process.env.NODE_ENV === 'development' ? error : undefined)
+    );
   }
 });
 
@@ -195,7 +211,9 @@ router.post('/login', async (req, res) => {
     })) as UserWithRolePermissions | null;
 
     if (!user)
-      return res.status(401).json({ message: 'Неверные учетные данные' });
+      return res.status(401).json(
+        errorResponse('Неверные учетные данные', ErrorCodes.UNAUTHORIZED)
+      );
 
     if (user.profileStatus === 'BLOCKED') {
       return res.status(403).json({
@@ -204,9 +222,9 @@ router.post('/login', async (req, res) => {
     }
 
     if (!user.isActive || user.profileStatus === 'PENDING') {
-      return res.status(403).json({
-        message: 'Аккаунт не активирован. Пожалуйста, подтвердите email.',
-      });
+      return res.status(403).json(
+        errorResponse('Аккаунт не активирован. Пожалуйста, подтвердите email.', ErrorCodes.FORBIDDEN)
+      );
     }
 
     const validPassword = await bcrypt.compare(password, user.passwordHash);
@@ -301,7 +319,9 @@ router.post('/token', async (req, res) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
-    return res.status(400).json({ message: 'Требуется refresh токен' });
+    return res.status(400).json(
+      errorResponse('Требуется refresh токен', ErrorCodes.VALIDATION_ERROR)
+    );
   }
 
   console.log('Получен refreshToken:', refreshToken);
@@ -313,18 +333,24 @@ router.post('/token', async (req, res) => {
 
     if (!storedToken) {
       console.error('Refresh токен не найден в БД');
-      return res.status(403).json({ message: 'Неверный refresh токен' });
+      return res.status(403).json(
+        errorResponse('Неверный refresh токен', ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     if (storedToken.revoked || storedToken.expiresAt < new Date()) {
       console.error('Refresh токен отозван или просрочен');
-      return res.status(403).json({ message: 'Неверный или просроченный refresh токен' });
+      return res.status(403).json(
+        errorResponse('Неверный или просроченный refresh токен', ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     jwt.verify(refreshToken, refreshTokenSecret, async (err: VerifyErrors | null, payload: any) => {
       if (err || !payload?.userId) {
         console.error('Неверный refresh токен:', err?.message || 'payload.userId отсутствует');
-        return res.status(403).json({ message: 'Неверный refresh токен' });
+        return res.status(403).json(
+          errorResponse('Неверный refresh токен', ErrorCodes.UNAUTHORIZED)
+        );
       }
 
       const user = await prisma.user.findUnique({
@@ -340,9 +366,11 @@ router.post('/token', async (req, res) => {
         },
       });
 
-      if (!user) {
+    if (!user) {
         console.error('Пользователь не найден');
-        return res.status(403).json({ message: 'Пользователь не найден' });
+        return res.status(403).json(
+          errorResponse('Пользователь не найден', ErrorCodes.UNAUTHORIZED)
+        );
       }
 
       const userWithRole = user as unknown as UserWithRolePermissions;
@@ -375,7 +403,9 @@ router.post('/token', async (req, res) => {
         });
       } catch (e) {
         console.error('Ошибка создания нового refresh токена:', e);
-        res.status(500).json({ message: 'Ошибка обновления токенов' });
+        res.status(500).json(
+          errorResponse('Ошибка обновления токенов', ErrorCodes.INTERNAL_ERROR)
+        );
       }
     });
   } catch (error) {
