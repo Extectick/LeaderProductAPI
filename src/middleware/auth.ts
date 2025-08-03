@@ -12,7 +12,8 @@ interface JwtPayload {
   exp: number;
 }
 
-export interface AuthRequest extends Request {
+export interface AuthRequest<P = {}, ResBody = {}, ReqBody = {}, ReqQuery = {}>
+  extends Request<P, ResBody, ReqBody, ReqQuery> {
   user?: JwtPayload;
 }
 

@@ -7,6 +7,19 @@ import { sendVerificationEmail } from '../services/mailService';
 import passwordResetRouter from './passwordReset';
 import crypto, { randomUUID } from 'crypto';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
+import {
+  AuthRegisterRequest,
+  AuthRegisterResponse,
+  AuthLoginRequest,
+  AuthLoginResponse,
+  AuthVerifyRequest,
+  AuthVerifyResponse,
+  AuthTokenRequest,
+  AuthTokenResponse,
+  AuthLogoutRequest,
+  AuthLogoutResponse
+} from '../types/routes';
+import { getProfile } from '../services/userService';
 
 const router = express.Router();
 
@@ -34,6 +47,7 @@ type UserWithRolePermissions = User & {
   clientProfile?: any;
   supplierProfile?: any;
   employeeProfile?: any;
+  name?: string;
 };
 
 function generateAccessToken(user: UserWithRolePermissions) {
@@ -124,7 +138,7 @@ export async function createUniqueRefreshToken(userId: number): Promise<string> 
   return token;
 }
 
-router.post('/register', async (req, res) => {
+router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest>, res: express.Response<AuthRegisterResponse>) => {
   try {
     const { email, password } = req.body;
   if (!email || !password)
@@ -186,10 +200,12 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res: express.Response<AuthLoginResponse>) => {
   const { email, password } = req.body;
   if (!email || !password)
-    return res.status(400).json({ message: 'Требуется email и пароль' });
+    return res.status(400).json(
+      errorResponse('Требуется email и пароль', ErrorCodes.VALIDATION_ERROR)
+    );
 
   try {
     const user = (await prisma.user.findUnique({
@@ -216,9 +232,9 @@ router.post('/login', async (req, res) => {
       );
 
     if (user.profileStatus === 'BLOCKED') {
-      return res.status(403).json({
-        message: 'Ваш аккаунт заблокирован. Обратитесь в поддержку.',
-      });
+      return res.status(403).json(
+        errorResponse('Ваш аккаунт заблокирован. Обратитесь в поддержку.', ErrorCodes.FORBIDDEN)
+      );
     }
 
     if (!user.isActive || user.profileStatus === 'PENDING') {
@@ -251,12 +267,14 @@ router.post('/login', async (req, res) => {
           },
         });
 
-        return res.status(403).json({
-          message: 'Слишком много неудачных попыток. Ваш аккаунт заблокирован.',
-        });
+      return res.status(403).json(
+        errorResponse('Слишком много неудачных попыток. Ваш аккаунт заблокирован.', ErrorCodes.FORBIDDEN)
+      );
       }
 
-      return res.status(401).json({ message: 'Неверные учетные данные' });
+      return res.status(401).json(
+        errorResponse('Неверные учетные данные', ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     const profileType = user.currentProfileType;
@@ -271,9 +289,9 @@ router.post('/login', async (req, res) => {
     else if (profileType === 'EMPLOYEE') activeProfile = user.employeeProfile;
 
     if (activeProfile?.status === 'BLOCKED') {
-      return res.status(403).json({
-        message: 'Ваш профиль заблокирован. Обратитесь в поддержку.',
-      });
+      return res.status(403).json(
+        errorResponse('Слишком много неудачных попыток. Ваш аккаунт заблокирован.', ErrorCodes.FORBIDDEN)
+      );
     }
 
     const accessToken = generateAccessToken(user);
@@ -303,19 +321,23 @@ router.post('/login', async (req, res) => {
           profileData: activeProfile ?? null,
         }
       : null;
-
-    res.json({
+    const resProfile = await getProfile(user.id);
+    res.json(successResponse({
       accessToken,
       refreshToken,
-      profile: profileResponse,
-    });
+      profile: resProfile,
+      message: "Вход успешный"
+    }));
+    
   } catch (error) {
     console.error('Ошибка при входе:', error);
-    res.status(500).json({ message: 'Ошибка входа' });
+    res.status(500).json(
+      errorResponse('Ошибка входа', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 
-router.post('/token', async (req, res) => {
+router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res: express.Response<AuthTokenResponse>) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
@@ -397,10 +419,10 @@ router.post('/token', async (req, res) => {
           throw new Error('Не удалось получить новый refresh токен после создания');
         }
 
-        res.json({
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken.token,
-        });
+    res.json(successResponse({
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken.token
+    }));
       } catch (e) {
         console.error('Ошибка создания нового refresh токена:', e);
         res.status(500).json(
@@ -410,37 +432,49 @@ router.post('/token', async (req, res) => {
     });
   } catch (error) {
     console.error('Ошибка при обновлении токена:', error);
-    res.status(500).json({ message: 'Обновление токена не удалось' });
+    res.status(500).json(
+      errorResponse('Обновление токена не удалось', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 
 
-router.post('/logout', authenticateToken, async (req: AuthRequest, res) => {
+router.post('/logout', authenticateToken, async (req: AuthRequest & { body: AuthLogoutRequest }, res: express.Response<AuthLogoutResponse>) => {
   const { refreshToken } = req.body;
   if (!refreshToken)
-    return res.status(400).json({ message: 'Refresh token required' });
+    return res.status(400).json(
+      errorResponse('Refresh token required', ErrorCodes.VALIDATION_ERROR)
+    );
 
   try {
     await prisma.refreshToken.updateMany({
       where: { token: refreshToken, userId: req.user!.userId },
       data: { revoked: true },
     });
-    res.json({ message: 'Logged out successfully' });
+    res.json(successResponse({ message: 'Logged out successfully' }));
   } catch (error) {
     console.error('Ошибка logout:', error);
-    res.status(500).json({ message: 'Logout failed' });
+    res.status(500).json(
+      errorResponse('Logout failed', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 
-router.post('/verify', async (req, res) => {
+router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, res: express.Response<AuthVerifyResponse>) => {
   try {
     const { email, code } = req.body;
     if (!email || !code)
-      return res.status(400).json({ message: 'Требуется email и код' });
+      return res.status(400).json(
+        errorResponse('Требуется email и код', ErrorCodes.VALIDATION_ERROR)
+      );
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(404).json({ message: 'Пользователь не найден' });
-    if (user.isActive) return res.status(400).json({ message: 'Аккаунт уже активирован' });
+    if (!user) return res.status(404).json(
+      errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND)
+    );
+    if (user.isActive) return res.status(400).json(
+      errorResponse('Аккаунт уже активирован', ErrorCodes.VALIDATION_ERROR)
+    );
 
     const verification = await prisma.emailVerification.findFirst({
       where: { userId: user.id, code, used: false, expiresAt: { gt: new Date() } },
@@ -455,16 +489,18 @@ router.post('/verify', async (req, res) => {
       if (lastVerification) {
         const newAttempts = (lastVerification.attemptsCount || 0) + 1;
         if (newAttempts >= MAX_VERIFICATION_ATTEMPTS) {
-          return res
-            .status(429)
-            .json({ message: 'Превышено максимальное количество попыток подтверждения' });
+          return res.status(429).json(
+            errorResponse('Превышено максимальное количество попыток подтверждения', ErrorCodes.TOO_MANY_REQUESTS)
+          );
         }
         await prisma.emailVerification.update({
           where: { id: lastVerification.id },
           data: { attemptsCount: newAttempts },
         });
       }
-      return res.status(400).json({ message: 'Неверный или просроченный код подтверждения' });
+      return res.status(400).json(
+        errorResponse('Неверный или просроченный код подтверждения', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     await prisma.emailVerification.update({
@@ -482,21 +518,40 @@ router.post('/verify', async (req, res) => {
 
     const userWithRole = await prisma.user.findUnique({
       where: { id: user.id },
-      include: { role: { include: { permissions: { include: { permission: true } } } } },
-    });
+      include: { 
+        role: { 
+          include: { 
+            permissions: { 
+              include: { permission: true } 
+            } 
+          } 
+        },
+        clientProfile: true,
+        supplierProfile: true,
+        employeeProfile: true
+      },
+    }) as UserWithRolePermissions;
 
     if (!userWithRole) {
       console.error('Ошибка получения данных пользователя после верификации');
-      return res.status(500).json({ message: 'Ошибка получения данных пользователя' });
+      return res.status(500).json(
+        errorResponse('Ошибка получения данных пользователя', ErrorCodes.INTERNAL_ERROR)
+      );
     }
 
     const accessToken = generateAccessToken(userWithRole as UserWithRolePermissions);
     const refreshToken = await createUniqueRefreshToken(userWithRole.id);
 
-    res.json({ message: 'Аккаунт подтвержден и активирован', accessToken, refreshToken });
+    res.json(successResponse({
+      accessToken,
+      refreshToken,
+      message: 'Аккаунт подтвержден и активирован'
+    }));
   } catch (error) {
     console.error('Ошибка подтверждения:', error);
-    res.status(500).json({ message: 'Ошибка подтверждения' });
+    res.status(500).json(
+      errorResponse('Ошибка подтверждения', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 

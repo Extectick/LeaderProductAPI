@@ -8,6 +8,7 @@ import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import cors from 'cors';
 import { errorHandler } from './middleware/errorHandler';
+import { userService } from 'services/userService';
 
 const app = express();
 app.use(cors({

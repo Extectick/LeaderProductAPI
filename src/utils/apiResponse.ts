@@ -8,7 +8,7 @@ export enum ErrorCodes {
   TOO_MANY_REQUESTS = 'TOO_MANY_REQUESTS'
 }
 
-interface SuccessResponse<T> {
+export interface SuccessResponse<T> {
   ok: true;
   message: string;
   data: T;
@@ -19,7 +19,7 @@ interface SuccessResponse<T> {
   };
 }
 
-interface ErrorResponse {
+export interface ErrorResponse {
   ok: false;
   message: string;
   error: {

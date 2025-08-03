@@ -1,6 +1,19 @@
 import express from 'express';
-import { PrismaClient, ProfileType, ProfileStatus } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { authenticateToken, authorizeRoles, AuthRequest } from '../middleware/auth';
+import { errorResponse, successResponse, ErrorCodes } from '../utils/apiResponse';
+import {
+  QRCreateRequest,
+  QRCreateResponse,
+  QRUpdateRequest,
+  QRUpdateResponse,
+  QRGetAllRequest,
+  QRGetAllResponse,
+  QRGetByIdResponse,
+  QRAnalyticsResponse,
+  QRStatsResponse,
+  QRRestoreResponse
+} from '../types/routes';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 import { customAlphabet } from 'nanoid';
@@ -18,20 +31,34 @@ const prisma = new PrismaClient();
 const generateShortId = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 8);
 
 // Создание нового QR-кода
-router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { body: QRCreateRequest }, res: express.Response<QRCreateResponse>) => {
   try {
-    let { qrData, description, qrType } = req.body;
+    let { qrData: rawQrData, description, qrType } = req.body;
     const userId = req.user?.userId;
 
-    if (!userId) return res.status(401).json({ message: 'Не авторизован' });
+    if (!userId) return res.status(401).json(
+      errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED)
+    );
 
-    if (qrData === undefined || qrData === null) {
-      return res.status(400).json({ message: 'Поле qrData обязательно' });
+    if (rawQrData === undefined || rawQrData === null) {
+      return res.status(400).json(
+        errorResponse('Поле qrData обязательно', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    // Приводим qrData к строке
+    let qrData: string;
+    if (typeof rawQrData === 'object') {
+      qrData = JSON.stringify(rawQrData);
+    } else {
+      qrData = rawQrData.toString();
     }
 
     const allowedTypes = ['PHONE', 'LINK', 'EMAIL', 'TEXT', 'WHATSAPP', 'TELEGRAM', 'CONTACT'];
     if (!qrType || !allowedTypes.includes(qrType)) {
-      return res.status(400).json({ message: 'Неверный тип qrType' });
+      return res.status(400).json(
+        errorResponse('Неверный тип qrType', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     let normalizedQRData = qrData;
@@ -48,10 +75,13 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
           const contactData = typeof qrData === 'string' ? JSON.parse(qrData) : qrData;
           normalizedQRData = generateVCard(contactData);
         } catch (error) {
-          return res.status(400).json({ 
-            message: 'Неверный формат контактных данных',
-            details: error instanceof Error ? error.message : 'Ошибка парсинга'
-          });
+          return res.status(400).json(
+            errorResponse(
+              'Неверный формат контактных данных', 
+              ErrorCodes.VALIDATION_ERROR,
+              error instanceof Error ? error.message : 'Ошибка парсинга'
+            )
+          );
         }
       }
     } else {
@@ -60,13 +90,17 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
       if (typeof qrData === 'object') {
         normalizedQRData = JSON.stringify(qrData);
       } else if (typeof qrData !== 'string') {
-        return res.status(400).json({ message: 'qrData должен быть строкой или объектом' });
+        return res.status(400).json(
+          errorResponse('qrData должен быть строкой или объектом', ErrorCodes.VALIDATION_ERROR)
+        );
       }
 
       // Валидация qrData (строки)
       const validationError = validateQRData(qrType, normalizedQRData);
       if (validationError) {
-        return res.status(400).json({ message: validationError });
+        return res.status(400).json(
+          errorResponse(validationError, ErrorCodes.VALIDATION_ERROR)
+        );
       }
     }
 
@@ -110,19 +144,24 @@ router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest, re
       },
     });
 
-    return res.status(201).json(newQR);
+    return res.status(201).json(
+      successResponse(newQR)
+    );
   } catch (error) {
     console.error('Ошибка создания QR кода:', error);
-    return res.status(500).json({
-      message: 'Ошибка создания QR кода',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка',
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка создания QR кода', 
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 
 
 
-router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest & { body: QRUpdateRequest, params: { id: string } }, res: express.Response<QRUpdateResponse>) => {
   try {
     const { id } = req.params;
     const { status, description } = req.body;
@@ -130,7 +169,9 @@ router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest
     const userRole = req.user?.role;
 
     if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+      return res.status(401).json(
+        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     // Проверяем существование QR кода
@@ -139,7 +180,9 @@ router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest
     });
 
     if (!existingQR) {
-      return res.status(404).json({ message: "QR код не найден" });
+      return res.status(404).json(
+        errorResponse("QR код не найден", ErrorCodes.NOT_FOUND)
+      );
     }
 
     // Проверяем права (создатель или админ)
@@ -147,12 +190,16 @@ router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest
     const isOwner = existingQR.createdById === userId;
     
     if (!isOwner && !isAdmin) {
-      return res.status(403).json({ message: "Нет прав для обновления" });
+      return res.status(403).json(
+        errorResponse("Нет прав для обновления", ErrorCodes.FORBIDDEN)
+      );
     }
 
     // Валидация статуса
     if (status && !['ACTIVE', 'PAUSED', 'DELETED'].includes(status)) {
-      return res.status(400).json({ message: "Некорректный статус" });
+      return res.status(400).json(
+        errorResponse("Некорректный статус", ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     const updatedQR = await prisma.qRList.update({
@@ -172,25 +219,32 @@ router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest
       }
     });
 
-    return res.status(200).json(updatedQR);
+    return res.status(200).json(
+      successResponse(updatedQR)
+    );
 
   } catch (error) {
     console.error('Ошибка обновления QR кода:', error);
-    return res.status(500).json({ 
-      message: 'Ошибка обновления QR кода',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка обновления QR кода',
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 
-router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { query: QRGetAllRequest }, res: express.Response<QRGetAllResponse>) => {
   try {
-    const { createdById, status, limit = 10, offset = 0 } = req.query;
+    const { createdById, status, limit = '10', offset = '0' } = req.query;
     const userId = req.user?.userId;
     const isAdmin = req.user?.role === 'ADMIN'; // Предполагаем наличие роли ADMIN
 
     if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+      return res.status(401).json(
+        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     // Подготовка условий фильтрации
@@ -202,7 +256,13 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res
     } 
     // Для админов - фильтр по byUserId если указан
     else if (createdById) {
-      where.createdById = parseInt(createdById as string);
+      const createdByIdNum = parseInt(createdById as string);
+      if (isNaN(createdByIdNum)) {
+        return res.status(400).json(
+          errorResponse("Некорректный ID пользователя", ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+      where.createdById = createdByIdNum;
     }
 
     // Фильтр по статусу если указан
@@ -211,10 +271,25 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res
     }
 
     // Получаем список с пагинацией
+    const limitNum = parseInt(limit as string) || 10;
+    const offsetNum = parseInt(offset as string) || 0;
+    
+    if (isNaN(limitNum)) {
+      return res.status(400).json(
+        errorResponse("Некорректное значение limit", ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+    
+    if (isNaN(offsetNum)) {
+      return res.status(400).json(
+        errorResponse("Некорректное значение offset", ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
     const qrList = await prisma.qRList.findMany({
       where,
-      skip: parseInt(offset as string),
-      take: parseInt(limit as string),
+      skip: offsetNum,
+      take: limitNum,
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
@@ -234,26 +309,41 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest, res
     // Получаем общее количество для пагинации
     const totalCount = await prisma.qRList.count({ where });
 
-    return res.status(200).json({
-      data: qrList,
-      meta: {
-        total: totalCount,
-        limit: parseInt(limit as string),
-        offset: parseInt(offset as string)
-      }
-    });
+    return res.status(200).json(
+      successResponse({
+        data: qrList,
+        meta: {
+          total: totalCount,
+          limit: limitNum.toString(),
+          offset: offsetNum.toString()
+        }
+      })
+    );
 
   } catch (error) {
     console.error('Ошибка получения списка QR кодов:', error);
-    return res.status(500).json({ 
-      message: 'Ошибка получения списка QR кодов',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка получения списка QR кодов',
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 
 // Получение детальной информации о QR коде
-router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.get('/:id', authenticateToken, checkUserStatus, async (
+  req: AuthRequest<{id: string}, any, any, {
+    simple?: string;
+    width?: string;
+    darkColor?: string;
+    lightColor?: string;
+    margin?: string;
+    errorCorrection?: string;
+  }>,
+  res: express.Response<QRGetByIdResponse>
+) => {
   try {
     const { id } = req.params;
     const { 
@@ -269,7 +359,9 @@ router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, 
     const isAdmin = req.user?.role === 'ADMIN';
 
     if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+      return res.status(401).json(
+        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     const qr = await prisma.qRList.findUnique({
@@ -287,11 +379,15 @@ router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, 
     });
 
     if (!qr) {
-      return res.status(404).json({ message: "QR код не найден" });
+      return res.status(404).json(
+        errorResponse("QR код не найден", ErrorCodes.NOT_FOUND)
+      );
     }
 
     if (!isAdmin && qr.createdById !== userId) {
-      return res.status(403).json({ message: "Нет прав доступа" });
+      return res.status(403).json(
+        errorResponse("Нет прав доступа", ErrorCodes.FORBIDDEN)
+      );
     }
 
     // Генерация QR с параметрами или без
@@ -310,38 +406,55 @@ router.get('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, 
     const qrImage = await generateQRCode(urlQR, options);
 
     if (simple === 'true') {
-      return res.status(200).json({ qrImage });
+      return res.status(200).json(
+        successResponse({
+          id: qr.id,
+          qrData: qr.qrData,
+          qrType: qr.qrType,
+          description: qr.description,
+          status: qr.status,
+          createdAt: qr.createdAt,
+          qrImage
+        })
+      );
     }
 
-    return res.status(200).json({
-      id: qr.id,
-      qrData: qr.qrData,
-      qrType: qr.qrType,
-      description: qr.description,
-      status: qr.status,
-      createdAt: qr.createdAt,
-      createdBy: qr.createdBy,
-      qrImage
-    });
+    return res.status(200).json(
+      successResponse({
+        id: qr.id,
+        qrData: qr.qrData,
+        qrType: qr.qrType,
+        description: qr.description,
+        status: qr.status,
+        createdAt: qr.createdAt,
+        createdBy: qr.createdBy,
+        qrImage
+      })
+    );
 
   } catch (error) {
     console.error('Ошибка получения QR кода:', error);
-    return res.status(500).json({ 
-      message: 'Ошибка получения QR кода',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка получения QR кода',
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 
 // Получение аналитики по сканированиям
-router.get('/:id/analytics', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.get('/:id/analytics', authenticateToken, checkUserStatus, async (req: AuthRequest & { params: { id: string } }, res: express.Response<QRAnalyticsResponse>) => {
   try {
     const { id } = req.params;
     const userId = req.user?.userId;
     const isAdmin = req.user?.role === 'ADMIN';
 
     if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+      return res.status(401).json(
+        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     // Проверка существования QR кода и прав доступа
@@ -351,11 +464,15 @@ router.get('/:id/analytics', authenticateToken, checkUserStatus, async (req: Aut
     });
 
     if (!qr) {
-      return res.status(404).json({ message: "QR код не найден" });
+      return res.status(404).json(
+        errorResponse("QR код не найден", ErrorCodes.NOT_FOUND)
+      );
     }
 
     if (!isAdmin && qr.createdById !== userId) {
-      return res.status(403).json({ message: "Нет прав доступа" });
+      return res.status(403).json(
+        errorResponse("Нет прав доступа", ErrorCodes.FORBIDDEN)
+      );
     }
 
     // Агрегация данных по сканированиям
@@ -374,19 +491,29 @@ router.get('/:id/analytics', authenticateToken, checkUserStatus, async (req: Aut
       }
     });
 
-    return res.status(200).json(analytics);
+    return res.status(200).json(
+      successResponse(analytics.map(a => ({
+        device: a.device || 'unknown',
+        browser: a.browser || 'unknown',
+        location: a.location || 'unknown',
+        count: a._count.device
+      })))
+    );
 
   } catch (error) {
     console.error('Ошибка получения аналитики:', error);
-    return res.status(500).json({ 
-      message: 'Ошибка получения аналитики',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка получения аналитики',
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 
 // Удаление QR кода (soft delete)
-router.delete('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.delete('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest & { params: { id: string } }, res: express.Response) => {
   try {
     const { id } = req.params;
     const userId = req.user?.userId;
@@ -604,6 +731,8 @@ router.get('/:id/scan', async (req, res) => {
           const vCardData = encodeURIComponent(vCard);
           
           if (isIOS) {
+            // Для iOS используем специальный формат ссылки
+            return res.redirect(`data:text/vcard;charset=utf-8,${vCardData}`);
           }
           
           res.setHeader('Content-Type', 'text/vcard; charset=utf-8');
@@ -679,14 +808,16 @@ router.get('/stats', authenticateToken, checkUserStatus, async (req: AuthRequest
 });
 
 // Восстановление удаленного QR кода
-router.put('/:id/restore', authenticateToken, checkUserStatus, async (req: AuthRequest, res) => {
+router.put('/:id/restore', authenticateToken, checkUserStatus, async (req: AuthRequest & { params: { id: string } }, res: express.Response<QRRestoreResponse>) => {
   try {
     const { id } = req.params;
     const userId = req.user?.userId;
     const isAdmin = req.user?.role === 'ADMIN';
 
     if (!userId) {
-      return res.status(401).json({ message: "Не авторизован" });
+      return res.status(401).json(
+        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
+      );
     }
 
     const qr = await prisma.qRList.findUnique({
@@ -694,15 +825,21 @@ router.put('/:id/restore', authenticateToken, checkUserStatus, async (req: AuthR
     });
 
     if (!qr) {
-      return res.status(404).json({ message: "QR код не найден" });
+      return res.status(404).json(
+        errorResponse("QR код не найден", ErrorCodes.NOT_FOUND)
+      );
     }
 
     if (!isAdmin && qr.createdById !== userId) {
-      return res.status(403).json({ message: "Нет прав для восстановления" });
+      return res.status(403).json(
+        errorResponse("Нет прав для восстановления", ErrorCodes.FORBIDDEN)
+      );
     }
 
     if (qr.status !== 'DELETED') {
-      return res.status(400).json({ message: "QR код не был удален" });
+      return res.status(400).json(
+        errorResponse("QR код не был удален", ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     // Восстанавливаем QR код (устанавливаем статус ACTIVE)
@@ -717,14 +854,19 @@ router.put('/:id/restore', authenticateToken, checkUserStatus, async (req: AuthR
       }
     });
 
-    return res.status(200).json(restoredQR);
+    return res.status(200).json(
+      successResponse(restoredQR)
+    );
 
   } catch (error) {
     console.error('Ошибка восстановления QR кода:', error);
-    return res.status(500).json({ 
-      message: 'Ошибка восстановления QR кода',
-      error: error instanceof Error ? error.message : 'Неизвестная ошибка'
-    });
+    return res.status(500).json(
+      errorResponse(
+        'Ошибка восстановления QR кода',
+        ErrorCodes.INTERNAL_ERROR,
+        error instanceof Error ? error.message : 'Неизвестная ошибка'
+      )
+    );
   }
 });
 

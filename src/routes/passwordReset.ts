@@ -1,9 +1,16 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
 import { sendVerificationEmail } from '../services/mailService';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
+import {
+  PasswordResetRequestRequest,
+  PasswordResetRequestResponse,
+  PasswordResetSubmitRequest,
+  PasswordResetSubmitResponse,
+  PasswordResetVerifyResponse
+} from '../types/routes';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -15,7 +22,7 @@ function generateResetCode() {
   return crypto.randomInt(100000, 1000000).toString();
 }
 
-router.post('/password-reset/request', async (req, res) => {
+router.post('/password-reset/request', async (req: Request<{}, {}, PasswordResetRequestRequest>, res: Response<PasswordResetRequestResponse>) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json(
@@ -25,7 +32,7 @@ router.post('/password-reset/request', async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       // Чтобы не давать подсказки, возвращаем 200 всегда
-      return res.json({ message: 'Если email зарегистрирован, код отправлен' });
+      return res.json(successResponse(null));
     }
 
     // Генерируем код
@@ -44,16 +51,16 @@ router.post('/password-reset/request', async (req, res) => {
     // Отправляем email с кодом
     await sendVerificationEmail(email, code);
 
-    res.json(
-      successResponse(null, 'Если email зарегистрирован, код отправлен')
-    );
+    res.json(successResponse(null));
   } catch (error) {
     console.error('Ошибка запроса сброса пароля:', error);
-    res.status(500).json({ message: 'Ошибка запроса сброса пароля' });
+    res.status(500).json(
+      errorResponse('Ошибка запроса сброса пароля', ErrorCodes.INTERNAL_ERROR)
+    );
   }
 });
 
-router.post('/password-reset/verify', async (req, res) => {
+router.post('/password-reset/verify', async (req: Request<{}, {}, { email: string; code: string }>, res: Response<PasswordResetVerifyResponse>) => {
   try {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json(
@@ -81,9 +88,7 @@ router.post('/password-reset/verify', async (req, res) => {
       );
     }
 
-    res.json(
-      successResponse(null, 'Код подтверждён')
-    );
+    res.json(successResponse(null));
   } catch (error) {
     console.error('Ошибка проверки кода сброса пароля:', error);
     res.status(500).json(
@@ -92,7 +97,7 @@ router.post('/password-reset/verify', async (req, res) => {
   }
 });
 
-router.post('/password-reset/change', async (req, res) => {
+router.post('/password-reset/change', async (req: Request<{}, {}, PasswordResetSubmitRequest>, res: Response<PasswordResetSubmitResponse>) => {
   try {
     const { email, code, newPassword } = req.body;
     if (!email || !code || !newPassword) {
@@ -102,7 +107,9 @@ router.post('/password-reset/change', async (req, res) => {
     }
 
     if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'Пароль должен быть не менее 6 символов' });
+      return res.status(400).json(
+        errorResponse('Пароль должен быть не менее 6 символов', ErrorCodes.VALIDATION_ERROR)
+      );
     }
 
     const user = await prisma.user.findUnique({ where: { email } });
@@ -142,7 +149,7 @@ router.post('/password-reset/change', async (req, res) => {
     });
 
     res.json(
-      successResponse(null, 'Пароль успешно изменён')
+      successResponse({ message: 'Пароль успешно изменён' })
     );
   } catch (error) {
     console.error('Ошибка изменения пароля:', error);
