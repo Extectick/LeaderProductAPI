@@ -36,19 +36,19 @@ services:
           cpus: '1'
           memory: 1G
 
-  seed:
-    build:
-      context: .
-      args:
-        NODE_ENV: development
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NODE_ENV: development
-    volumes:
-      - .:/app
-    command: npm run db:seed
-    depends_on:
-      - db
+  # seed:
+  #   build:
+  #     context: .
+  #     args:
+  #       NODE_ENV: development
+  #   environment:
+  #     DATABASE_URL: ${DATABASE_URL}
+  #     NODE_ENV: development
+  #   volumes:
+  #     - .:/app
+  #   command: npm run db:seed
+  #   depends_on:
+  #     - db
 
   db:
     image: postgres:17

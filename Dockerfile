@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package*.json ./
 COPY prisma/schema.prisma ./prisma/schema.prisma
+COPY .env ./
 RUN npm install
 
 COPY . .
@@ -29,6 +30,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json .
+COPY --from=builder /app/.env .
 
 # Финализация образа
 RUN npx prisma generate && \
