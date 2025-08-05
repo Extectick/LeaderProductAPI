@@ -690,7 +690,51 @@ router.get('/:id/scan', async (req, res) => {
         if (!phone.startsWith('+')) {
           phone = `+${phone}`;
         }
-        return res.redirect(`tel:${phone}`);
+        
+        // Validate phone number format
+        if (!validator.isMobilePhone(phone, 'any', { strictMode: true })) {
+          return res.status(400).json({ 
+            message: 'Неверный формат номера телефона',
+            phone: phone
+          });
+        }
+
+        // URL encode phone number
+        const encodedPhone = encodeURIComponent(phone);
+        
+        // Check device type
+        const userAgent = req.headers['user-agent'] || '';
+        const isMobile = /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent);
+        
+        if (isMobile) {
+          // For mobile devices - redirect to tel: link
+          return res.send(`
+            <!DOCTYPE html>
+            <html>
+              <head>
+                <meta charset="utf-8">
+                <title>Phone Redirect</title>
+                <script>
+                  window.location.href = 'tel:${encodedPhone}';
+                  setTimeout(function() {
+                    document.getElementById('manual-call').style.display = 'block';
+                  }, 1000);
+                </script>
+              </head>
+              <body>
+                <h1>Redirecting to phone app...</h1>
+                <div id="manual-call" style="display:none">
+                  <p>If redirect doesn't work, please tap:</p>
+                  <a href="tel:${encodedPhone}">Call ${phone}</a>
+                </div>
+              </body>
+            </html>
+          `);
+        } else {
+          // For desktop - redirect to WhatsApp
+          const whatsappNumber = phone.replace(/[^\d+]/g, '');
+          return res.redirect(`https://wa.me/${whatsappNumber}`);
+        }
       }
 
       case 'EMAIL':
