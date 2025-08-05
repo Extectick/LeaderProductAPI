@@ -11,11 +11,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "prisma/seed.ts",
+    "prisma:seed": "src/prisma/seed.ts",
     "postinstall": "prisma generate",
     "test": "jest",
     "db:studio": "npm run prisma studio",
-    "db:seed": "ts-node prisma/seed.ts"
+    "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts"
   },
   "keywords": [],
   "author": "",
