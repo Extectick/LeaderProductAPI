@@ -15,11 +15,9 @@ import {
   QRRestoreResponse
 } from '../types/routes';
 import { checkUserStatus } from '../middleware/checkUserStatus';
-import { auditLog, authorizeDepartmentManager } from '../middleware/audit';
 import { customAlphabet } from 'nanoid';
 import geoip from 'geoip-lite';
-import { validateQRData } from '../utils/validateQRData';
-import { generateQRCode } from '../services/qrService';
+import { assertQrType, generateQRCode, normalizeAndValidate } from '../services/qrService';
 
 const validator = require('validator');
 const UAParser = require('ua-parser-js');
@@ -31,209 +29,175 @@ const prisma = new PrismaClient();
 const generateShortId = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 8);
 
 // Создание нового QR-кода
-router.post('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { body: QRCreateRequest }, res: express.Response<QRCreateResponse>) => {
-  try {
-    let { qrData: rawQrData, description, qrType } = req.body;
-    const userId = req.user?.userId;
+router.post(
+  '/',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest & { body: QRCreateRequest }, res: express.Response) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res.status(401).json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
 
-    if (!userId) return res.status(401).json(
-      errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED)
-    );
+      const { qrData: rawQrData, description, qrType } = req.body;
 
-    if (rawQrData === undefined || rawQrData === null) {
-      return res.status(400).json(
-        errorResponse('Поле qrData обязательно', ErrorCodes.VALIDATION_ERROR)
+      if (rawQrData === undefined || rawQrData === null) {
+        return res.status(400).json(errorResponse('Поле qrData обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      try {
+        assertQrType(qrType);
+      } catch (e) {
+        return res.status(400).json(errorResponse((e as Error).message, ErrorCodes.VALIDATION_ERROR));
+      }
+
+      let normalizedQRData: string;
+      try {
+        normalizedQRData = normalizeAndValidate(qrType, rawQrData);
+      } catch (e) {
+        return res.status(400).json(errorResponse((e as Error).message, ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const generatedId = generateShortId();
+
+      const newQR = await prisma.qRList.create({
+        data: {
+          id: generatedId,
+          qrData: normalizedQRData,
+          description: description ?? null,
+          qrType,
+          createdById: userId,
+          status: 'ACTIVE',
+        },
+        select: {
+          id: true,
+          qrData: true,
+          qrType: true,
+          description: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      return res.status(201).json(successResponse(newQR));
+    } catch (error) {
+      console.error('Ошибка создания QR кода:', error);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка создания QR кода',
+          ErrorCodes.INTERNAL_ERROR,
+          error instanceof Error ? error.message : 'Неизвестная ошибка'
+        )
       );
     }
+  }
+);
 
-    // Приводим qrData к строке
-    let qrData: string;
-    if (typeof rawQrData === 'object') {
-      qrData = JSON.stringify(rawQrData);
-    } else {
-      qrData = rawQrData.toString();
-    }
 
-    const allowedTypes = ['PHONE', 'LINK', 'EMAIL', 'TEXT', 'WHATSAPP', 'TELEGRAM', 'CONTACT'];
-    if (!qrType || !allowedTypes.includes(qrType)) {
-      return res.status(400).json(
-        errorResponse('Неверный тип qrType', ErrorCodes.VALIDATION_ERROR)
-      );
-    }
+router.patch(
+  '/:id',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest & { body: QRUpdateRequest; params: { id: string } }, res: express.Response) => {
+    try {
+      const { id } = req.params;
+      const { status, description, qrData: rawQrData, qrType } = req.body;
+      const userId = req.user?.userId;
+      const userRole = req.user?.role;
 
-    let normalizedQRData = qrData;
+      if (!userId) {
+        return res.status(401).json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
 
-    // Обработка CONTACT типа
-    if (qrType === 'CONTACT') {
-      // Если qrData уже в формате VCARD
-      if (typeof qrData === 'string' && qrData.startsWith('BEGIN:VCARD')) {
-        normalizedQRData = qrData;
-      } 
-      // Если qrData - объект или JSON строка
-      else {
+      // ничего не пришло — нечего обновлять
+      if (
+        status === undefined &&
+        description === undefined &&
+        rawQrData === undefined &&
+        qrType === undefined
+      ) {
+        return res.status(400).json(errorResponse('Нет полей для обновления', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const existingQR = await prisma.qRList.findUnique({
+        where: { id },
+        select: { id: true, qrData: true, qrType: true, createdById: true, status: true, description: true }
+      });
+
+      if (!existingQR) {
+        return res.status(404).json(errorResponse('QR код не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const isAdmin = userRole === 'ADMIN';
+      const isOwner = existingQR.createdById === userId;
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json(errorResponse('Нет прав для обновления', ErrorCodes.FORBIDDEN));
+      }
+
+      if (status !== undefined && !['ACTIVE','PAUSED','DELETED'].includes(status)) {
+        return res.status(400).json(errorResponse('Некорректный статус', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      // Определяем целевой тип и исходные данные
+      let targetType = existingQR.qrType as QRUpdateRequest['qrType'];
+      if (qrType !== undefined) {
         try {
-          const contactData = typeof qrData === 'string' ? JSON.parse(qrData) : qrData;
-          normalizedQRData = generateVCard(contactData);
-        } catch (error) {
-          return res.status(400).json(
-            errorResponse(
-              'Неверный формат контактных данных', 
-              ErrorCodes.VALIDATION_ERROR,
-              error instanceof Error ? error.message : 'Ошибка парсинга'
-            )
-          );
+          assertQrType(qrType);
+          targetType = qrType;
+        } catch (e) {
+          return res.status(400).json(errorResponse((e as Error).message, ErrorCodes.VALIDATION_ERROR));
         }
       }
-    } else {
-      // Обработка других типов
-      // Если qrData — объект, сериализуем в JSON-строку
-      if (typeof qrData === 'object') {
-        normalizedQRData = JSON.stringify(qrData);
-      } else if (typeof qrData !== 'string') {
-        return res.status(400).json(
-          errorResponse('qrData должен быть строкой или объектом', ErrorCodes.VALIDATION_ERROR)
-        );
+
+      // Данные для нормализации: либо пришли в PATCH, либо берём существующие
+      const sourceData = rawQrData !== undefined ? rawQrData : existingQR.qrData;
+
+      // Если меняется тип или сами данные — пересобираем normalized
+      let nextQrData: string | undefined;
+      if (qrType !== undefined || rawQrData !== undefined) {
+        try {
+          nextQrData = normalizeAndValidate(targetType!, sourceData);
+        } catch (e) {
+          return res.status(400).json(errorResponse((e as Error).message, ErrorCodes.VALIDATION_ERROR));
+        }
       }
 
-      // Валидация qrData (строки)
-      const validationError = validateQRData(qrType, normalizedQRData);
-      if (validationError) {
-        return res.status(400).json(
-          errorResponse(validationError, ErrorCodes.VALIDATION_ERROR)
-        );
-      }
+      // Собираем патч-модель. В PATCH важно включать только то, что реально меняем
+      const dataToUpdate: any = { updatedAt: new Date() };
+
+      if (status !== undefined) dataToUpdate.status = status;
+      if (description !== undefined) dataToUpdate.description = description; // допускает null для очистки
+      if (qrType !== undefined) dataToUpdate.qrType = targetType;
+      if (nextQrData !== undefined) dataToUpdate.qrData = nextQrData;
+
+      const updatedQR = await prisma.qRList.update({
+        where: { id },
+        data: dataToUpdate,
+        select: {
+          id: true,
+          qrData: true,
+          qrType: true,
+          description: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true
+        }
+      });
+
+      return res.status(200).json(successResponse(updatedQR));
+    } catch (error) {
+      console.error('Ошибка обновления QR кода:', error);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления QR кода',
+          ErrorCodes.INTERNAL_ERROR,
+          error instanceof Error ? error.message : 'Неизвестная ошибка'
+        )
+      );
     }
-
-    // Дальше для PHONE и WHATSAPP — нормализуем номер (начинается с + и max 12 символов)
-    if (qrType === 'PHONE' || qrType === 'WHATSAPP') {
-      // Убираем всё кроме цифр и плюс
-      let cleaned = normalizedQRData.replace(/[^\d+]/g, '');
-
-      if (!cleaned.startsWith('+')) {
-        cleaned = '+' + cleaned.replace(/[^\d]/g, '');
-      }
-
-      normalizedQRData = cleaned.slice(0, 12);
-    }
-
-    // Для TELEGRAM — должно начинаться с @
-    if (qrType === 'TELEGRAM') {
-      if (!normalizedQRData.startsWith('@')) {
-        normalizedQRData = '@' + normalizedQRData;
-      }
-    }
-
-    const generatedId = generateShortId();
-
-    const newQR = await prisma.qRList.create({
-      data: {
-        id: generatedId,
-        qrData: normalizedQRData,
-        description: description || null,
-        qrType,
-        createdById: userId,
-        status: 'ACTIVE',
-      },
-      select: {
-        id: true,
-        qrData: true,
-        qrType: true,
-        description: true,
-        status: true,
-        createdAt: true,
-      },
-    });
-
-    return res.status(201).json(
-      successResponse(newQR)
-    );
-  } catch (error) {
-    console.error('Ошибка создания QR кода:', error);
-    return res.status(500).json(
-      errorResponse(
-        'Ошибка создания QR кода', 
-        ErrorCodes.INTERNAL_ERROR,
-        error instanceof Error ? error.message : 'Неизвестная ошибка'
-      )
-    );
   }
-});
-
-
-
-router.patch('/:id', authenticateToken, checkUserStatus, async (req: AuthRequest & { body: QRUpdateRequest, params: { id: string } }, res: express.Response<QRUpdateResponse>) => {
-  try {
-    const { id } = req.params;
-    const { status, description } = req.body;
-    const userId = req.user?.userId;
-    const userRole = req.user?.role;
-
-    if (!userId) {
-      return res.status(401).json(
-        errorResponse("Не авторизован", ErrorCodes.UNAUTHORIZED)
-      );
-    }
-
-    // Проверяем существование QR кода
-    const existingQR = await prisma.qRList.findUnique({
-      where: { id }
-    });
-
-    if (!existingQR) {
-      return res.status(404).json(
-        errorResponse("QR код не найден", ErrorCodes.NOT_FOUND)
-      );
-    }
-
-    // Проверяем права (создатель или админ)
-    const isAdmin = userRole === 'ADMIN'; // Предполагаем, что есть такая роль
-    const isOwner = existingQR.createdById === userId;
-    
-    if (!isOwner && !isAdmin) {
-      return res.status(403).json(
-        errorResponse("Нет прав для обновления", ErrorCodes.FORBIDDEN)
-      );
-    }
-
-    // Валидация статуса
-    if (status && !['ACTIVE', 'PAUSED', 'DELETED'].includes(status)) {
-      return res.status(400).json(
-        errorResponse("Некорректный статус", ErrorCodes.VALIDATION_ERROR)
-      );
-    }
-
-    const updatedQR = await prisma.qRList.update({
-      where: { id },
-      data: {
-        ...(status && { status }),
-        ...(description && { description }),
-        updatedAt: new Date() // Обновляем метку времени
-      },
-      select: {
-        id: true,
-        qrData: true,
-        description: true,
-        status: true,
-        createdAt: true,
-        updatedAt: true
-      }
-    });
-
-    return res.status(200).json(
-      successResponse(updatedQR)
-    );
-
-  } catch (error) {
-    console.error('Ошибка обновления QR кода:', error);
-    return res.status(500).json(
-      errorResponse(
-        'Ошибка обновления QR кода',
-        ErrorCodes.INTERNAL_ERROR,
-        error instanceof Error ? error.message : 'Неизвестная ошибка'
-      )
-    );
-  }
-});
+);
 
 router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { query: QRGetAllRequest }, res: express.Response<QRGetAllResponse>) => {
   try {
@@ -293,6 +257,7 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { 
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
+        qrType: true,
         qrData: true,
         description: true,
         status: true,
@@ -300,7 +265,9 @@ router.get('/', authenticateToken, checkUserStatus, async (req: AuthRequest & { 
         createdBy: {
           select: {
             id: true,
-            email: true
+            email: true,
+            firstName: true,
+            lastName: true
           }
         }
       }

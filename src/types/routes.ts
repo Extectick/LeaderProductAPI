@@ -193,7 +193,9 @@ export type QRCreateResponse = SuccessResponse<{
 
 export type QRUpdateRequest = {
   status?: 'ACTIVE'|'PAUSED'|'DELETED';
-  description?: string;
+  description?: string | null;             // опционально, допускаем null чтобы очистить
+  qrData?: unknown;                         // опционально
+  qrType?: 'PHONE'|'LINK'|'EMAIL'|'TEXT'|'WHATSAPP'|'TELEGRAM'|'CONTACT'; // опционально
 };
 
 export type QRUpdateResponse = SuccessResponse<{
