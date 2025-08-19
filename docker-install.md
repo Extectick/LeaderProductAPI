@@ -1,3 +1,8 @@
+СРАЗУ
+
+docker compose up -d --build
+
+ПО ЭТАПНО
 Билд докер
     docker-compose build
 

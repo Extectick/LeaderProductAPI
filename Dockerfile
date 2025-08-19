@@ -1,50 +1,40 @@
-FROM node:18-alpine AS builder
-
+# ---- build stage ----
+FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package*.json ./
-COPY prisma/schema.prisma ./prisma/schema.prisma
-COPY src/prisma/seed.ts ./src/prisma/seed.ts
-COPY .env ./
-RUN npm install
+RUN npm ci
 
-COPY . .
+COPY prisma ./prisma
+COPY tsconfig.json ./
+COPY src ./src
 
-# Компиляция TypeScript (если нужно)
+RUN npx prisma generate
 RUN npm run build
 
-# Установка ts-node глобально для запуска seed (если не компилируете seed)
-RUN npm install -g ts-node typescript
-
-ENV NODE_ENV=production
-
-# Финальный образ (production)
-FROM node:18-alpine
-
+# ---- runtime stage ----
+FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Устанавливаем runtime зависимости
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl libc6-compat
 
-# Копируем только необходимое из builder stage
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/package.json .
-COPY --from=builder /app/.env .
-COPY --from=builder /app/src/prisma/seed.ts ./src/prisma/seed.ts
+COPY --from=builder /app/dist ./dist
+COPY package*.json ./
 
-# Финализация образа
-RUN npx prisma generate && \
-    npm prune --production && \
-    rm -rf /tmp/* /var/cache/apk/* /root/.npm /root/.cache
+RUN npm prune --production
 
-# Установка ts-node для выполнения seed
-RUN npm install -g ts-node typescript
+ENV NODE_ENV=production
+ENV NODE_OPTIONS=--enable-source-maps
 
 EXPOSE 3000
-EXPOSE 5555
 
-# Запуск с проверкой миграций, выполнением seed, запуском prisma studio и основного приложения
-# CMD ["sh", "-c", "npx prisma migrate deploy && npm run db:seed && npm run prisma:studio & node dist/index.js"]
-CMD ["sh", "-c", "npm run prisma:studio & node dist/index.js"]
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD wget -qO- http://localhost:3000/ || exit 1
+
+# необязательно, но безопаснее
+RUN addgroup -S app && adduser -S app -G app
+USER app
+
+CMD sh -c "npx prisma migrate deploy && node dist/index.js"

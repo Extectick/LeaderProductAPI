@@ -17,7 +17,7 @@ app.use((0, cors_1.default)({
     origin: ['http://localhost:8081', 'http://192.168.30.54:8081', '*'],
     credentials: true,
 }));
-const databaseUrl = process.env.NODE_ENV === 'development' ? process.env.DATABASE_URL_DEV : process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_URL;
 const prisma = new client_1.PrismaClient({
     datasources: {
         db: {

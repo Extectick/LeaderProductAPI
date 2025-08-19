@@ -1,87 +1,51 @@
-version: '3.8'
+# docker-compose.yml
+version: "3.9"
 
 services:
-  app:
-    build: 
-      context: .
-      args:
-        NODE_ENV: production
-    ports:
-      - "3000:3000"
-      - "5555:5555"
+  db:
+    image: postgres:15-alpine
+    container_name: leader_db
+    restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NODE_ENV: production
-      # SMTP переменные
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASS}
-      SMTP_FROM: ${SMTP_FROM}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432" # пробрасывай только если нужен доступ с хоста
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    container_name: leader_api
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./prisma:/app/prisma:ro  # Только для чтения
-    restart: unless-stopped
-    networks:
-      - app-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-
-  # seed:
-  #   build:
-  #     context: .
-  #     args:
-  #       NODE_ENV: development
-  #   environment:
-  #     DATABASE_URL: ${DATABASE_URL}
-  #     NODE_ENV: development
-  #   volumes:
-  #     - .:/app
-  #   command: npm run db:seed
-  #   depends_on:
-  #     - db
-
-  db:
-    image: postgres:17
-    environment:
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
-      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    env_file:
+      - .env.production        # <-- ТВОЙ .env.production с DATABASE_URL и прочим
     ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgresql.conf:/etc/postgresql/postgresql.conf
-    networks:
-      - app-network
+      - "3000:3000"
+    # если нужен доступ только внутри сети, убери ports и оставь network (ниже)
+
+  # pgadmin (опционально для отладки, не включай в прод)
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    container_name: leader_pgadmin
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 2G
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:extecick@yandex.ru}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:Ovogup73_}
+    ports:
+      - "5050:80"
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
-  postgres_data:
-
-networks:
-  app-network:
-    driver: bridge
-    attachable: true
+  pgdata:
