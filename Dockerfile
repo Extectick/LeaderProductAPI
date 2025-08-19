@@ -46,4 +46,5 @@ EXPOSE 3000
 EXPOSE 5555
 
 # Запуск с проверкой миграций, выполнением seed, запуском prisma studio и основного приложения
-CMD ["sh", "-c", "npx prisma migrate deploy && npm run db:seed && npm run prisma:studio & node dist/index.js"]
+# CMD ["sh", "-c", "npx prisma migrate deploy && npm run db:seed && npm run prisma:studio & node dist/index.js"]
+CMD ["sh", "-c", "npm run prisma:studio & node dist/index.js"]

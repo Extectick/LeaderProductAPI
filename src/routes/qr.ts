@@ -510,8 +510,8 @@ router.get(
         errorCorrectionLevel: errorCorrection as 'L' | 'M' | 'Q' | 'H'
       };
 
-      const domen = process.env.DOMEN_URL || 'http://192.168.30.54:3000/';
-      const urlQR = domen + 'qr/' + qr.id + '/scan';
+      const domen = process.env.DOMEN_URL || 'http://127.0.0.1:3000';
+      const urlQR = domen + '/qr/' + qr.id + '/scan';
       const qrImage = await generateQRCode(urlQR, options);
 
       if (simple === 'true') {
