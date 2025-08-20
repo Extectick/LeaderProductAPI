@@ -616,4 +616,58 @@ async (req: AuthRequest<AssignDepartmentManagerRequest, AssignDepartmentManagerR
   }
 });
 
+router.get(
+  '/:userId/profile',
+  authenticateToken,
+  checkUserStatus,
+  async (
+    req: AuthRequest<{ userId: string }, UserProfileResponse>,
+    res: express.Response<UserProfileResponse>
+  ) => {
+    try {
+      const requestedId = Number(req.params.userId);
+      if (Number.isNaN(requestedId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const requesterId = req.user!.userId;
+      const isSelf = requestedId === requesterId;
+
+      if (!isSelf) {
+        // Разрешим только админу смотреть чужие профили
+        const requester = await prisma.user.findUnique({
+          where: { id: requesterId },
+          include: { role: true },
+        });
+        const isAdmin = requester?.role?.name === 'admin';
+        if (!isAdmin) {
+          return res
+            .status(403)
+            .json(errorResponse('Недостаточно прав для просмотра профиля', ErrorCodes.FORBIDDEN));
+        }
+      }
+
+      const profile = await getProfile(requestedId);
+      if (!profile) {
+        return res
+          .status(404)
+          .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      return res.json(successResponse({ profile }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения профиля пользователя',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+
 export default router;
