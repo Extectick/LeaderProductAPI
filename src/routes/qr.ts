@@ -62,6 +62,58 @@ function detectAttachmentType(mime: string): AttachmentType {
   return 'FILE';
 }
 
+/**
+ * @openapi
+ * /qr:
+ *   post:
+ *     tags: [QR]
+ *     summary: Создать новый QR-код
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "create_qr" ]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               qrData:
+ *                 oneOf:
+ *                   - { type: string }
+ *                   - { type: object, additionalProperties: true }
+ *               description:
+ *                 type: string
+ *                 nullable: true
+ *               qrType:
+ *                 type: string
+ *                 enum: [PHONE,LINK,EMAIL,TEXT,WHATSAPP,TELEGRAM,CONTACT]
+ *               attachments:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: binary
+ *     responses:
+ *       201:
+ *         description: Создано
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       $ref: '#/components/schemas/QRItem'
+ *       400:
+ *         description: Валидационная ошибка
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/ApiError' } }
+ *       401:
+ *         description: Не авторизован
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 // Создание нового QR-кода
 router.post(
   '/',
@@ -71,7 +123,7 @@ router.post(
   multer({ dest: 'uploads/' }).array('attachments'),
   async (
     req: AuthRequest<{}, QRCreateResponse, QRCreateRequest>,
-    res
+    res: express.Response<QRCreateResponse>
   ) => {
     try {
       const userId = req.user?.userId;
@@ -151,6 +203,51 @@ router.post(
   }
 );
 
+/**
+ * @openapi
+ * /qr/{id}:
+ *   put:
+ *     tags: [QR]
+ *     summary: Обновить QR-код (статус/описание/данные)
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "update_qr" ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status: { type: string, enum: [ACTIVE,PAUSED,DELETED] }
+ *               description: { type: string, nullable: true }
+ *               qrData: {}
+ *               qrType: { type: string, enum: [PHONE,LINK,EMAIL,TEXT,WHATSAPP,TELEGRAM,CONTACT] }
+ *     responses:
+ *       200:
+ *         description: Обновлено
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data: { $ref: '#/components/schemas/QRItem' }
+ *       400:
+ *         description: Ошибка валидации
+ *       401:
+ *         description: Не авторизован
+ *       403:
+ *         description: Нет прав
+ *       404:
+ *         description: Не найден
+ */
 // Обновление QR-кода (изменение статуса, описания, данных)
 router.put(
   '/:id',
@@ -159,7 +256,7 @@ router.put(
   authorizePermissions(['update_qr']),
   async (
     req: AuthRequest<{ id: string }, QRUpdateResponse, QRUpdateRequest>,
-    res
+    res: express.Response<QRUpdateResponse>
   ) => {
     try {
       const { id } = req.params;
@@ -258,6 +355,90 @@ router.put(
   }
 );
 
+/**
+ * @openapi
+ * /qr/analytics:
+ *   get:
+ *     tags: [QR]
+ *     summary: Универсальная аналитика по QR
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr_analytics" ]
+ *     parameters:
+ *       - in: query
+ *         name: ids
+ *         schema: { type: string }
+ *         description: "Список id через запятую"
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: tz
+ *         schema: { type: string, example: "Europe/Warsaw" }
+ *       - in: query
+ *         name: bucket
+ *         schema: { type: string, enum: [hour,day,week,month] }
+ *       - in: query
+ *         name: groupBy
+ *         schema: { type: string, example: "device,browser,location,qrId" }
+ *       - in: query
+ *         name: top
+ *         schema: { type: string, example: "10" }
+ *       - in: query
+ *         name: device
+ *         schema: { type: string, example: "mobile,desktop" }
+ *       - in: query
+ *         name: browser
+ *         schema: { type: string, example: "Chrome,Firefox" }
+ *       - in: query
+ *         name: location
+ *         schema: { type: string, example: "Warsaw,PL" }
+ *       - in: query
+ *         name: include
+ *         schema: { type: string, example: "totals,series,breakdown" }
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         meta:
+ *                           type: object
+ *                           properties:
+ *                             from: { type: string, format: date-time }
+ *                             to: { type: string, format: date-time }
+ *                             tz: { type: string }
+ *                             ids: { type: array, items: { type: string } }
+ *                         totals:
+ *                           $ref: '#/components/schemas/QRTotals'
+ *                         series:
+ *                           type: array
+ *                           items: { $ref: '#/components/schemas/QRSeriesPoint' }
+ *                         breakdown:
+ *                           type: object
+ *                           properties:
+ *                             by:
+ *                               type: array
+ *                               items: { type: string }
+ *                             rows:
+ *                               type: array
+ *                               items:
+ *                                 $ref: '#/components/schemas/QRBreakdownRow'
+ *       400:
+ *         description: Ошибка параметров
+ *       401:
+ *         description: Не авторизован
+ */
 // Универсальная аналитика
 router.get(
   '/analytics',
@@ -266,7 +447,7 @@ router.get(
   authorizePermissions(['view_qr_analytics']),
   async (
     req: AuthRequest<{}, QRAnalyticsQueryResponse, {}, QRAnalyticsQueryRequest>,
-    res
+    res: express.Response<QRAnalyticsQueryResponse>
   ) => {
     try {
       const userId = req.user?.userId;
@@ -480,6 +661,75 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr/analytics/scans:
+ *   get:
+ *     tags: [QR]
+ *     summary: Лог сканирований (сырые события)
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr_analytics" ]
+ *     parameters:
+ *       - in: query
+ *         name: ids
+ *         schema: { type: string }
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: string, example: "50" }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: string, example: "0" }
+ *       - in: query
+ *         name: device
+ *         schema: { type: string }
+ *       - in: query
+ *         name: browser
+ *         schema: { type: string }
+ *       - in: query
+ *         name: location
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         data:
+ *                           type: array
+ *                           items:
+ *                             type: object
+ *                             properties:
+ *                               id: { type: string }
+ *                               qrListId: { type: string }
+ *                               createdAt: { type: string, format: date-time }
+ *                               ip: { type: string }
+ *                               device: { type: string }
+ *                               browser: { type: string }
+ *                               location: { type: string }
+ *                               scanDuration: { type: number }
+ *                         meta:
+ *                           type: object
+ *                           properties:
+ *                             total: { type: integer }
+ *                             limit: { type: integer }
+ *                             offset: { type: integer }
+ *       401:
+ *         description: Не авторизован
+ */
 // Сырые события (лог сканов)
 router.get(
   '/analytics/scans',
@@ -563,6 +813,53 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr:
+ *   get:
+ *     tags: [QR]
+ *     summary: Список QR (пагинация/фильтры)
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr" ]
+ *     parameters:
+ *       - in: query
+ *         name: createdById
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [ACTIVE,PAUSED,DELETED] }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: string, example: "10" }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: string, example: "0" }
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         data:
+ *                           type: array
+ *                           items: { $ref: '#/components/schemas/QRListItem' }
+ *                         meta:
+ *                           type: object
+ *                           properties:
+ *                             total: { type: integer }
+ *                             limit: { type: string }
+ *                             offset: { type: string }
+ *       401:
+ *         description: Не авторизован
+ */
 // Список QR (пагинация/фильтры)
 router.get(
   '/',
@@ -571,7 +868,7 @@ router.get(
   authorizePermissions(['view_qr']),
   async (
     req: AuthRequest<{}, QRGetAllResponse, {}, QRGetAllRequest>,
-    res
+    res: express.Response<QRGetAllResponse>
   ) => {
     try {
       const { createdById, status, limit = '10', offset = '0' } =
@@ -669,6 +966,26 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr/export:
+ *   get:
+ *     tags: [QR]
+ *     summary: Экспорт списка QR в CSV
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "export_qr" ]
+ *     responses:
+ *       200:
+ *         description: CSV файл
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       401:
+ *         description: Не авторизован
+ */
 // Экспорт QR кодов
 router.get(
   '/export',
@@ -735,6 +1052,61 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr/{id}:
+ *   get:
+ *     tags: [QR]
+ *     summary: Детальная информация о QR (+генерация PNG как dataURL)
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr" ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: simple
+ *         schema: { type: string, enum: ["true","false"] }
+ *       - in: query
+ *         name: width
+ *         schema: { type: string, example: "300" }
+ *       - in: query
+ *         name: darkColor
+ *         schema: { type: string, example: "000000" }
+ *       - in: query
+ *         name: lightColor
+ *         schema: { type: string, example: "ffffff" }
+ *       - in: query
+ *         name: margin
+ *         schema: { type: string, example: "1" }
+ *       - in: query
+ *         name: errorCorrection
+ *         schema: { type: string, enum: [L,M,Q,H], example: "M" }
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       allOf:
+ *                         - $ref: '#/components/schemas/QRListItem'
+ *                         - type: object
+ *                           properties:
+ *                             qrImage: { type: string, description: "data:image/png;base64,..." }
+ *       401:
+ *         description: Не авторизован
+ *       403:
+ *         description: Нет прав
+ *       404:
+ *         description: Не найден
+ */
 // Детальная информация о QR
 router.get(
   '/:id',
@@ -755,7 +1127,7 @@ router.get(
         errorCorrection?: string;
       }
     >,
-    res
+    res: express.Response<QRGetByIdResponse> 
   ) => {
     try {
       const { id } = req.params;
@@ -856,6 +1228,43 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr/{id}/analytics:
+ *   get:
+ *     tags: [QR]
+ *     summary: Разбивка по устройствам/браузерам/локациям
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr_analytics" ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           device: { type: string }
+ *                           browser: { type: string }
+ *                           location: { type: string }
+ *                           count: { type: integer }
+ *       401: { description: Не авторизован }
+ *       403: { description: Нет прав }
+ *       404: { description: Не найден }
+ */
 // Аналитика по конкретному QR (простая разбивка)
 router.get(
   '/:id/analytics',
@@ -864,7 +1273,7 @@ router.get(
   authorizePermissions(['view_qr_analytics']),
   async (
     req: AuthRequest<{ id: string }, QRAnalyticsResponse>,
-    res
+    res: express.Response<QRAnalyticsResponse> 
   ) => {
     try {
       const { id } = req.params;
@@ -924,6 +1333,30 @@ router.get(
   }
 );
 
+/**
+ * @openapi
+ * /qr/{id}:
+ *   delete:
+ *     tags: [QR]
+ *     summary: Удалить (soft) QR-код
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "delete_qr" ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Удалено
+ *       401:
+ *         description: Не авторизован
+ *       403:
+ *         description: Нет прав
+ *       404:
+ *         description: Не найден
+ */
 // Удаление QR (soft delete)
 router.delete(
   '/:id',
@@ -987,6 +1420,25 @@ function generateVCard(contact: Record<string, any>): string {
   return vCard;
 }
 
+/**
+ * @openapi
+ * /qr/{id}/scan:
+ *   get:
+ *     tags: [QR]
+ *     summary: Публичное сканирование QR (редиректы/контент)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Текст/VCARD/HTML
+ *       302:
+ *         description: Редирект на внешний ресурс (mailto:/tel:/https://...)
+ *       404:
+ *         description: QR не найден или неактивен
+ */
 router.get('/:id/scan', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1137,6 +1589,33 @@ router.get('/:id/scan', async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /qr/stats:
+ *   get:
+ *     tags: [QR]
+ *     summary: Общая статистика по QR-кодам
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "view_qr_stats" ]
+ *     responses:
+ *       200:
+ *         description: Ок
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     totalQRCodes: { type: integer }
+ *                     activeQRCodes: { type: integer }
+ *                     pausedQRCodes: { type: integer }
+ *                     deletedQRCodes: { type: integer }
+ *                     totalScans: { type: integer }
+ *       401:
+ *         description: Не авторизован
+ */
 // Общая статистика
 router.get(
   '/stats',
@@ -1183,6 +1662,73 @@ router.get(
   }
 );
 
+
+/**
+ * @openapi
+ * /qr/{id}/restore:
+ *   put:
+ *     tags: [QR]
+ *     summary: Восстановить удалённый QR-код
+ *     description: Меняет статус удалённого QR с `DELETED` на `ACTIVE`.
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: [ "restore_qr" ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Идентификатор QR-кода
+ *     responses:
+ *       200:
+ *         description: QR-код успешно восстановлен
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         id:
+ *                           type: string
+ *                           example: "AbCd1234"
+ *                         status:
+ *                           type: string
+ *                           example: "ACTIVE"
+ *                         qrData:
+ *                           type: string
+ *                           example: "https://example.com"
+ *                         description:
+ *                           type: string
+ *                           nullable: true
+ *                           example: "QR для лендинга"
+ *       400:
+ *         description: QR не в статусе DELETED
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       401:
+ *         description: Не авторизован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       403:
+ *         description: Нет прав на восстановление
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       404:
+ *         description: QR не найден
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка сервера
+ */
 // Восстановление удаленного QR
 router.put(
   '/:id/restore',
@@ -1191,7 +1737,7 @@ router.put(
   authorizePermissions(['restore_qr']),
   async (
     req: AuthRequest<{ id: string }, QRRestoreResponse>,
-    res: express.Response<QRRestoreResponse>  // <-- вот тут
+    res: express.Response<QRRestoreResponse>
   ) => {
     try {
       const { id } = req.params;

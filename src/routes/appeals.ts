@@ -48,6 +48,13 @@ const prisma = new PrismaClient();
 const upload = multer({ dest: 'uploads/' });
 
 /**
+ * @openapi
+ * tags:
+ *   - name: Appeals
+ *     description: Обращения (тикеты), сообщения, исполнители и экспорт
+ */
+
+/**
  * Функция для определения типа вложения на основе MIME-типов.
  */
 function detectAttachmentType(mime: string): AttachmentType {
@@ -57,7 +64,44 @@ function detectAttachmentType(mime: string): AttachmentType {
 }
 
 /**
- * POST /appeals — создание нового обращения
+ * @openapi
+ * /appeals:
+ *   post:
+ *     tags: [Appeals]
+ *     summary: Создать новое обращение
+ *     description: Создаёт обращение и первое сообщение; поддерживает загрузку вложений.
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["create_appeal"]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               toDepartmentId: { type: integer }
+ *               title: { type: string }
+ *               text: { type: string }
+ *               priority: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+ *               deadline: { type: string, format: date-time }
+ *               attachments:
+ *                 type: array
+ *                 items: { type: string, format: binary }
+ *             required: [toDepartmentId, text]
+ *     responses:
+ *       201:
+ *         description: Обращение создано
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Обращение создано" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealCreateData'
  */
 router.post(
   '/',
@@ -200,7 +244,41 @@ router.post(
 );
 
 /**
- * GET /appeals — получение списка обращений
+ * @openapi
+ * /appeals:
+ *   get:
+ *     tags: [Appeals]
+ *     summary: Список обращений
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["view_appeal"]
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema: { type: string, enum: [my, department, assigned], default: my }
+ *         description: Область выборки
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200:
+ *         description: Успешно
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Список обращений" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealListData'
+ *       400: { description: Ошибка параметров }
+ *       401: { description: Не авторизован }
+ *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/',
@@ -319,7 +397,36 @@ router.get(
 );
 
 /**
- * GET /appeals/:id — получение подробностей обращения
+ * @openapi
+ * /appeals/{id}:
+ *   get:
+ *     tags: [Appeals]
+ *     summary: Детали обращения
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["view_appeal"]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Успешно
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Детали обращения" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealDetailData'
+ *       401: { description: Не авторизован }
+ *       403: { description: Нет доступа }
+ *       404: { description: Не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/:id',
@@ -407,7 +514,47 @@ router.get(
 );
 
 /**
- * PUT /appeals/:id/assign — назначить исполнителей
+ * @openapi
+ * /appeals/{id}/assign:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Назначить исполнителей обращению
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["assign_appeal"]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               assigneeIds:
+ *                 type: array
+ *                 items: { type: integer }
+ *             required: [assigneeIds]
+ *     responses:
+ *       200:
+ *         description: Исполнители назначены
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Исполнители назначены" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealAssignData'
+ *       400: { description: Ошибка валидации }
+ *       401: { description: Не авторизован }
+ *       404: { description: Обращение не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/assign',
@@ -515,7 +662,45 @@ router.put(
 );
 
 /**
- * PUT /appeals/:id/status — сменить статус обращения
+ * @openapi
+ * /appeals/{id}/status:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Обновить статус обращения
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["update_appeal_status"]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status: { type: string, enum: [OPEN,IN_PROGRESS,RESOLVED,CLOSED] }
+ *             required: [status]
+ *     responses:
+ *       200:
+ *         description: Статус обновлён
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Статус обновлён" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealStatusUpdateData'
+ *       400: { description: Неверный статус }
+ *       401: { description: Не авторизован }
+ *       404: { description: Обращение не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/status',
@@ -604,7 +789,44 @@ router.put(
 );
 
 /**
- * POST /appeals/:id/messages — добавить сообщение
+ * @openapi
+ * /appeals/{id}/messages:
+ *   post:
+ *     tags: [Appeals]
+ *     summary: Добавить сообщение к обращению
+ *     description: Можно отправить текст и/или файлы-вложения.
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["add_appeal_message"]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               text: { type: string }
+ *               attachments:
+ *                 type: array
+ *                 items: { type: string, format: binary }
+ *     responses:
+ *       201:
+ *         description: Сообщение добавлено
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Сообщение добавлено" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealAddMessageData'
  */
 router.post(
   '/:id/messages',
@@ -704,7 +926,47 @@ router.post(
 );
 
 /**
- * PUT /appeals/:id/watchers — обновить список наблюдателей.
+ * @openapi
+ * /appeals/{id}/watchers:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Обновить список наблюдателей обращения
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["manage_appeal_watchers"]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               watcherIds:
+ *                 type: array
+ *                 items: { type: integer }
+ *             required: [watcherIds]
+ *     responses:
+ *       200:
+ *         description: Список наблюдателей обновлён
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Список наблюдателей обновлён" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealWatchersUpdateData'
+ *       400: { description: Ошибка валидации }
+ *       401: { description: Не авторизован }
+ *       404: { description: Обращение не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/watchers',
@@ -794,7 +1056,46 @@ router.put(
 );
 
 /**
- * PUT /appeals/messages/:messageId — отредактировать сообщение.
+ * @openapi
+ * /appeals/messages/{messageId}:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Редактировать сообщение обращения
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["edit_appeal_message"]
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               text: { type: string }
+ *             required: [text]
+ *     responses:
+ *       200:
+ *         description: Сообщение обновлено
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Сообщение изменено" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealEditMessageData'
+ *       400: { description: Ошибка валидации }
+ *       401: { description: Не авторизован }
+ *       403: { description: Нельзя редактировать чужое сообщение }
+ *       404: { description: Сообщение не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/messages/:messageId',
@@ -860,7 +1161,7 @@ router.put(
       io.to(`appeal:${updated.appealId}`).emit('messageEdited', {
         appealId: updated.appealId,
         messageId: updated.id,
-        editedAt: updated.editedAt,
+        editedAt: updated.editedAt!,
         text: updated.text,
       });
 
@@ -889,7 +1190,36 @@ router.put(
 );
 
 /**
- * DELETE /appeals/messages/:messageId — удалить сообщение.
+ * @openapi
+ * /appeals/messages/{messageId}:
+ *   delete:
+ *     tags: [Appeals]
+ *     summary: Удалить сообщение обращения (soft-delete)
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["delete_appeal_message"]
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Сообщение удалено
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, message, data]
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: "Сообщение удалено" }
+ *                 data:
+ *                   $ref: '#/components/schemas/AppealDeleteMessageData'
+ *       401: { description: Не авторизован }
+ *       403: { description: Нельзя удалять чужое сообщение }
+ *       404: { description: Сообщение не найдено }
+ *       500: { description: Внутренняя ошибка }
  */
 router.delete(
   '/messages/:messageId',
@@ -964,7 +1294,42 @@ router.delete(
 );
 
 /**
- * GET /appeals/export — экспорт обращений в CSV.
+ * @openapi
+ * /appeals/export:
+ *   get:
+ *     tags: [Appeals]
+ *     summary: Экспорт обращений в CSV
+ *     description: Возвращает CSV-файл согласно фильтрам и области (scope).
+ *     security:
+ *       - bearerAuth: []
+ *     x-permissions: ["export_appeals"]
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema: { type: string, enum: [my, department, assigned], default: my }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [OPEN,IN_PROGRESS,RESOLVED,CLOSED] }
+ *       - in: query
+ *         name: priority
+ *         schema: { type: string, enum: [LOW,MEDIUM,HIGH,CRITICAL] }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: CSV-файл с обращениями
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400: { description: Ошибка параметров }
+ *       401: { description: Не авторизован }
+ *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/export',

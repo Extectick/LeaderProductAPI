@@ -17,11 +17,48 @@ const prisma = new PrismaClient();
 
 const PASSWORD_RESET_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
 
+/**
+ * @openapi
+ * tags:
+ *   - name: Password Reset
+ *     description: Сброс пароля по email с кодом подтверждения
+ */
+
 // Генерация кода — 6 цифр
 function generateResetCode() {
   return crypto.randomInt(100000, 1000000).toString();
 }
 
+/**
+ * @openapi
+ * /password-reset/request:
+ *   post:
+ *     tags: [Password Reset]
+ *     summary: Запрос кода для сброса пароля
+ *     description: Отправляет на email 6-значный код для сброса пароля. Эндпоинт публичный.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *             required: [email]
+ *     responses:
+ *       200:
+ *         description: Запрос принят (даже если пользователь не существует)
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Некорректный запрос (нет email)
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/password-reset/request', async (req: Request<{}, {}, PasswordResetRequestRequest>, res: Response<PasswordResetRequestResponse>) => {
   try {
     const { email } = req.body;
@@ -60,6 +97,37 @@ router.post('/password-reset/request', async (req: Request<{}, {}, PasswordReset
   }
 });
 
+/**
+ * @openapi
+ * /password-reset/verify:
+ *   post:
+ *     tags: [Password Reset]
+ *     summary: Проверка кода сброса пароля
+ *     description: Валидирует присланный по email код сброса. Эндпоинт публичный.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               code: { type: string, example: "123456" }
+ *             required: [email, code]
+ *     responses:
+ *       200:
+ *         description: Код корректный и не просрочен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Неверные email/код или код просрочен/использован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/password-reset/verify', async (req: Request<{}, {}, { email: string; code: string }>, res: Response<PasswordResetVerifyResponse>) => {
   try {
     const { email, code } = req.body;
@@ -97,6 +165,48 @@ router.post('/password-reset/verify', async (req: Request<{}, {}, { email: strin
   }
 });
 
+/**
+ * @openapi
+ * /password-reset/change:
+ *   post:
+ *     tags: [Password Reset]
+ *     summary: Смена пароля по коду
+ *     description: Проверяет код и задаёт новый пароль для пользователя. Эндпоинт публичный.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               code: { type: string, example: "123456" }
+ *               newPassword: { type: string, minLength: 6 }
+ *             required: [email, code, newPassword]
+ *     responses:
+ *       200:
+ *         description: Пароль успешно изменён
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         message:
+ *                           type: string
+ *                           example: Пароль успешно изменён
+ *       400:
+ *         description: Некорректные данные или неверный/просроченный код
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/password-reset/change', async (req: Request<{}, {}, PasswordResetSubmitRequest>, res: Response<PasswordResetSubmitResponse>) => {
   try {
     const { email, code, newPassword } = req.body;

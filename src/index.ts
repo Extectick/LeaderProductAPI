@@ -12,6 +12,8 @@ import passwordResetRouter from './routes/passwordReset';
 import cors from 'cors';
 import { errorHandler } from './middleware/errorHandler';
 import appealsRouter from './routes/appeals';
+import swaggerUi from "swagger-ui-express";
+import { swaggerSpec } from "./swagger/swagger";
 
 const ENV = process.env.NODE_ENV;
 
@@ -39,6 +41,12 @@ const port = process.env.PORT || 3000;
 
 app.use(morgan('dev'));
 app.use(express.json());
+
+// JSON спецификация
+app.get("/docs.json", (_req, res) => res.json(swaggerSpec));
+
+// Интерактивная документация
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);

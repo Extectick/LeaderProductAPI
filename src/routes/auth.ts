@@ -23,6 +23,17 @@ import { getProfile } from '../services/userService';
 
 const router = express.Router();
 
+/**
+ * @openapi
+ * tags:
+ *   - name: Auth
+ *     description: Аутентификация и управление токенами
+ *
+ * # Примечание:
+ * # - Все ответы используют унифицированные обёртки ApiSuccess/ApiError.
+ * # - Для /auth/logout требуется bearer JWT.
+ */
+
 router.use(passwordResetRouter);
 
 const prisma = new PrismaClient();
@@ -138,6 +149,52 @@ export async function createUniqueRefreshToken(userId: number): Promise<string> 
   return token;
 }
 
+/**
+ * @openapi
+ * /auth/register:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Регистрация нового пользователя
+ *     description: Создаёт пользователя и отправляет код подтверждения email.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string, minLength: 6 }
+ *             required: [email, password]
+ *     responses:
+ *       201:
+ *         description: Зарегистрирован, код отправлен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       200:
+ *         description: Пользователь уже есть, но не активирован — код переотправлен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Ошибка валидации
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       409:
+ *         description: Пользователь уже существует
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       429:
+ *         description: Слишком частые запросы кода подтверждения
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest>, res: express.Response<AuthRegisterResponse>) => {
   try {
     const { email, password } = req.body;
@@ -200,6 +257,47 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
   }
 });
 
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Вход пользователя
+ *     description: Возвращает access и refresh токены, а также профиль пользователя.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string }
+ *             required: [email, password]
+ *     responses:
+ *       200:
+ *         description: Успешный вход
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Ошибка валидации
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       401:
+ *         description: Неверные учётные данные
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       403:
+ *         description: Аккаунт не активирован/заблокирован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res: express.Response<AuthLoginResponse>) => {
   const { email, password } = req.body;
   if (!email || !password)
@@ -337,6 +435,41 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
   }
 });
 
+/**
+ * @openapi
+ * /auth/token:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Обновление пары токенов по refresh токену
+ *     description: Принимает действительный refresh токен, отзывает его и выдаёт новую пару access/refresh.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               refreshToken: { type: string }
+ *             required: [refreshToken]
+ *     responses:
+ *       200:
+ *         description: Новые токены выданы
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Не передан refresh токен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       403:
+ *         description: Неверный/просроченный/отозванный refresh токен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res: express.Response<AuthTokenResponse>) => {
   const { refreshToken } = req.body;
 
@@ -438,7 +571,43 @@ router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res
   }
 });
 
-
+/**
+ * @openapi
+ * /auth/logout:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Выход и отзыв refresh токена
+ *     description: Требуется bearer JWT. Отзывает указанный refresh токен пользователя.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               refreshToken: { type: string }
+ *             required: [refreshToken]
+ *     responses:
+ *       200:
+ *         description: Успешный выход
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Не передан refresh токен
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       401:
+ *         description: Не авторизован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/logout', authenticateToken, async (req: AuthRequest & { body: AuthLogoutRequest }, res: express.Response<AuthLogoutResponse>) => {
   const { refreshToken } = req.body;
   if (!refreshToken)
@@ -460,6 +629,47 @@ router.post('/logout', authenticateToken, async (req: AuthRequest & { body: Auth
   }
 });
 
+/**
+ * @openapi
+ * /auth/verify:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Подтверждение аккаунта кодом из email
+ *     description: Активирует учётную запись и возвращает пару access/refresh токенов.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               code: { type: string }
+ *             required: [email, code]
+ *     responses:
+ *       200:
+ *         description: Успешное подтверждение и вход
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Неверный/просроченный код или уже активирован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       404:
+ *         description: Пользователь не найден
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       429:
+ *         description: Превышено число попыток подтверждения
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
 router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, res: express.Response<AuthVerifyResponse>) => {
   try {
     const { email, code } = req.body;
