@@ -710,17 +710,7 @@ router.get(
  *                       properties:
  *                         data:
  *                           type: array
- *                           items:
- *                             type: object
- *                             properties:
- *                               id: { type: string }
- *                               qrListId: { type: string }
- *                               createdAt: { type: string, format: date-time }
- *                               ip: { type: string }
- *                               device: { type: string }
- *                               browser: { type: string }
- *                               location: { type: string }
- *                               scanDuration: { type: number }
+ *                           items: { $ref: '#/components/schemas/QRScanEvent' }
  *                         meta:
  *                           type: object
  *                           properties:
@@ -1604,15 +1594,13 @@ router.get('/:id/scan', async (req, res) => {
  *         content:
  *           application/json:
  *             schema:
- *               allOf:
- *                 - $ref: '#/components/schemas/ApiSuccess'
- *                 - type: object
- *                   properties:
- *                     totalQRCodes: { type: integer }
- *                     activeQRCodes: { type: integer }
- *                     pausedQRCodes: { type: integer }
- *                     deletedQRCodes: { type: integer }
- *                     totalScans: { type: integer }
+ *               type: object
+ *               properties:
+ *                 totalQRCodes: { type: integer }
+ *                 activeQRCodes: { type: integer }
+ *                 pausedQRCodes: { type: integer }
+ *                 deletedQRCodes: { type: integer }
+ *                 totalScans: { type: integer }
  *       401:
  *         description: Не авторизован
  */
@@ -1691,21 +1679,7 @@ router.get(
  *                 - type: object
  *                   properties:
  *                     data:
- *                       type: object
- *                       properties:
- *                         id:
- *                           type: string
- *                           example: "AbCd1234"
- *                         status:
- *                           type: string
- *                           example: "ACTIVE"
- *                         qrData:
- *                           type: string
- *                           example: "https://example.com"
- *                         description:
- *                           type: string
- *                           nullable: true
- *                           example: "QR для лендинга"
+ *                       $ref: '#/components/schemas/QRRestoreData'
  *       400:
  *         description: QR не в статусе DELETED
  *         content:

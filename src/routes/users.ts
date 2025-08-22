@@ -57,7 +57,11 @@ const prisma = new PrismaClient();
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data: { $ref: '#/components/schemas/MessageOnly' }
  *       400: { description: Неверные данные }
  *       401: { description: Не авторизован }
  *       404: { description: Отдел не найден }
@@ -149,7 +153,11 @@ router.put(
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data: { $ref: '#/components/schemas/MessageOnly' }
  *       400: { description: Неверные параметры }
  *       401: { description: Не авторизован }
  *       403: { description: Нет прав }
@@ -305,20 +313,22 @@ router.get(
  *                 required: [firstName]
  *               phone: { type: string }
  *               address:
- *                 type: object
- *                 properties:
- *                   street: { type: string }
- *                   city: { type: string }
- *                   state: { type: string }
- *                   postalCode: { type: string }
- *                   country: { type: string }
+ *                 $ref: '#/components/schemas/Address'
  *     responses:
  *       200:
  *         description: Профиль создан
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         profile: { $ref: '#/components/schemas/UserProfile' }
+ *                         message: { type: 'string', example: 'Профиль клиента успешно создан' }
  *       400: { description: Ошибка валидации }
  *       401: { description: Не авторизован }
  *       409: { description: Профиль уже существует }
@@ -432,20 +442,22 @@ router.post(
  *                 required: [firstName]
  *               phone: { type: string }
  *               address:
- *                 type: object
- *                 properties:
- *                   street: { type: string }
- *                   city: { type: string }
- *                   state: { type: string }
- *                   postalCode: { type: string }
- *                   country: { type: string }
+ *                 $ref: '#/components/schemas/Address'
  *     responses:
  *       200:
  *         description: Профиль создан
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         profile: { $ref: '#/components/schemas/UserProfile' }
+ *                         message: { type: 'string', example: 'Профиль поставщика успешно создан' }
  *       400: { description: Ошибка валидации }
  *       401: { description: Не авторизован }
  *       409: { description: Профиль уже существует }
@@ -566,7 +578,15 @@ router.post(
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         profile: { $ref: '#/components/schemas/UserProfile' }
+ *                         message: { type: 'string', example: 'Профиль сотрудника успешно создан' }
  *       400: { description: Ошибка валидации }
  *       401: { description: Не авторизован }
  *       404: { description: Отдел не найден }
@@ -661,10 +681,7 @@ router.post(
  *                     data:
  *                       type: array
  *                       items:
- *                         type: object
- *                         properties:
- *                           id: { type: integer }
- *                           name: { type: string }
+ *                         $ref: '#/components/schemas/DepartmentMini'
  *       401: { description: Не авторизован }
  */
 router.get(
@@ -720,7 +737,11 @@ router.get(
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiSuccess'
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data: { $ref: '#/components/schemas/MessageOnly' }
  *       400: { description: Неверные параметры }
  *       401: { description: Не авторизован }
  *       403: { description: Нет прав }
