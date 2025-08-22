@@ -11,7 +11,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "studio": "dotenv -e .env.$NODE_ENV -- prisma studio",
-    "prisma:seed": "src/prisma/seed.ts",
+    "prisma:seed": "ts-node --transpile-only src/prisma/seed.ts",
     "postinstall": "prisma generate",
     "test": "jest",
     "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts"

@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 import {
   authenticateToken,
+  authorizePermissions,
   AuthRequest,
 } from '../middleware/auth';
 import { checkUserStatus } from '../middleware/checkUserStatus';
@@ -62,6 +63,7 @@ router.post(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['create_appeal']),
   upload.array('attachments'),
   async (
     req: AuthRequest<{}, AppealCreateResponse, AppealCreateRequest>,
@@ -204,6 +206,7 @@ router.get(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['view_appeal']),
   async (
     req: AuthRequest<{}, AppealListResponse>,
     res: express.Response
@@ -322,6 +325,7 @@ router.get(
   '/:id',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['view_appeal']),
   async (
     req: AuthRequest<
       { id: string },
@@ -409,6 +413,7 @@ router.put(
   '/:id/assign',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['assign_appeal']),
   async (
     req: AuthRequest<
       { id: string },
@@ -516,6 +521,7 @@ router.put(
   '/:id/status',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['update_appeal_status']),
   async (
     req: AuthRequest<
       { id: string },
@@ -604,6 +610,7 @@ router.post(
   '/:id/messages',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['add_appeal_message']),
   upload.array('attachments'),
   async (
     req: AuthRequest<
@@ -703,6 +710,7 @@ router.put(
   '/:id/watchers',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['manage_appeal_watchers']),
   async (
     req: AuthRequest<
       { id: string },
@@ -792,6 +800,7 @@ router.put(
   '/messages/:messageId',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['edit_appeal_message']),
   async (
     req: AuthRequest<
       { messageId: string },
@@ -886,6 +895,7 @@ router.delete(
   '/messages/:messageId',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['delete_appeal_message']),
   async (
     req: AuthRequest<
       { messageId: string },
@@ -960,6 +970,7 @@ router.get(
   '/export',
   authenticateToken,
   checkUserStatus,
+  authorizePermissions(['export_appeals']),
   async (req: AuthRequest, res: express.Response) => {
     try {
       const userId = req.user!.userId;
