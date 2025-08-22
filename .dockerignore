@@ -7,3 +7,5 @@ docker-compose.yml
 .gitignore
 src/tests/
 .vscode
+__tests__
+tests

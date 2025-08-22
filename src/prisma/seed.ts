@@ -12,7 +12,7 @@ async function main() {
     'view_profile',
     'update_profile',
     'logout',
-    // Права для работы с обращениями
+    // Обращения права
     'create_appeal',
     'view_appeal',
     'assign_appeal',
@@ -22,6 +22,15 @@ async function main() {
     'delete_appeal_message',
     'manage_appeal_watchers',
     'export_appeals',
+    // QR-коды права
+    'create_qr',
+    'view_qr',
+    'update_qr',
+    'delete_qr',
+    'restore_qr',
+    'view_qr_analytics',
+    'export_qr',
+    'view_qr_stats',
   ];
 
   // Убеждаемся, что все permissions существуют (upsert создаёт при отсутствии)
