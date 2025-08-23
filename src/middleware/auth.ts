@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-
-import { ProfileStatus } from '@prisma/client';
+import { PrismaClient, ProfileStatus } from '@prisma/client';
 
 interface JwtPayload {
   userId: number;
@@ -17,8 +16,15 @@ export interface AuthRequest<P = {}, ResBody = {}, ReqBody = {}, ReqQuery = {}>
   user?: JwtPayload;
 }
 
-const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
+const accessTokenSecret =
+  process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 
+// единый инстанс Prisma
+const prisma = new PrismaClient();
+
+/**
+ * Аутентификация по JWT (Bearer)
+ */
 export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
 
@@ -27,13 +33,11 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
   }
 
   const parts = authHeader.split(' ');
-
   if (parts.length !== 2 || parts[0] !== 'Bearer') {
     return res.status(401).json({ message: 'Неверный формат токена', code: 'BAD_AUTH_FORMAT' });
   }
 
   const token = parts[1].trim();
-
   if (!token) {
     return res.status(401).json({ message: 'Токен отсутствует', code: 'EMPTY_TOKEN' });
   }
@@ -68,51 +72,153 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
   }
 }
 
+/**
+ * Собирает все названия ролей с учётом иерархии (по имени роли).
+ */
+async function getRoleHierarchyByName(roleName: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  let current: string | null = roleName;
 
-async function getRoleHierarchy(roleName: string, prisma: any, rolesSet = new Set<string>()): Promise<Set<string>> {
-  if (rolesSet.has(roleName)) return rolesSet;
-  rolesSet.add(roleName);
+  while (current) {
+    if (names.has(current)) break;
+    names.add(current);
 
-  const role = await prisma.role.findUnique({
-    where: { name: roleName },
-    include: { parentRole: true },
-  });
+    // ЯВНАЯ типизация результата findUnique => нет TS7022
+    const res: { parentRole: { name: string } | null } | null =
+      await prisma.role.findUnique({
+        where: { name: current },
+        select: { parentRole: { select: { name: true } } },
+      });
 
-  if (role && role.parentRole) {
-    await getRoleHierarchy(role.parentRole.name, prisma, rolesSet);
+    current = res?.parentRole?.name ?? null;
   }
 
-  return rolesSet;
+  return names;
 }
 
+/**
+ * Авторизация по ролям (учитывает иерархию parentRole)
+ */
 export function authorizeRoles(allowedRoles: string[]) {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) return res.status(401).json({ message: 'Не авторизован' });
 
-    const prisma = new (await import('@prisma/client')).PrismaClient();
-
     try {
-      const userRoles = await getRoleHierarchy(req.user.role, prisma);
-      const hasRole = allowedRoles.some(role => userRoles.has(role));
+      const userRoles = await getRoleHierarchyByName(req.user.role);
+      const hasRole = allowedRoles.some((role) => userRoles.has(role));
       if (!hasRole) {
         return res.status(403).json({ message: 'Ошибка: не достаточно прав' });
       }
       next();
     } catch (error) {
       return res.status(500).json({ message: 'Ошибка при авторизации', error });
-    } finally {
-      await prisma.$disconnect();
     }
   };
 }
 
-export function authorizePermissions(requiredPermissions: string[]) {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user) return res.status(401).json({ message: 'Не авторизован' });
-    const hasPermission = requiredPermissions.every(p => req.user!.permissions.includes(p));
-    if (!hasPermission) {
-      return res.status(403).json({ message: 'Ошибка: не достаточно прав' });
+/**
+ * Собирает цепочку родительских ролей, включая исходную роль, по id.
+ * Возвращает Set со всеми id ролей.
+ */
+async function collectRoleChain(roleId?: number | null): Promise<Set<number>> {
+  const ids = new Set<number>();
+  let current: number | null = roleId ?? null;
+
+  while (current) {
+    if (ids.has(current)) break; // защита от циклов
+    ids.add(current);
+    const next = await prisma.role.findUnique({
+      where: { id: current },
+      select: { parentRoleId: true },
+    });
+    current = next?.parentRoleId ?? null;
+  }
+
+  return ids;
+}
+
+/**
+ * Рассчитывает полный набор прав пользователя из:
+ * - базовой роли user.role (+ вся иерархия parentRoleId),
+ * - всех ролей из DepartmentRole (+ их иерархии).
+ */
+async function computeUserPermissions(userId: number): Promise<Set<string>> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      roleId: true,
+      departmentRoles: {
+        select: { roleId: true },
+      },
+    },
+  });
+
+  if (!user) return new Set<string>();
+
+  // стартовые роли: глобальная + роли по отделам
+  const seedRoleIds = new Set<number>([
+    ...(user.roleId ? [user.roleId] : []),
+    ...user.departmentRoles.map((dr: { roleId: number }) => dr.roleId),
+  ]);
+
+  // разворачиваем иерархии
+  const allRoleIds = new Set<number>();
+  for (const rid of seedRoleIds) {
+    const chain = await collectRoleChain(rid);
+    chain.forEach((id) => allRoleIds.add(id));
+  }
+
+  if (allRoleIds.size === 0) return new Set<string>();
+
+  // забираем права по всем ролям
+  const rolePerms = await prisma.rolePermissions.findMany({
+    where: { roleId: { in: Array.from(allRoleIds) } },
+    include: { permission: { select: { name: true } } },
+  });
+
+  const permSet = new Set<string>(
+    rolePerms.map((rp: { permission: { name: string } }) => rp.permission.name)
+  );
+
+  return permSet;
+}
+
+/**
+ * Проверка прав с учётом ролей пользователя, DepartmentRole и иерархии ролей.
+ * @param requiredPermissions список требуемых прав
+ * @param options.mode 'all' — нужны все права (по умолчанию), 'any' — достаточно одного из списка
+ */
+export function authorizePermissions(
+  requiredPermissions: string[],
+  options: { mode?: 'all' | 'any' } = {}
+) {
+  const mode = options.mode ?? 'all';
+
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: 'Не авторизован' });
+      }
+
+      // считаем полный набор прав пользователя из БД
+      const permSet = await computeUserPermissions(req.user.userId);
+
+      // положим в req.user.permissions для повторного использования
+      req.user.permissions = Array.from(permSet);
+
+      const hasPermission =
+        mode === 'any'
+          ? requiredPermissions.some((p) => permSet.has(p))
+          : requiredPermissions.every((p) => permSet.has(p));
+
+      if (!hasPermission) {
+        return res.status(403).json({ message: 'Ошибка: не достаточно прав' });
+      }
+
+      return next();
+    } catch (err) {
+      console.error('authorizePermissions error:', err);
+      return res.status(500).json({ message: 'Ошибка проверки прав' });
     }
-    next();
   };
 }

@@ -96,14 +96,23 @@ async function main() {
     'edit_appeal_message',
     'delete_appeal_message',
     'manage_appeal_watchers',
-  ];
-
-  // "department_manager" — права на назначение и изменение статусов, экспорт обращений
-  const managerPermissions = [
-    'assign_appeal',
+    'create_qr',
+    'view_qr',
+    'update_qr',
+    'delete_qr',
+    'restore_qr',
+    'view_qr_analytics',
+    'export_qr',
+    'view_qr_stats',
     'update_appeal_status',
+    'assign_appeal',
     'export_appeals',
   ];
+
+  // // "department_manager" — права на назначение и изменение статусов, экспорт обращений
+  // const managerPermissions = [
+  //   'export_appeals'
+  // ];
 
   // Вспомогательная функция: удаляет старые permissions роли и добавляет новые
   async function assignPermissions(
@@ -132,8 +141,8 @@ async function main() {
   // Для "employee" — права на обращения
   await assignPermissions(employeeRole.id, employeePermissions);
 
-  // Для "department_manager" — свои дополнительные права
-  await assignPermissions(managerRole.id, managerPermissions);
+  // // Для "department_manager" — свои дополнительные права
+  // await assignPermissions(managerRole.id, managerPermissions);
 
   // Для "admin" — все существующие разрешения
   const allPermissions = await prisma.permission.findMany();

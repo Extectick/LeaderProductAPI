@@ -1,3 +1,4 @@
+// routes/appeals.ts
 import express from 'express';
 import multer from 'multer';
 import { Parser } from 'json2csv';
@@ -7,6 +8,8 @@ import {
   AppealPriority,
   AttachmentType,
 } from '@prisma/client';
+import { z } from 'zod';
+
 import {
   authenticateToken,
   authorizePermissions,
@@ -19,48 +22,57 @@ import {
   ErrorCodes,
 } from '../utils/apiResponse';
 
-// Импортируем типы запросов и ответов для обращений
 import {
-  AppealCreateRequest,
   AppealCreateResponse,
   AppealListResponse,
   AppealDetailResponse,
-  AppealAssignRequest,
   AppealAssignResponse,
-  AppealStatusUpdateRequest,
   AppealStatusUpdateResponse,
-  AppealAddMessageRequest,
   AppealAddMessageResponse,
   AppealWatchersUpdateResponse,
-  AppealWatchersUpdateRequest,
   AppealDeleteMessageResponse,
-  AppealEditMessageRequest,
   AppealEditMessageResponse,
-  AppealExportQuery,
 } from '../types/appealTypes';
 
 import { Server as SocketIOServer } from 'socket.io';
 
+// === ВАЖНО: импортируем все схемы и типы из src/validation/appeals.schema ===
+import {
+  // Создание обращения
+  CreateAppealBodySchema,
+  CreateAppealBody,
+  // Листинг
+  ListQuerySchema,
+  // id/params
+  IdParamSchema,
+  MessageIdParamSchema,
+  // Тела запросов
+  AssignBodySchema,
+  StatusBodySchema,
+  AddMessageBodySchema,
+  WatchersBodySchema,
+  EditMessageBodySchema,
+  // Экспорт
+  ExportQuerySchema,
+} from '../validation/appeals.schema';
+
 const router = express.Router();
 const prisma = new PrismaClient();
-
-// Настройка Multer: файлы сохраняются в папку uploads/
 const upload = multer({ dest: 'uploads/' });
 
-/**
- * @openapi
- * tags:
- *   - name: Appeals
- *     description: Обращения (тикеты), сообщения, исполнители и экспорт
- */
-
-/**
- * Функция для определения типа вложения на основе MIME-типов.
- */
+/** Определение типа вложения */
 function detectAttachmentType(mime: string): AttachmentType {
   if (mime.startsWith('image/')) return 'IMAGE';
   if (mime.startsWith('audio/')) return 'AUDIO';
   return 'FILE';
+}
+
+/** Унификация сообщения об ошибке Zod */
+function zodErrorMessage(e: z.ZodError) {
+  const i = e.issues?.[0];
+  if (!i) return 'Ошибка валидации';
+  const where = i.path?.length ? ` [${i.path.join('.')}]` : '';
+  return `${i.message}${where}`;
 }
 
 /**
@@ -70,38 +82,8 @@ function detectAttachmentType(mime: string): AttachmentType {
  *     tags: [Appeals]
  *     summary: Создать новое обращение
  *     description: Создаёт обращение и первое сообщение; поддерживает загрузку вложений.
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["create_appeal"]
- *     requestBody:
- *       required: true
- *       content:
- *         multipart/form-data:
- *           schema:
- *             type: object
- *             properties:
- *               toDepartmentId: { type: integer }
- *               title: { type: string }
- *               text: { type: string }
- *               priority: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
- *               deadline: { type: string, format: date-time }
- *               attachments:
- *                 type: array
- *                 items: { type: string, format: binary }
- *             required: [toDepartmentId, text]
- *     responses:
- *       201:
- *         description: Обращение создано
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Обращение создано" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealCreateData'
  */
 router.post(
   '/',
@@ -110,47 +92,30 @@ router.post(
   authorizePermissions(['create_appeal']),
   upload.array('attachments'),
   async (
-    req: AuthRequest<{}, AppealCreateResponse, AppealCreateRequest>,
+    req: AuthRequest<{}, AppealCreateResponse, CreateAppealBody>,
     res: express.Response
   ) => {
     try {
-      const userId = req.user!.userId;
-      const {
-        toDepartmentId,
-        title,
-        text,
-        priority,
-        deadline,
-      } = req.body;
-
-      if (!toDepartmentId) {
-        return res.status(400).json(
-          errorResponse(
-            'Поле toDepartmentId обязательно',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+      // Валидация body
+      const parsed = CreateAppealBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
       }
-      if (!text || text.trim() === '') {
-        return res.status(400).json(
-          errorResponse(
-            'Поле text обязательно',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
-      }
+      const { toDepartmentId, title, text, priority, deadline } = parsed.data;
 
+      // Проверяем отдел
       const targetDept = await prisma.department.findUnique({
-        where: { id: Number(toDepartmentId) },
+        where: { id: toDepartmentId },
       });
       if (!targetDept) {
-        return res.status(404).json(
-          errorResponse(
-            'Отдел-получатель не найден',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Отдел-получатель не найден', ErrorCodes.NOT_FOUND));
       }
+
+      const userId = req.user!.userId;
 
       const employee = await prisma.employeeProfile.findUnique({
         where: { userId },
@@ -165,17 +130,12 @@ router.post(
         const appeal = await tx.appeal.create({
           data: {
             number: nextNumber,
-            fromDepartmentId:
-              employee?.departmentId ?? null,
-            toDepartmentId: Number(toDepartmentId),
+            fromDepartmentId: employee?.departmentId ?? null,
+            toDepartmentId,
             createdById: userId,
             status: AppealStatus.OPEN,
-            priority:
-              (priority as AppealPriority) ??
-              AppealPriority.MEDIUM,
-            deadline: deadline
-              ? new Date(deadline)
-              : null,
+            priority: (priority as AppealPriority) ?? AppealPriority.MEDIUM,
+            deadline: deadline ? new Date(deadline) : null,
             title,
           },
         });
@@ -188,17 +148,14 @@ router.post(
           },
         });
 
-        const files =
-          (req.files as Express.Multer.File[]) ?? [];
+        const files = (req.files as Express.Multer.File[]) ?? [];
         for (const file of files) {
           await tx.appealAttachment.create({
             data: {
               messageId: message.id,
               fileUrl: file.path,
               fileName: file.originalname,
-              fileType: detectAttachmentType(
-                file.mimetype
-              ),
+              fileType: detectAttachmentType(file.mimetype),
             },
           });
         }
@@ -206,18 +163,15 @@ router.post(
         return appeal;
       });
 
-      // WebSocket: уведомляем отдел-получатель о новом обращении
+      // WebSocket уведомление отдела-получателя
       const io = req.app.get('io') as SocketIOServer;
-      io.to(`department:${createdAppeal.toDepartmentId}`).emit(
-        'appealCreated',
-        {
-          id: createdAppeal.id,
-          number: createdAppeal.number,
-          status: createdAppeal.status,
-          priority: createdAppeal.priority,
-          title: createdAppeal.title,
-        }
-      );
+      io.to(`department:${createdAppeal.toDepartmentId}`).emit('appealCreated', {
+        id: createdAppeal.id,
+        number: createdAppeal.number,
+        status: createdAppeal.status,
+        priority: createdAppeal.priority,
+        title: createdAppeal.title,
+      });
 
       return res.status(201).json(
         successResponse(
@@ -233,12 +187,9 @@ router.post(
       );
     } catch (error) {
       console.error('Ошибка создания обращения:', error);
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка создания обращения',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка создания обращения', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -249,116 +200,59 @@ router.post(
  *   get:
  *     tags: [Appeals]
  *     summary: Список обращений
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["view_appeal"]
- *     parameters:
- *       - in: query
- *         name: scope
- *         schema: { type: string, enum: [my, department, assigned], default: my }
- *         description: Область выборки
- *       - in: query
- *         name: limit
- *         schema: { type: integer, default: 20 }
- *       - in: query
- *         name: offset
- *         schema: { type: integer, default: 0 }
- *     responses:
- *       200:
- *         description: Успешно
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Список обращений" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealListData'
- *       400: { description: Ошибка параметров }
- *       401: { description: Не авторизован }
- *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/',
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['view_appeal']),
-  async (
-    req: AuthRequest<{}, AppealListResponse>,
-    res: express.Response
-  ) => {
+  async (req: AuthRequest<{}, AppealListResponse>, res: express.Response) => {
     try {
+      const parsed = ListQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { scope, limit, offset, status, priority } = parsed.data;
+
       const userId = req.user!.userId;
-      const query = req.query as { [key: string]: string | undefined };
 
-      const scope = query.scope ?? 'my';
-      const limit = parseInt(query.limit ?? '20', 10);
-      const offset = parseInt(query.offset ?? '0', 10);
-
-      let filter: any = {};
-
+      let where: any = {};
       switch (scope) {
         case 'my':
-          filter = { createdById: userId };
+          where.createdById = userId;
           break;
         case 'department': {
-          const employee = await prisma.employeeProfile.findUnique(
-            {
-              where: { userId },
-            }
-          );
+          const employee = await prisma.employeeProfile.findUnique({ where: { userId } });
           if (!employee?.departmentId) {
-            return res.status(400).json(
-              errorResponse(
-                'У пользователя не указан отдел',
-                ErrorCodes.VALIDATION_ERROR
-              )
-            );
+            return res
+              .status(400)
+              .json(errorResponse('У пользователя не указан отдел', ErrorCodes.VALIDATION_ERROR));
           }
-          filter = {
-            toDepartmentId: employee.departmentId,
-          };
+          where.toDepartmentId = employee.departmentId;
           break;
         }
         case 'assigned':
-          filter = {
-            assignees: {
-              some: { userId },
-            },
-          };
+          where.assignees = { some: { userId } };
           break;
-        default:
-          filter = {
-            OR: [
-              { createdById: userId },
-              {
-                assignees: {
-                  some: { userId },
-                },
-              },
-            ],
-          };
       }
 
+      if (status) where.status = status;
+      if (priority) where.priority = priority;
+
       const [total, appeals] = await prisma.$transaction([
-        prisma.appeal.count({ where: filter }),
+        prisma.appeal.count({ where }),
         prisma.appeal.findMany({
-          where: filter,
+          where,
           include: {
             fromDepartment: true,
             toDepartment: true,
             assignees: {
               include: {
-                user: {
-                  select: {
-                    id: true,
-                    email: true,
-                    firstName: true,
-                    lastName: true,
-                  },
-                },
+                user: { select: { id: true, email: true, firstName: true, lastName: true } },
               },
             },
           },
@@ -370,28 +264,15 @@ router.get(
 
       return res.json(
         successResponse(
-          {
-            data: appeals,
-            meta: {
-              total,
-              limit,
-              offset,
-            },
-          },
+          { data: appeals, meta: { total, limit, offset } },
           'Список обращений'
         )
       );
     } catch (error) {
-      console.error(
-        'Ошибка получения списка обращений:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка получения списка обращений',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка получения списка обращений:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка получения списка обращений', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -402,47 +283,23 @@ router.get(
  *   get:
  *     tags: [Appeals]
  *     summary: Детали обращения
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["view_appeal"]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     responses:
- *       200:
- *         description: Успешно
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Детали обращения" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealDetailData'
- *       401: { description: Не авторизован }
- *       403: { description: Нет доступа }
- *       404: { description: Не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/:id',
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['view_appeal']),
-  async (
-    req: AuthRequest<
-      { id: string },
-      AppealDetailResponse
-    >,
-    res: express.Response
-  ) => {
+  async (req: AuthRequest<{ id: string }, AppealDetailResponse>, res: express.Response) => {
     try {
-      const userId = req.user!.userId;
-      const appealId = parseInt(req.params.id, 10);
+      const parsed = IdParamSchema.safeParse(req.params);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { id: appealId } = parsed.data;
 
       const appeal = await prisma.appeal.findUnique({
         where: { id: appealId },
@@ -452,63 +309,37 @@ router.get(
           createdBy: true,
           assignees: { include: { user: true } },
           watchers: { include: { user: true } },
-          statusHistory: {
-            orderBy: { changedAt: 'desc' },
-            include: { changedBy: true },
-          },
+          statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
           messages: {
             orderBy: { createdAt: 'asc' },
-            include: {
-              sender: true,
-              attachments: true,
-            },
+            include: { sender: true, attachments: true },
           },
         },
       });
 
       if (!appeal) {
-        return res.status(404).json(
-          errorResponse(
-            'Обращение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
+      const userId = req.user!.userId;
       const isCreator = appeal.createdById === userId;
-      const isAssignee = appeal.assignees.some(
-        (a) => a.userId === userId
-      );
+      const isAssignee = appeal.assignees.some((a) => a.userId === userId);
       const employee = await prisma.employeeProfile.findFirst({
-        where: {
-          userId,
-          departmentId: appeal.toDepartmentId,
-        },
+        where: { userId, departmentId: appeal.toDepartmentId },
       });
 
       if (!isCreator && !isAssignee && !employee) {
-        return res.status(403).json(
-          errorResponse(
-            'Нет доступа к этому обращению',
-            ErrorCodes.FORBIDDEN
-          )
-        );
+        return res
+          .status(403)
+          .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
       }
 
-      return res.json(
-        successResponse(
-          appeal,
-          'Детали обращения'
-        )
-      );
+      return res.json(successResponse(appeal, 'Детали обращения'));
     } catch (error) {
       console.error('Ошибка получения обращения:', error);
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка получения обращения',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка получения обращения', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -519,42 +350,8 @@ router.get(
  *   put:
  *     tags: [Appeals]
  *     summary: Назначить исполнителей обращению
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["assign_appeal"]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               assigneeIds:
- *                 type: array
- *                 items: { type: integer }
- *             required: [assigneeIds]
- *     responses:
- *       200:
- *         description: Исполнители назначены
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Исполнители назначены" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealAssignData'
- *       400: { description: Ошибка валидации }
- *       401: { description: Не авторизован }
- *       404: { description: Обращение не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/assign',
@@ -562,52 +359,35 @@ router.put(
   checkUserStatus,
   authorizePermissions(['assign_appeal']),
   async (
-    req: AuthRequest<
-      { id: string },
-      AppealAssignResponse,
-      AppealAssignRequest
-    >,
+    req: AuthRequest<{ id: string }, AppealAssignResponse, unknown>,
     res: express.Response
   ) => {
     try {
-      const appealId = parseInt(req.params.id, 10);
-      const { assigneeIds } = req.body;
-
-      if (
-        !assigneeIds ||
-        !Array.isArray(assigneeIds) ||
-        assigneeIds.length === 0
-      ) {
-        return res.status(400).json(
-          errorResponse(
-            'assigneeIds должен быть непустым массивом',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+      const b = AssignBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { id: appealId } = p.data;
+      const { assigneeIds } = b.data as { assigneeIds: number[] };
 
-      const appeal = await prisma.appeal.findUnique({
-        where: { id: appealId },
-      });
+      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
       if (!appeal) {
-        return res.status(404).json(
-          errorResponse(
-            'Обращение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      await prisma.appealAssignee.deleteMany({
-        where: { appealId },
-      });
+      await prisma.appealAssignee.deleteMany({ where: { appealId } });
       for (const uid of assigneeIds) {
-        await prisma.appealAssignee.create({
-          data: {
-            appealId,
-            userId: uid,
-          },
-        });
+        await prisma.appealAssignee.create({ data: { appealId, userId: uid } });
       }
 
       const updatedAppeal = await prisma.appeal.update({
@@ -624,13 +404,9 @@ router.put(
         },
       });
 
-      // WebSocket: уведомляем назначенных исполнителей и участников обращения
       const io = req.app.get('io') as SocketIOServer;
       for (const uid of assigneeIds) {
-        io.to(`user:${uid}`).emit('appealAssigned', {
-          appealId,
-          userId: uid,
-        });
+        io.to(`user:${uid}`).emit('appealAssigned', { appealId, userId: uid });
       }
       io.to(`appeal:${appealId}`).emit('statusUpdated', {
         appealId,
@@ -638,25 +414,13 @@ router.put(
       });
 
       return res.json(
-        successResponse(
-          {
-            id: appealId,
-            status: updatedAppeal.status,
-          },
-          'Исполнители назначены'
-        )
+        successResponse({ id: appealId, status: updatedAppeal.status }, 'Исполнители назначены')
       );
     } catch (error) {
-      console.error(
-        'Ошибка назначения исполнителей:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка назначения исполнителей',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка назначения исполнителей:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка назначения исполнителей', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -667,40 +431,8 @@ router.put(
  *   put:
  *     tags: [Appeals]
  *     summary: Обновить статус обращения
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["update_appeal_status"]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               status: { type: string, enum: [OPEN,IN_PROGRESS,RESOLVED,CLOSED] }
- *             required: [status]
- *     responses:
- *       200:
- *         description: Статус обновлён
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Статус обновлён" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealStatusUpdateData'
- *       400: { description: Неверный статус }
- *       401: { description: Не авторизован }
- *       404: { description: Обращение не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/status',
@@ -708,39 +440,30 @@ router.put(
   checkUserStatus,
   authorizePermissions(['update_appeal_status']),
   async (
-    req: AuthRequest<
-      { id: string },
-      AppealStatusUpdateResponse,
-      AppealStatusUpdateRequest
-    >,
+    req: AuthRequest<{ id: string }, AppealStatusUpdateResponse, unknown>,
     res: express.Response
   ) => {
     try {
-      const appealId = parseInt(req.params.id, 10);
-      const { status } = req.body;
-
-      if (
-        !status ||
-        !Object.values(AppealStatus).includes(status)
-      ) {
-        return res.status(400).json(
-          errorResponse(
-            'Неверный статус',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+      const b = StatusBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { id: appealId } = p.data;
+      const { status } = b.data as { status: AppealStatus };
 
-      const appeal = await prisma.appeal.findUnique({
-        where: { id: appealId },
-      });
+      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
       if (!appeal) {
-        return res.status(404).json(
-          errorResponse(
-            'Обращение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
       const updatedAppeal = await prisma.appeal.update({
@@ -757,33 +480,17 @@ router.put(
         },
       });
 
-      // WebSocket: уведомляем участников обращения о смене статуса
       const io = req.app.get('io') as SocketIOServer;
-      io.to(`appeal:${appealId}`).emit('statusUpdated', {
-        appealId,
-        status,
-      });
+      io.to(`appeal:${appealId}`).emit('statusUpdated', { appealId, status });
 
       return res.json(
-        successResponse(
-          {
-            id: appealId,
-            status: updatedAppeal.status,
-          },
-          'Статус обновлён'
-        )
+        successResponse({ id: appealId, status: updatedAppeal.status }, 'Статус обновлён')
       );
     } catch (error) {
-      console.error(
-        'Ошибка обновления статуса:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка обновления статуса',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка обновления статуса:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка обновления статуса', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -795,38 +502,8 @@ router.put(
  *     tags: [Appeals]
  *     summary: Добавить сообщение к обращению
  *     description: Можно отправить текст и/или файлы-вложения.
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["add_appeal_message"]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: false
- *       content:
- *         multipart/form-data:
- *           schema:
- *             type: object
- *             properties:
- *               text: { type: string }
- *               attachments:
- *                 type: array
- *                 items: { type: string, format: binary }
- *     responses:
- *       201:
- *         description: Сообщение добавлено
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Сообщение добавлено" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealAddMessageData'
  */
 router.post(
   '/:id/messages',
@@ -835,39 +512,37 @@ router.post(
   authorizePermissions(['add_appeal_message']),
   upload.array('attachments'),
   async (
-    req: AuthRequest<
-      { id: string },
-      AppealAddMessageResponse,
-      AppealAddMessageRequest
-    >,
+    req: AuthRequest<{ id: string }, AppealAddMessageResponse, unknown>,
     res: express.Response
   ) => {
     try {
-      const appealId = parseInt(req.params.id, 10);
-      const { text } = req.body;
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const b = AddMessageBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { id: appealId } = p.data;
+      const { text } = b.data as { text?: string };
 
-      const appeal = await prisma.appeal.findUnique({
-        where: { id: appealId },
-      });
+      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
       if (!appeal) {
-        return res.status(404).json(
-          errorResponse(
-            'Обращение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      const files =
-        (req.files as Express.Multer.File[]) ?? [];
-
+      const files = (req.files as Express.Multer.File[]) ?? [];
       if (!text && files.length === 0) {
-        return res.status(400).json(
-          errorResponse(
-            'Нужно отправить текст или вложения',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+        return res
+          .status(400)
+          .json(errorResponse('Нужно отправить текст или вложения', ErrorCodes.VALIDATION_ERROR));
       }
 
       const message = await prisma.appealMessage.create({
@@ -884,14 +559,11 @@ router.post(
             messageId: message.id,
             fileUrl: file.path,
             fileName: file.originalname,
-            fileType: detectAttachmentType(
-              file.mimetype
-            ),
+            fileType: detectAttachmentType(file.mimetype),
           },
         });
       }
 
-      // WebSocket: уведомляем всех участников обращения о новом сообщении
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${appealId}`).emit('messageAdded', {
         appealId,
@@ -901,26 +573,14 @@ router.post(
         createdAt: message.createdAt,
       });
 
-      return res.status(201).json(
-        successResponse(
-          {
-            id: message.id,
-            createdAt: message.createdAt,
-          },
-          'Сообщение добавлено'
-        )
-      );
+      return res
+        .status(201)
+        .json(successResponse({ id: message.id, createdAt: message.createdAt }, 'Сообщение добавлено'));
     } catch (error) {
-      console.error(
-        'Ошибка добавления сообщения:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка добавления сообщения',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка добавления сообщения:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка добавления сообщения', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -931,42 +591,8 @@ router.post(
  *   put:
  *     tags: [Appeals]
  *     summary: Обновить список наблюдателей обращения
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["manage_appeal_watchers"]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               watcherIds:
- *                 type: array
- *                 items: { type: integer }
- *             required: [watcherIds]
- *     responses:
- *       200:
- *         description: Список наблюдателей обновлён
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Список наблюдателей обновлён" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealWatchersUpdateData'
- *       400: { description: Ошибка валидации }
- *       401: { description: Не авторизован }
- *       404: { description: Обращение не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/:id/watchers',
@@ -974,57 +600,38 @@ router.put(
   checkUserStatus,
   authorizePermissions(['manage_appeal_watchers']),
   async (
-    req: AuthRequest<
-      { id: string },
-      AppealWatchersUpdateResponse,
-      AppealWatchersUpdateRequest
-    >,
+    req: AuthRequest<{ id: string }, AppealWatchersUpdateResponse, unknown>,
     res: express.Response
   ) => {
     try {
-      const appealId = parseInt(req.params.id, 10);
-      const { watcherIds } = req.body;
-
-      if (
-        !watcherIds ||
-        !Array.isArray(watcherIds)
-      ) {
-        return res.status(400).json(
-          errorResponse(
-            'watcherIds должен быть массивом',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+      const b = WatchersBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { id: appealId } = p.data;
+      const { watcherIds } = b.data as { watcherIds: number[] };
 
-      const appeal = await prisma.appeal.findUnique({
-        where: { id: appealId },
-      });
+      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
       if (!appeal) {
-        return res.status(404).json(
-          errorResponse(
-            'Обращение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      // TODO: Проверка прав (автор, руководитель или админ)
-
-      await prisma.appealWatcher.deleteMany({
-        where: { appealId },
-      });
-
+      // При необходимости — проверки прав (автор/руководитель/админ)
+      await prisma.appealWatcher.deleteMany({ where: { appealId } });
       for (const uid of watcherIds) {
-        await prisma.appealWatcher.create({
-          data: {
-            appealId,
-            userId: uid,
-          },
-        });
+        await prisma.appealWatcher.create({ data: { appealId, userId: uid } });
       }
 
-      // WebSocket: уведомляем участников обращения об обновлении списка наблюдателей
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${appealId}`).emit('watchersUpdated', {
         appealId,
@@ -1032,25 +639,13 @@ router.put(
       });
 
       return res.json(
-        successResponse(
-          {
-            id: appealId,
-            watchers: watcherIds,
-          },
-          'Список наблюдателей обновлён'
-        )
+        successResponse({ id: appealId, watchers: watcherIds }, 'Список наблюдателей обновлён')
       );
     } catch (error) {
-      console.error(
-        'Ошибка обновления наблюдателей:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка обновления наблюдателей',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка обновления наблюдателей:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка обновления наблюдателей', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -1061,41 +656,8 @@ router.put(
  *   put:
  *     tags: [Appeals]
  *     summary: Редактировать сообщение обращения
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["edit_appeal_message"]
- *     parameters:
- *       - in: path
- *         name: messageId
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               text: { type: string }
- *             required: [text]
- *     responses:
- *       200:
- *         description: Сообщение обновлено
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Сообщение изменено" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealEditMessageData'
- *       400: { description: Ошибка валидации }
- *       401: { description: Не авторизован }
- *       403: { description: Нельзя редактировать чужое сообщение }
- *       404: { description: Сообщение не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.put(
   '/messages/:messageId',
@@ -1103,60 +665,42 @@ router.put(
   checkUserStatus,
   authorizePermissions(['edit_appeal_message']),
   async (
-    req: AuthRequest<
-      { messageId: string },
-      AppealEditMessageResponse,
-      AppealEditMessageRequest
-    >,
+    req: AuthRequest<{ messageId: string }, AppealEditMessageResponse, unknown>,
     res: express.Response
   ) => {
     try {
-      const messageId = parseInt(
-        req.params.messageId,
-        10
-      );
-      const { text } = req.body;
-
-      if (!text || text.trim() === '') {
-        return res.status(400).json(
-          errorResponse(
-            'Поле text обязательно',
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
+      const p = MessageIdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+      const b = EditMessageBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { messageId } = p.data;
+      const { text } = b.data as { text: string };
 
-      const message =
-        await prisma.appealMessage.findUnique({
-          where: { id: messageId },
-        });
+      const message = await prisma.appealMessage.findUnique({ where: { id: messageId } });
       if (!message) {
-        return res.status(404).json(
-          errorResponse(
-            'Сообщение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+        return res
+          .status(404)
+          .json(errorResponse('Сообщение не найдено', ErrorCodes.NOT_FOUND));
       }
-
       if (message.senderId !== req.user!.userId) {
-        return res.status(403).json(
-          errorResponse(
-            'Нельзя редактировать чужое сообщение',
-            ErrorCodes.FORBIDDEN
-          )
-        );
+        return res
+          .status(403)
+          .json(errorResponse('Нельзя редактировать чужое сообщение', ErrorCodes.FORBIDDEN));
       }
 
       const updated = await prisma.appealMessage.update({
         where: { id: messageId },
-        data: {
-          text,
-          editedAt: new Date(),
-        },
+        data: { text, editedAt: new Date() },
       });
 
-      // WebSocket: уведомляем участников обращения об изменении сообщения
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${updated.appealId}`).emit('messageEdited', {
         appealId: updated.appealId,
@@ -1166,25 +710,13 @@ router.put(
       });
 
       return res.json(
-        successResponse(
-          {
-            id: updated.id,
-            editedAt: updated.editedAt!,
-          },
-          'Сообщение изменено'
-        )
+        successResponse({ id: updated.id, editedAt: updated.editedAt! }, 'Сообщение изменено')
       );
     } catch (error) {
-      console.error(
-        'Ошибка редактирования сообщения:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка редактирования сообщения',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка редактирования сообщения:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка редактирования сообщения', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -1195,31 +727,8 @@ router.put(
  *   delete:
  *     tags: [Appeals]
  *     summary: Удалить сообщение обращения (soft-delete)
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["delete_appeal_message"]
- *     parameters:
- *       - in: path
- *         name: messageId
- *         required: true
- *         schema: { type: integer }
- *     responses:
- *       200:
- *         description: Сообщение удалено
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [success, message, data]
- *               properties:
- *                 success: { type: boolean, example: true }
- *                 message: { type: string, example: "Сообщение удалено" }
- *                 data:
- *                   $ref: '#/components/schemas/AppealDeleteMessageData'
- *       401: { description: Не авторизован }
- *       403: { description: Нельзя удалять чужое сообщение }
- *       404: { description: Сообщение не найдено }
- *       500: { description: Внутренняя ошибка }
  */
 router.delete(
   '/messages/:messageId',
@@ -1227,37 +736,28 @@ router.delete(
   checkUserStatus,
   authorizePermissions(['delete_appeal_message']),
   async (
-    req: AuthRequest<
-      { messageId: string },
-      AppealDeleteMessageResponse
-    >,
+    req: AuthRequest<{ messageId: string }, AppealDeleteMessageResponse>,
     res: express.Response
   ) => {
     try {
-      const messageId = parseInt(
-        req.params.messageId,
-        10
-      );
-      const message =
-        await prisma.appealMessage.findUnique({
-          where: { id: messageId },
-        });
-      if (!message) {
-        return res.status(404).json(
-          errorResponse(
-            'Сообщение не найдено',
-            ErrorCodes.NOT_FOUND
-          )
-        );
+      const p = MessageIdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+      const { messageId } = p.data;
 
+      const message = await prisma.appealMessage.findUnique({ where: { id: messageId } });
+      if (!message) {
+        return res
+          .status(404)
+          .json(errorResponse('Сообщение не найдено', ErrorCodes.NOT_FOUND));
+      }
       if (message.senderId !== req.user!.userId) {
-        return res.status(403).json(
-          errorResponse(
-            'Нельзя удалить чужое сообщение',
-            ErrorCodes.FORBIDDEN
-          )
-        );
+        return res
+          .status(403)
+          .json(errorResponse('Нельзя удалить чужое сообщение', ErrorCodes.FORBIDDEN));
       }
 
       await prisma.appealMessage.update({
@@ -1265,30 +765,18 @@ router.delete(
         data: { deleted: true },
       });
 
-      // WebSocket: уведомляем участников обращения об удалении сообщения
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${message.appealId}`).emit('messageDeleted', {
         appealId: message.appealId,
         messageId,
       });
 
-      return res.json(
-        successResponse(
-          { id: messageId },
-          'Сообщение удалено'
-        )
-      );
+      return res.json(successResponse({ id: messageId }, 'Сообщение удалено'));
     } catch (error) {
-      console.error(
-        'Ошибка удаления сообщения:',
-        error
-      );
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка удаления сообщения',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      console.error('Ошибка удаления сообщения:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка удаления сообщения', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -1300,36 +788,8 @@ router.delete(
  *     tags: [Appeals]
  *     summary: Экспорт обращений в CSV
  *     description: Возвращает CSV-файл согласно фильтрам и области (scope).
- *     security:
- *       - bearerAuth: []
+ *     security: [ { bearerAuth: [] } ]
  *     x-permissions: ["export_appeals"]
- *     parameters:
- *       - in: query
- *         name: scope
- *         schema: { type: string, enum: [my, department, assigned], default: my }
- *       - in: query
- *         name: status
- *         schema: { type: string, enum: [OPEN,IN_PROGRESS,RESOLVED,CLOSED] }
- *       - in: query
- *         name: priority
- *         schema: { type: string, enum: [LOW,MEDIUM,HIGH,CRITICAL] }
- *       - in: query
- *         name: fromDate
- *         schema: { type: string, format: date-time }
- *       - in: query
- *         name: toDate
- *         schema: { type: string, format: date-time }
- *     responses:
- *       200:
- *         description: CSV-файл с обращениями
- *         content:
- *           text/csv:
- *             schema:
- *               type: string
- *               format: binary
- *       400: { description: Ошибка параметров }
- *       401: { description: Не авторизован }
- *       500: { description: Внутренняя ошибка }
  */
 router.get(
   '/export',
@@ -1338,68 +798,47 @@ router.get(
   authorizePermissions(['export_appeals']),
   async (req: AuthRequest, res: express.Response) => {
     try {
+      const parsed = ExportQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const { scope, status, priority, fromDate, toDate } = parsed.data;
+
       const userId = req.user!.userId;
-      const query = req.query as AppealExportQuery;
 
-      const {
-        scope = 'my',
-        status,
-        priority,
-        fromDate,
-        toDate,
-      } = query;
-
-      let filter: any = {};
+      let where: any = {};
       switch (scope) {
         case 'my':
-          filter.createdById = userId;
+          where.createdById = userId;
           break;
         case 'department': {
-          const employee = await prisma.employeeProfile.findUnique({
-            where: { userId },
-          });
+          const employee = await prisma.employeeProfile.findUnique({ where: { userId } });
           if (!employee?.departmentId) {
-            return res.status(400).json(
-              errorResponse(
-                'У пользователя не указан отдел',
-                ErrorCodes.VALIDATION_ERROR
-              )
-            );
+            return res
+              .status(400)
+              .json(errorResponse('У пользователя не указан отдел', ErrorCodes.VALIDATION_ERROR));
           }
-          filter.toDepartmentId = employee.departmentId;
+          where.toDepartmentId = employee.departmentId;
           break;
         }
         case 'assigned':
-          filter.assignees = {
-            some: { userId },
-          };
+          where.assignees = { some: { userId } };
           break;
-        default:
-          filter.OR = [
-            { createdById: userId },
-            { assignees: { some: { userId } } },
-          ];
       }
 
-      if (status) {
-        filter.status = status;
-      }
-      if (priority) {
-        filter.priority = priority;
-      }
+      if (status) where.status = status;
+      if (priority) where.priority = priority;
 
       if (fromDate || toDate) {
-        filter.createdAt = {};
-        if (fromDate) {
-          filter.createdAt.gte = new Date(fromDate);
-        }
-        if (toDate) {
-          filter.createdAt.lte = new Date(toDate);
-        }
+        where.createdAt = {};
+        if (fromDate) where.createdAt.gte = new Date(fromDate);
+        if (toDate) where.createdAt.lte = new Date(toDate);
       }
 
       const appeals = await prisma.appeal.findMany({
-        where: filter,
+        where,
         select: {
           id: true,
           number: true,
@@ -1432,19 +871,13 @@ router.get(
       const csv = parser.parse(appeals);
 
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="appeals_${Date.now()}.csv"`
-      );
+      res.setHeader('Content-Disposition', `attachment; filename="appeals_${Date.now()}.csv"`);
       return res.send('\uFEFF' + csv);
     } catch (error) {
       console.error('Ошибка экспорта обращений:', error);
-      return res.status(500).json(
-        errorResponse(
-          'Ошибка экспорта обращений',
-          ErrorCodes.INTERNAL_ERROR
-        )
-      );
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка экспорта обращений', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
