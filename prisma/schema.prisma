@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = "postgresql://postgres:Ovogup73_@192.168.30.205:5433/CRM?schema=public"
+  url      = env("DATABASE_URL")
 }
 
 enum ProfileStatus {

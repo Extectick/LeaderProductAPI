@@ -1,9 +1,11 @@
-// routes/appeals.ts
+// src/routes/appeals.ts
 import express from 'express';
+
 import multer from 'multer';
 import { Parser } from 'json2csv';
 import {
   PrismaClient,
+  Prisma,
   AppealStatus,
   AppealPriority,
   AttachmentType,
@@ -36,38 +38,50 @@ import {
 
 import { Server as SocketIOServer } from 'socket.io';
 
-// === ВАЖНО: импортируем все схемы и типы из src/validation/appeals.schema ===
+// Схемы валидации
 import {
-  // Создание обращения
   CreateAppealBodySchema,
   CreateAppealBody,
-  // Листинг
   ListQuerySchema,
-  // id/params
   IdParamSchema,
   MessageIdParamSchema,
-  // Тела запросов
   AssignBodySchema,
   StatusBodySchema,
   AddMessageBodySchema,
   WatchersBodySchema,
   EditMessageBodySchema,
-  // Экспорт
   ExportQuerySchema,
 } from '../validation/appeals.schema';
 
+// === импорт облачного хранилища (MinIO / S3-совместимое) ===
+import { uploadMulterFile } from '../storage/minio';
+
+// минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
+type HasAppealAttachment = {
+  appealAttachment: Prisma.AppealAttachmentDelegate<any>;
+};
+
 const router = express.Router();
 const prisma = new PrismaClient();
-const upload = multer({ dest: 'uploads/' });
 
-/** Определение типа вложения */
+// Храним файлы в памяти, чтобы получить file.buffer и отправить в MinIO
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50 MB на файл (измените под себя)
+    files: 20,                  // макс. файлов за раз
+  },
+  // fileFilter: ...
+});
+
+/** Определение типа вложения по mime */
 function detectAttachmentType(mime: string): AttachmentType {
-  if (mime.startsWith('image/')) return 'IMAGE';
-  if (mime.startsWith('audio/')) return 'AUDIO';
+  if (mime?.startsWith('image/')) return 'IMAGE';
+  if (mime?.startsWith('audio/')) return 'AUDIO';
   return 'FILE';
 }
 
-/** Унификация сообщения об ошибке Zod */
+/** Унифицированное сообщение Zod-ошибки */
 function zodErrorMessage(e: z.ZodError) {
   const i = e.issues?.[0];
   if (!i) return 'Ошибка валидации';
@@ -75,6 +89,28 @@ function zodErrorMessage(e: z.ZodError) {
   return `${i.message}${where}`;
 }
 
+/** Вспомогательно: загрузка всех файлов сообщения в MinIO и создание записей в БД */
+async function saveMulterFilesToAppealMessage(
+  db: HasAppealAttachment,
+  files: Express.Multer.File[] | undefined,
+  messageId: number
+) {
+  const list = files ?? [];
+  for (const file of list) {
+    const stored = await uploadMulterFile(file, /*asAttachment*/ false);
+    await db.appealAttachment.create({
+      data: {
+        messageId,
+        fileUrl: stored.url,           // если бакет приватный — можно хранить stored.key
+        fileName: stored.fileName,
+        fileType: detectAttachmentType(file.mimetype),
+      },
+    });
+  }
+}
+
+
+// POST /appeals — создание обращения + первое сообщение + загрузка вложений в облако
 /**
  * @openapi
  * /appeals:
@@ -90,42 +126,52 @@ router.post(
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['create_appeal']),
-  upload.array('attachments'),
+  upload.array('attachments'), // важно: именно массив "attachments"
   async (
     req: AuthRequest<{}, AppealCreateResponse, CreateAppealBody>,
     res: express.Response
   ) => {
     try {
-      // Валидация body
+      // 1) Валидация multipart-body (все поля приходят как строки)
       const parsed = CreateAppealBodySchema.safeParse(req.body);
       if (!parsed.success) {
         return res
           .status(400)
-          .json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+          .json(
+            errorResponse(
+              zodErrorMessage(parsed.error),
+              ErrorCodes.VALIDATION_ERROR
+            )
+          );
       }
       const { toDepartmentId, title, text, priority, deadline } = parsed.data;
 
-      // Проверяем отдел
+      // 2) Проверяем существование отдела-получателя
       const targetDept = await prisma.department.findUnique({
         where: { id: toDepartmentId },
       });
       if (!targetDept) {
         return res
           .status(404)
-          .json(errorResponse('Отдел-получатель не найден', ErrorCodes.NOT_FOUND));
+          .json(
+            errorResponse('Отдел-получатель не найден', ErrorCodes.NOT_FOUND)
+          );
       }
 
       const userId = req.user!.userId;
 
+      // 3) Профиль сотрудника (для fromDepartmentId)
       const employee = await prisma.employeeProfile.findUnique({
         where: { userId },
       });
 
+      // 4) Следующий номер обращения
       const lastAppeal = await prisma.appeal.findFirst({
         orderBy: { number: 'desc' },
       });
       const nextNumber = lastAppeal ? lastAppeal.number + 1 : 1;
 
+      // 5) Транзакция: создаём Appeal, первое сообщение и вложения
       const createdAppeal = await prisma.$transaction(async (tx) => {
         const appeal = await tx.appeal.create({
           data: {
@@ -144,26 +190,22 @@ router.post(
           data: {
             appealId: appeal.id,
             senderId: userId,
-            text,
+            text, // первый текст сообщения из формы
           },
         });
 
-        const files = (req.files as Express.Multer.File[]) ?? [];
-        for (const file of files) {
-          await tx.appealAttachment.create({
-            data: {
-              messageId: message.id,
-              fileUrl: file.path,
-              fileName: file.originalname,
-              fileType: detectAttachmentType(file.mimetype),
-            },
-          });
-        }
+        // --- загрузка вложений в MinIO ---
+        await saveMulterFilesToAppealMessage(
+          tx as unknown as HasAppealAttachment,
+          (req.files as Express.Multer.File[]) ?? [],
+          message.id
+        );
+        // --- конец загрузки вложений ---
 
         return appeal;
       });
 
-      // WebSocket уведомление отдела-получателя
+      // 6) WebSocket-уведомление отдела-получателя
       const io = req.app.get('io') as SocketIOServer;
       io.to(`department:${createdAppeal.toDepartmentId}`).emit('appealCreated', {
         id: createdAppeal.id,
@@ -173,6 +215,7 @@ router.post(
         title: createdAppeal.title,
       });
 
+      // 7) Ответ
       return res.status(201).json(
         successResponse(
           {
@@ -189,10 +232,13 @@ router.post(
       console.error('Ошибка создания обращения:', error);
       return res
         .status(500)
-        .json(errorResponse('Ошибка создания обращения', ErrorCodes.INTERNAL_ERROR));
+        .json(
+          errorResponse('Ошибка создания обращения', ErrorCodes.INTERNAL_ERROR)
+        );
     }
   }
 );
+
 
 /**
  * @openapi
@@ -495,6 +541,7 @@ router.put(
   }
 );
 
+// POST /appeals/:id/messages — добавить сообщение (с файлами в облаке)
 /**
  * @openapi
  * /appeals/{id}/messages:
@@ -516,6 +563,7 @@ router.post(
     res: express.Response
   ) => {
     try {
+      // 1) Валидация параметров
       const p = IdParamSchema.safeParse(req.params);
       if (!p.success) {
         return res
@@ -531,6 +579,7 @@ router.post(
       const { id: appealId } = p.data;
       const { text } = b.data as { text?: string };
 
+      // 2) Проверяем, что обращение существует
       const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
       if (!appeal) {
         return res
@@ -538,6 +587,7 @@ router.post(
           .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
+      // 3) Проверяем, что есть либо текст, либо файлы
       const files = (req.files as Express.Multer.File[]) ?? [];
       if (!text && files.length === 0) {
         return res
@@ -545,6 +595,7 @@ router.post(
           .json(errorResponse('Нужно отправить текст или вложения', ErrorCodes.VALIDATION_ERROR));
       }
 
+      // 4) Создаём сообщение
       const message = await prisma.appealMessage.create({
         data: {
           appealId,
@@ -553,17 +604,20 @@ router.post(
         },
       });
 
+      // 5) Загружаем вложения в MinIO
       for (const file of files) {
+        const { url, fileName } = await uploadMulterFile(file, false);
         await prisma.appealAttachment.create({
           data: {
             messageId: message.id,
-            fileUrl: file.path,
-            fileName: file.originalname,
+            fileUrl: url,              // при приватном бакете можно хранить key
+            fileName: fileName,
             fileType: detectAttachmentType(file.mimetype),
           },
         });
       }
 
+      // 6) Уведомляем всех подписчиков по WebSocket
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${appealId}`).emit('messageAdded', {
         appealId,
@@ -573,6 +627,7 @@ router.post(
         createdAt: message.createdAt,
       });
 
+      // 7) Отправляем ответ
       return res
         .status(201)
         .json(successResponse({ id: message.id, createdAt: message.createdAt }, 'Сообщение добавлено'));
@@ -584,6 +639,7 @@ router.post(
     }
   }
 );
+
 
 /**
  * @openapi
@@ -626,7 +682,6 @@ router.put(
           .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      // При необходимости — проверки прав (автор/руководитель/админ)
       await prisma.appealWatcher.deleteMany({ where: { appealId } });
       for (const uid of watcherIds) {
         await prisma.appealWatcher.create({ data: { appealId, userId: uid } });

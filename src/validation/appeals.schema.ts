@@ -3,13 +3,10 @@ import { z } from 'zod';
 import { AppealPriority, AppealStatus } from '@prisma/client';
 
 /**
- * Универсальные препроцессоры под совместимость с разными версиями Zod:
- *  - zNumberId: строку "12" -> 12, валидируем как положительное целое
- *  - zTrimmed: обрезает пробелы у строк
- *  - zOptionalNonEmptyString: "" -> undefined, "  текст " -> "текст"
- *  - zISODateString: "" -> undefined, иначе проверяем, что Date.parse не NaN
+ * Общие коэрсеры / препроцессоры
  */
 
+// Строка "12" -> 12, требуем положительное целое
 export const zNumberId = z.preprocess((v) => {
   if (typeof v === 'string') {
     const n = Number(v);
@@ -18,17 +15,20 @@ export const zNumberId = z.preprocess((v) => {
   return v;
 }, z.number().int().positive());
 
+// Обрезать пробелы у строк
 export const zTrimmed = z.preprocess((v) => {
   if (typeof v === 'string') return v.trim();
   return v;
 }, z.string());
 
+// "" -> undefined, "  текст " -> "текст"
 export const zOptionalNonEmptyString = z.preprocess((v) => {
   if (typeof v !== 'string') return undefined;
   const t = v.trim();
   return t.length ? t : undefined;
 }, z.string().optional());
 
+// "" -> undefined, иначе проверяем ISO по Date.parse
 export const zISODateString = z.preprocess((v) => {
   if (typeof v !== 'string') return undefined;
   const t = v.trim();
@@ -38,7 +38,14 @@ export const zISODateString = z.preprocess((v) => {
   .optional()
   .refine((val) => (val ? !Number.isNaN(Date.parse(val)) : true), {
     message: 'Некорректная дата',
-  }));
+  })
+);
+
+// Пустую строку для enum превращаем в undefined
+export const zOptionalEnumPriority = z.preprocess((v) => {
+  if (typeof v === 'string' && v.trim() === '') return undefined;
+  return v;
+}, z.nativeEnum(AppealPriority).optional());
 
 /** Скоупы для листинга/экспорта */
 export const ScopeEnum = z.enum(['my', 'department', 'assigned']);
@@ -52,7 +59,7 @@ export const CreateAppealBodySchema = z.object({
   toDepartmentId: zNumberId, // принимает "12" и 12
   title: zOptionalNonEmptyString,
   text: zTrimmed.refine((s) => s.length > 0, { message: 'Поле text обязательно' }),
-  priority: z.nativeEnum(AppealPriority).optional(),
+  priority: zOptionalEnumPriority,
   deadline: zISODateString, // ISO string либо undefined
 });
 export type CreateAppealBody = z.infer<typeof CreateAppealBodySchema>;
@@ -60,8 +67,12 @@ export type CreateAppealBody = z.infer<typeof CreateAppealBodySchema>;
 /** GET /appeals — query */
 export const ListQuerySchema = z.object({
   scope: ScopeEnum.default('my'),
-  limit: z.preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100)).default(20),
-  offset: z.preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0)).default(0),
+  limit: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100))
+    .default(20),
+  offset: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0))
+    .default(0),
   status: z.nativeEnum(AppealStatus).optional(),
   priority: z.nativeEnum(AppealPriority).optional(),
 });
@@ -124,3 +135,11 @@ export const ExportQuerySchema = z.object({
   toDate: zISODateString,
 });
 export type ExportQuery = z.infer<typeof ExportQuerySchema>;
+
+/** Короткое сообщение об ошибке Zod */
+export function zodErrorMessage(e: z.ZodError) {
+  const i = e.issues?.[0];
+  if (!i) return 'Ошибка валидации';
+  const where = i.path?.length ? ` [${i.path.join('.')}]` : '';
+  return `${i.message}${where}`;
+}
