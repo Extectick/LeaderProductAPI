@@ -18,6 +18,7 @@ import {
   errorResponse,
   ErrorCodes,
 } from '../utils/apiResponse';
+import { cacheGet, cacheSet, cacheDelPrefix } from '../utils/cache';
 
 import {
   QRCreateRequest,
@@ -188,6 +189,7 @@ router.post(
           createdAt: true,
         },
       });
+      await cacheDelPrefix(`qr:list:${userId}`);
 
       return res.status(201).json(successResponse(newQR));
     } catch (error) {
@@ -338,6 +340,8 @@ router.put(
           updatedAt: true,
         },
       });
+      await cacheDelPrefix(`qr:${id}`);
+      await cacheDelPrefix(`qr:list:${qr.createdById}`);
 
       return res
         .status(200)
@@ -907,6 +911,14 @@ router.get(
           .status(400)
           .json(errorResponse('Некорректное значение offset', ErrorCodes.VALIDATION_ERROR));
       }
+      const cacheKey = `qr:list:${userId}:${createdById || ''}:${status || ''}:${limitNum}:${offsetNum}`;
+      const cached = await cacheGet<{
+        data: any[];
+        meta: { total: number; limit: string; offset: string };
+      }>(cacheKey);
+      if (cached) {
+        return res.status(200).json(successResponse(cached));
+      }
 
       const qrList = await prisma.qRList.findMany({
         where,
@@ -933,16 +945,17 @@ router.get(
 
       const totalCount = await prisma.qRList.count({ where });
 
-      return res.status(200).json(
-        successResponse({
-          data: qrList,
-          meta: {
-            total: totalCount,
-            limit: limitNum.toString(),
-            offset: offsetNum.toString(),
-          },
-        })
-      );
+      const responseData = {
+        data: qrList,
+        meta: {
+          total: totalCount,
+          limit: limitNum.toString(),
+          offset: offsetNum.toString(),
+        },
+      };
+      await cacheSet(cacheKey, responseData, 60);
+
+      return res.status(200).json(successResponse(responseData));
     } catch (error) {
       console.error('Ошибка получения списка QR кодов:', error);
       return res.status(500).json(
@@ -1117,7 +1130,7 @@ router.get(
         errorCorrection?: string;
       }
     >,
-    res: express.Response<QRGetByIdResponse> 
+    res: express.Response<QRGetByIdResponse>
   ) => {
     try {
       const { id } = req.params;
@@ -1137,6 +1150,12 @@ router.get(
         return res
           .status(401)
           .json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const cacheKey = `qr:${id}:${simple || ''}:${width}:${darkColor}:${lightColor}:${margin}:${errorCorrection}`;
+      const cached = await cacheGet<any>(cacheKey);
+      if (cached) {
+        return res.status(200).json(successResponse(cached));
       }
 
       const qr = await prisma.qRList.findUnique({
@@ -1179,22 +1198,19 @@ router.get(
       const urlQR = domen + '/qr/' + qr.id + '/scan';
       const qrImage = await generateQRCode(urlQR, options);
 
+      let responseData;
       if (simple === 'true') {
-        return res.status(200).json(
-          successResponse({
-            id: qr.id,
-            qrData: qr.qrData,
-            qrType: qr.qrType,
-            description: qr.description,
-            status: qr.status,
-            createdAt: qr.createdAt,
-            qrImage,
-          })
-        );
-      }
-
-      return res.status(200).json(
-        successResponse({
+        responseData = {
+          id: qr.id,
+          qrData: qr.qrData,
+          qrType: qr.qrType,
+          description: qr.description,
+          status: qr.status,
+          createdAt: qr.createdAt,
+          qrImage,
+        };
+      } else {
+        responseData = {
           id: qr.id,
           qrData: qr.qrData,
           qrType: qr.qrType,
@@ -1203,8 +1219,12 @@ router.get(
           createdAt: qr.createdAt,
           createdBy: qr.createdBy,
           qrImage,
-        })
-      );
+        };
+      }
+
+      await cacheSet(cacheKey, responseData, 60);
+
+      return res.status(200).json(successResponse(responseData));
     } catch (error) {
       console.error('Ошибка получения QR кода:', error);
       return res.status(500).json(
@@ -1377,6 +1397,8 @@ router.delete(
         where: { id },
         data: { status: 'DELETED' },
       });
+      await cacheDelPrefix(`qr:${id}`);
+      await cacheDelPrefix(`qr:list:${qr.createdById}`);
 
       return res.status(204).send();
     } catch (error) {
@@ -1753,6 +1775,8 @@ router.put(
           description: true,
         },
       });
+      await cacheDelPrefix(`qr:${id}`);
+      await cacheDelPrefix(`qr:list:${qr.createdById}`);
 
       return res
         .status(200)
