@@ -55,6 +55,7 @@ import {
 
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
 import { uploadMulterFile } from '../storage/minio';
+import { cacheGet, cacheSet } from '../utils/cache';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
 type HasAppealAttachment = {
@@ -289,6 +290,12 @@ router.get(
       if (status) where.status = status;
       if (priority) where.priority = priority;
 
+      const cacheKey = `appeals:list:${userId}:${scope}:${status || ''}:${priority || ''}:${limit}:${offset}`;
+      const cached = await cacheGet<{ data: any[]; meta: { total: number; limit: number; offset: number } }>(cacheKey);
+      if (cached) {
+        return res.json(successResponse(cached, 'Список обращений'));
+      }
+
       const [total, appeals] = await prisma.$transaction([
         prisma.appeal.count({ where }),
         prisma.appeal.findMany({
@@ -308,12 +315,10 @@ router.get(
         }),
       ]);
 
-      return res.json(
-        successResponse(
-          { data: appeals, meta: { total, limit, offset } },
-          'Список обращений'
-        )
-      );
+      const responseData = { data: appeals, meta: { total, limit, offset } };
+      await cacheSet(cacheKey, responseData, 60);
+
+      return res.json(successResponse(responseData, 'Список обращений'));
     } catch (error) {
       console.error('Ошибка получения списка обращений:', error);
       return res
@@ -347,29 +352,35 @@ router.get(
       }
       const { id: appealId } = parsed.data;
 
-      const appeal = await prisma.appeal.findUnique({
-        where: { id: appealId },
-        include: {
-          fromDepartment: true,
-          toDepartment: true,
-          createdBy: true,
-          assignees: { include: { user: true } },
-          watchers: { include: { user: true } },
-          statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
-          messages: {
-            orderBy: { createdAt: 'asc' },
-            include: { sender: true, attachments: true },
-          },
-        },
-      });
-
+      const cacheKey = `appeal:${appealId}`;
+      let appeal = await cacheGet<any>(cacheKey);
       if (!appeal) {
-        return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+        appeal = await prisma.appeal.findUnique({
+          where: { id: appealId },
+          include: {
+            fromDepartment: true,
+            toDepartment: true,
+            createdBy: true,
+            assignees: { include: { user: true } },
+            watchers: { include: { user: true } },
+            statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
+            messages: {
+              orderBy: { createdAt: 'asc' },
+              include: { sender: true, attachments: true },
+            },
+          },
+        });
+
+        if (!appeal) {
+          return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+        }
+
+        await cacheSet(cacheKey, appeal, 60);
       }
 
       const userId = req.user!.userId;
       const isCreator = appeal.createdById === userId;
-      const isAssignee = appeal.assignees.some((a) => a.userId === userId);
+      const isAssignee = appeal.assignees.some((a: any) => a.userId === userId);
       const employee = await prisma.employeeProfile.findFirst({
         where: { userId, departmentId: appeal.toDepartmentId },
       });
