@@ -47,11 +47,7 @@
     "nodemailer": "^7.0.5",
     "pg": "^8.16.3",
     "qrcode": "^1.5.4",
-<<<<<<< HEAD
     "redis": "^5.8.2",
-=======
-    "redis": "^4.6.12",
->>>>>>> fcd6240db7d76ef18435b85f3e9453e7c70a2d0a
     "socket.io": "^4.8.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
