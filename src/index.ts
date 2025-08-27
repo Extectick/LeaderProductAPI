@@ -16,7 +16,8 @@ import usersRouter from './routes/users';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
-
+import { connectRedis, disconnectRedis, getRedis, redisKeys } from './lib/redis';
+import { cacheByUrl } from './middleware/cache';
 // Swagger
 import { swaggerSpec } from './swagger/swagger';
 
@@ -80,7 +81,7 @@ app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
-app.use('/appeals', appealsRouter);
+app.use('/appeals', cacheByUrl(15), appealsRouter);
 
 // ---- Errors ----
 app.use(errorHandler);
@@ -94,6 +95,17 @@ async function checkDatabase() {
     await prisma.$connect();
     const r = await prisma.$queryRawUnsafe<{ result: number }[]>('SELECT 1+1 AS result');
     return { ok: true, result: r?.[0]?.result ?? 2 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function checkRedis() {
+  try {
+    const client = getRedis();
+    if (!client.isOpen) await client.connect();
+    const pong = await client.ping();
+    return { ok: pong === 'PONG' };
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };
   }
@@ -116,7 +128,7 @@ async function checkS3() {
 
 async function startupChecks() {
   console.log(`[startup] ENV file loaded: ${envFile}`);
-  const [db, s3status] = await Promise.all([checkDatabase(), checkS3()]);
+  const [db, s3status, redis] = await Promise.all([checkDatabase(), checkS3(), checkRedis()]);
 
   if (db.ok)  console.log('[startup] DB connection: OK');
   else        console.error('[startup] DB connection: FAIL ->', db.error);
@@ -124,12 +136,15 @@ async function startupChecks() {
   if (s3status.ok) console.log('[startup] S3 (MinIO) connection: OK', { endpoint: s3status.endpoint, bucket: s3status.bucket });
   else             console.error('[startup] S3 (MinIO) connection: FAIL ->', s3status.error);
 
-  const allOk = db.ok && s3status.ok;
+  if (redis.ok) console.log('[startup] Redis connection: OK');
+  else          console.error('[startup] Redis connection: FAIL ->', redis.error);
+
+  const allOk = db.ok && s3status.ok && redis.ok;
   if (!allOk && STRICT_STARTUP) {
     console.error('[startup] STRICT_STARTUP=1 -> exiting due to failed connectivity checks');
     process.exit(1);
   }
-  return { db, s3: s3status, ok: allOk };
+  return { db, s3: s3status, redis, ok: allOk };
 }
 
 // ---- Health endpoints ----
@@ -175,6 +190,7 @@ io.on('connection', (socket) => {
 if (ENV !== 'test') {
   (async () => {
     await startupChecks(); // не падаем, если STRICT_STARTUP != 1
+    await connectRedis();
     server.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);
       console.log(`Docs:   http://localhost:${port}/docs`);
@@ -186,11 +202,13 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   await prisma.$disconnect().catch(() => {});
+  await disconnectRedis().catch(() => {});
   server.close(() => process.exit(0));
 });
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   await prisma.$disconnect().catch(() => {});
+  await disconnectRedis().catch(() => {});
   server.close(() => process.exit(0));
 });
 process.on('unhandledRejection', (reason) => {
