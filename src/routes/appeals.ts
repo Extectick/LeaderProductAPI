@@ -617,15 +617,20 @@ router.post(
 
       // 5) Загружаем вложения в MinIO
       for (const file of files) {
-        const { url, fileName } = await uploadMulterFile(file, false);
-        await prisma.appealAttachment.create({
-          data: {
-            messageId: message.id,
-            fileUrl: url,              // при приватном бакете можно хранить key
-            fileName: fileName,
-            fileType: detectAttachmentType(file.mimetype),
-          },
-        });
+        try {
+          const { url, fileName } = await uploadMulterFile(file, false);
+          await prisma.appealAttachment.create({
+            data: {
+              messageId: message.id,
+              fileUrl: url, // при приватном бакете можно хранить key
+              fileName: fileName,
+              fileType: detectAttachmentType(file.mimetype),
+            },
+          });
+        } catch (err) {
+          // Ошибку загрузки отдельного файла логируем, но не прерываем процесс
+          console.error('Не удалось сохранить вложение:', err);
+        }
       }
 
       // 6) Инвалидация кэша обращения
