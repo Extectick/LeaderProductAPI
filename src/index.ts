@@ -9,6 +9,7 @@ import morgan from 'morgan';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { Server as SocketIOServer } from 'socket.io';
+import jwt from 'jsonwebtoken';
 
 // Routers
 import authRouter from './routes/auth';
@@ -47,6 +48,7 @@ if (!process.env.DATABASE_URL) {
 const S3_BUCKET   = process.env.S3_BUCKET;
 const S3_ENDPOINT = process.env.S3_ENDPOINT;
 const STRICT_STARTUP = process.env.STRICT_STARTUP === '1';
+const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 
 const app = express();
 const server = http.createServer(app);
@@ -180,6 +182,21 @@ const io = new SocketIOServer(server, {
   },
 });
 app.set('io', io);
+
+io.use((socket, next) => {
+  const authToken =
+    (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
+    (typeof socket.handshake.headers.authorization === 'string' &&
+      socket.handshake.headers.authorization.split(' ')[1]);
+  if (!authToken) return next(new Error('Unauthorized'));
+  try {
+    const payload = jwt.verify(authToken, accessTokenSecret);
+    socket.data.user = payload;
+    next();
+  } catch {
+    next(new Error('Unauthorized'));
+  }
+});
 
 io.on('connection', (socket) => {
   socket.on('join', (room: string) => { if (room) socket.join(room); });
