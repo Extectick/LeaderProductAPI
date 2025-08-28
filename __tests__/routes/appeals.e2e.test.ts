@@ -163,4 +163,35 @@ describe('Appeals routes (auth + roles + permissions)', () => {
     expect(res.body?.success).toBe(true);
     expect(res.body?.data?.id).toBe(appealId);
   });
+
+  test('Повторная отправка сообщения создаёт новую запись', async () => {
+    // создаём обращение
+    const dept = await prisma.department.create({ data: { name: `MSG_${Date.now()}` } });
+    const created = await request(app)
+      .post('/appeals')
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .field('toDepartmentId', String(dept.id))
+      .field('title', 'Message repeat test')
+      .field('text', 'First appeal');
+
+    const appealId = created.body?.data?.id;
+
+    // отправляем два сообщения подряд
+    const first = await request(app)
+      .post(`/appeals/${appealId}/messages`)
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .field('text', 'Hello');
+    const second = await request(app)
+      .post(`/appeals/${appealId}/messages`)
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .field('text', 'Hello again');
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body?.data?.id).not.toBe(first.body?.data?.id);
+
+    // в БД должно быть 2 сообщения
+    const count = await prisma.appealMessage.count({ where: { appealId } });
+    expect(count).toBe(2);
+  });
 });
