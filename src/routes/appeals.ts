@@ -55,7 +55,7 @@ import {
 
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
 import { uploadMulterFile } from '../storage/minio';
-import { cacheGet, cacheSet } from '../utils/cache';
+import { cacheGet, cacheSet, cacheDel } from '../utils/cache';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
 type HasAppealAttachment = {
@@ -628,7 +628,10 @@ router.post(
         });
       }
 
-      // 6) Уведомляем всех подписчиков по WebSocket
+      // 6) Инвалидация кэша обращения
+      await cacheDel(`appeal:${appealId}`);
+
+      // 7) Уведомляем всех подписчиков по WebSocket
       const io = req.app.get('io') as SocketIOServer;
       io.to(`appeal:${appealId}`).emit('messageAdded', {
         appealId,
@@ -638,7 +641,7 @@ router.post(
         createdAt: message.createdAt,
       });
 
-      // 7) Отправляем ответ
+      // 8) Отправляем ответ
       return res
         .status(201)
         .json(successResponse({ id: message.id, createdAt: message.createdAt }, 'Сообщение добавлено'));
