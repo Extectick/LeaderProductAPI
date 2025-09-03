@@ -1,8 +1,8 @@
 // src/index.ts
 import path from 'path';
 import http from 'http';
-import dotenv from 'dotenv';
-import './env';
+// import dotenv from 'dotenv';
+import './env'; // ❌ убираем, чтобы .env не грузился дважды
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import morgan from 'morgan';
@@ -17,7 +17,7 @@ import usersRouter from './routes/users';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
-import { connectRedis, disconnectRedis, getRedis, redisKeys } from './lib/redis';
+import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 // Swagger
 import { swaggerSpec } from './swagger/swagger';
@@ -36,10 +36,9 @@ import { errorHandler } from './middleware/errorHandler';
 // S3 (MinIO) connectivity check
 import { s3 } from './storage/minio';
 import { HeadBucketCommand, ListBucketsCommand } from '@aws-sdk/client-s3';
+import { requestDebugMiddleware, requestDebugRoutes } from './middleware/requestDebug';
 
-
-
-dotenv.config({ path: path.resolve(process.cwd(), envFile) });
+// dotenv.config({ path: path.resolve(process.cwd(), envFile) });
 
 if (!process.env.DATABASE_URL) {
   throw new Error(`DATABASE_URL is missing (loaded ${envFile}).`);
@@ -74,6 +73,12 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
+if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_REQUESTS === '1') {
+  app.use(requestDebugMiddleware);
+  requestDebugRoutes(app);
+  console.log('[debug] Request dashboard enabled at /_debug/requests (and .json).');
+}
+
 // ---- Swagger ----
 app.get('/docs.json', (_req, res) => res.json(swaggerSpec));
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
@@ -83,7 +88,17 @@ app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
-app.use('/appeals', cacheByUrl(15), appealsRouter);
+
+app.use(
+  '/appeals',
+  cacheByUrl(15, {
+    include: /^\/appeals(\/\d+)?(\?.*)?$/i, // кэшируем список и детали
+    exclude: /\/appeals\/\d+\/(messages|assign|status|watchers)/i, // исключаем мутации
+    varyByAuth: true,
+    cacheStatuses: [200],
+  }),
+  appealsRouter
+);
 
 // ---- Errors ----
 app.use(errorHandler);
@@ -93,7 +108,6 @@ app.use(errorHandler);
 // --------------------
 async function checkDatabase() {
   try {
-    // подключаемся и делаем простейший запрос
     await prisma.$connect();
     const r = await prisma.$queryRawUnsafe<{ result: number }[]>('SELECT 1+1 AS result');
     return { ok: true, result: r?.[0]?.result ?? 2 };
@@ -102,10 +116,13 @@ async function checkDatabase() {
   }
 }
 
+// ВНИМАНИЕ: не вызываем connect() здесь, только ping(), если уже подключены
 async function checkRedis() {
   try {
     const client = getRedis();
-    if (!client.isOpen) await client.connect();
+    if (!client.isOpen) {
+      return { ok: false, error: 'Redis is not connected' };
+    }
     const pong = await client.ping();
     return { ok: pong === 'PONG' };
   } catch (e: any) {
@@ -118,9 +135,7 @@ async function checkS3() {
     return { ok: false, error: 'S3_ENDPOINT or S3_BUCKET not set', endpoint: S3_ENDPOINT, bucket: S3_BUCKET };
   }
   try {
-    // проверяем креды и доступность API
     await s3.send(new ListBucketsCommand({}));
-    // проверяем, что бакет существует и доступен
     await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
     return { ok: true, endpoint: S3_ENDPOINT, bucket: S3_BUCKET };
   } catch (e: any) {
@@ -130,6 +145,7 @@ async function checkS3() {
 
 async function startupChecks() {
   console.log(`[startup] ENV file loaded: ${envFile}`);
+  // Redis уже подключён к этому моменту, можно пинговать параллельно с DB/S3
   const [db, s3status, redis] = await Promise.all([checkDatabase(), checkS3(), checkRedis()]);
 
   if (db.ok)  console.log('[startup] DB connection: OK');
@@ -151,25 +167,25 @@ async function startupChecks() {
 
 // ---- Health endpoints ----
 app.get('/health', async (_req, res) => {
-  const [db, s3status] = await Promise.all([checkDatabase(), checkS3()]);
-  const ok = db.ok && s3status.ok;
+  const [db, s3status, redis] = await Promise.all([checkDatabase(), checkS3(), checkRedis()]);
+  const ok = db.ok && s3status.ok && redis.ok;
   return res.status(ok ? 200 : 500).json({
     ok,
     env: ENV || 'dev',
     timestamp: new Date().toISOString(),
-    services: { db, s3: s3status },
+    services: { db, s3: s3status, redis },
   });
 });
 
-// (оставим корень тоже как health, чтобы не ломать привычку)
+// (оставим корень тоже как health)
 app.get('/', async (_req, res) => {
-  const [db, s3status] = await Promise.all([checkDatabase(), checkS3()]);
-  const ok = db.ok && s3status.ok;
+  const [db, s3status, redis] = await Promise.all([checkDatabase(), checkS3(), checkRedis()]);
+  const ok = db.ok && s3status.ok && redis.ok;
   return res.status(ok ? 200 : 500).json({
     message: 'Server is running',
     ok,
     docs: `/docs`,
-    services: { db, s3: s3status },
+    services: { db, s3: s3status, redis },
   });
 });
 
@@ -206,8 +222,13 @@ io.on('connection', (socket) => {
 // ---- Start ----
 if (ENV !== 'test') {
   (async () => {
-    await startupChecks(); // не падаем, если STRICT_STARTUP != 1
+    // 1) Подключаемся к Redis один раз, терпеливо ждём до 15с
     await connectRedis();
+
+    // 2) Запускаем проверки сервисов (Redis уже подключен — только ping)
+    await startupChecks();
+
+    // 3) Стартуем HTTP-сервер
     server.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);
       console.log(`Docs:   http://localhost:${port}/docs`);

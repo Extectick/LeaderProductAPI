@@ -56,6 +56,7 @@ import {
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
 import { uploadMulterFile } from '../storage/minio';
 import { cacheGet, cacheSet, cacheDel } from '../utils/cache';
+import { randomUUID } from 'node:crypto';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
 type HasAppealAttachment = {
@@ -573,6 +574,51 @@ router.post(
     req: AuthRequest<{ id: string }, AppealAddMessageResponse, unknown>,
     res: express.Response
   ) => {
+    // --- ЛОГИРОВАНИЕ ЗАПРОСА / ОТВЕТА ---
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+
+    const originalJson = res.json.bind(res);
+    const originalStatus = res.status.bind(res);
+    let responseStatus: number | undefined;
+
+    res.status = (code: number) => {
+      responseStatus = code;
+      return originalStatus(code);
+    };
+
+    res.json = (data: any) => {
+      if (responseStatus === undefined) responseStatus = res.statusCode || 200;
+      const durationMs = Date.now() - startedAt;
+      try {
+        console.log('[APPEAL MESSAGE][RESPONSE]', {
+          requestId,
+          status: responseStatus,
+          durationMs,
+          data,
+        });
+      } catch {}
+      return originalJson(data);
+    };
+
+    try {
+      const files = (req.files as Express.Multer.File[]) ?? [];
+      console.log('[APPEAL MESSAGE][REQUEST]', {
+        requestId,
+        method: req.method,
+        path: req.originalUrl,
+        params: req.params,
+        body: req.body,
+        userId: req.user?.userId,
+        files: files.map((f) => ({
+          originalname: f.originalname,
+          mimetype: f.mimetype,
+          size: f.size,
+        })),
+      });
+    } catch {}
+    // --- КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ---
+
     try {
       // 1) Валидация параметров
       const p = IdParamSchema.safeParse(req.params);
@@ -581,12 +627,14 @@ router.post(
           .status(400)
           .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
       }
+
       const b = AddMessageBodySchema.safeParse(req.body);
       if (!b.success) {
         return res
           .status(400)
           .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
       }
+
       const { id: appealId } = p.data;
       const { text } = b.data as { text?: string };
 
@@ -622,22 +670,34 @@ router.post(
           await prisma.appealAttachment.create({
             data: {
               messageId: message.id,
-              fileUrl: url, // при приватном бакете можно хранить key
-              fileName: fileName,
+              fileUrl: url,
+              fileName,
               fileType: detectAttachmentType(file.mimetype),
             },
           });
         } catch (err) {
-          // Ошибку загрузки отдельного файла логируем, но не прерываем процесс
-          console.error('Не удалось сохранить вложение:', err);
+          console.error('[APPEAL MESSAGE] Не удалось сохранить вложение:', {
+            requestId,
+            file: {
+              originalname: file.originalname,
+              mimetype: file.mimetype,
+              size: file.size,
+            },
+            error: err,
+          });
         }
       }
 
-      // 6) Инвалидация кэша обращения
+      // 6) Инвалидация кэша обращения + обновляем версию
       await cacheDel(`appeal:${appealId}`);
+      await cacheDel(`appeals:list:*`);
+      await prisma.appeal.update({
+        where: { id: appealId },
+        data: { updatedAt: new Date() },
+      });
 
       // 7) Уведомляем всех подписчиков по WebSocket
-      const io = req.app.get('io') as SocketIOServer;
+      const io = req.app.get('io') as unknown as SocketIOServer;
       io.to(`appeal:${appealId}`).emit('messageAdded', {
         appealId,
         messageId: message.id,
@@ -651,7 +711,7 @@ router.post(
         .status(201)
         .json(successResponse({ id: message.id, createdAt: message.createdAt }, 'Сообщение добавлено'));
     } catch (error) {
-      console.error('Ошибка добавления сообщения:', error);
+      console.error('[APPEAL MESSAGE][ERROR]', { requestId, error });
       return res
         .status(500)
         .json(errorResponse('Ошибка добавления сообщения', ErrorCodes.INTERNAL_ERROR));

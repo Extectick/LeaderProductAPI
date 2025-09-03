@@ -1,0 +1,512 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Request Debug</title>
+  <link rel="stylesheet" href="/_debug/requests.css">
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="title">
+      <h3>Request Debug</h3>
+      <span class="small">(<span id="stored-count">__ENTRIES_COUNT__</span> stored, limit __MAX_RES_BODY__ B per response)</span>
+    </div>
+    <div class="controls">
+      <input id="q" placeholder="filter: url / method / status" />
+      <select id="status">
+        <option value="">status: any</option>
+        <option value="2">2xx</option>
+        <option value="3">3xx</option>
+        <option value="4">4xx</option>
+        <option value="5">5xx</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="onlyErr"> only errors</label>
+      <button id="toggleAuto">auto refresh: off</button>
+      <button id="refresh">refresh</button>
+      <button id="captureBtn" title="Pause/resume capture">capture: …</button>
+    </div>
+  </header>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>time</th>
+        <th>method</th>
+        <th>url <span class="small">(route in title)</span></th>
+        <th>status</th>
+        <th>ms</th>
+        <th>details</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td class="small" colspan="7">no data</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+// --- server-injected vars ---
+const DEBUG_TOKEN = '__DEBUG_TOKEN__';
+const MAX_RES_BODY = Number('__MAX_RES_BODY__');
+
+// DOM
+const tbody = document.getElementById('tbody');
+const storedCount = document.getElementById('stored-count');
+const toastEl = document.getElementById('toast');
+const captureBtn = document.getElementById('captureBtn');
+let auto = false, timer = null;
+
+// хранение «сырых» записей по id для кнопок копирования/экспорта
+const entriesById = new Map();
+
+// ---------- settings persistence ----------
+const LS = {
+  q: 'rd.q',
+  status: 'rd.status',
+  auto: 'rd.auto',
+  onlyErr: 'rd.onlyErr',
+};
+
+function applySavedSettings() {
+  try {
+    const q = localStorage.getItem(LS.q) || '';
+    const st = localStorage.getItem(LS.status) || '';
+    const aut = localStorage.getItem(LS.auto) === '1';
+    const onlyErr = localStorage.getItem(LS.onlyErr) === '1';
+    document.getElementById('q').value = q;
+    document.getElementById('status').value = st;
+    document.getElementById('onlyErr').checked = onlyErr;
+    if (aut) document.getElementById('toggleAuto').click(); // toggles + sets timer
+  } catch {}
+}
+applySavedSettings();
+
+// делегируем клики: view / copy / download
+tbody.addEventListener('click', async (e) => {
+  const target = e.target;
+  if (!(target instanceof Element)) return;
+
+  // toggle details
+  const btnToggle = target.closest('button[data-action="toggle"]');
+  if (btnToggle) {
+    const row = btnToggle.closest('tr.data');
+    if (!row) return;
+    const details = row.nextElementSibling;
+    if (!details || !details.classList.contains('details')) return;
+    const shown = details.style.display === 'table-row';
+    details.style.display = shown ? 'none' : 'table-row';
+    details.classList.toggle('row-expanded', !shown);
+    return;
+  }
+
+  const row = target.closest('tr.details')?.previousElementSibling;
+  if (!row) return;
+  const id = Number(row.getAttribute('data-id'));
+  const entry = entriesById.get(id);
+  if (!entry) return;
+
+  if (target.closest('button[data-action="copy-ai"]')) {
+    await copyToClipboard(buildAIText(entry));
+    showToast('Copied for AI ✓'); return;
+  }
+  if (target.closest('button[data-action="copy-brief"]')) {
+    await copyToClipboard(buildBriefText(entry));
+    showToast('Brief copied ✓'); return;
+  }
+  if (target.closest('button[data-action="copy-curl"]')) {
+    await copyToClipboard(buildCurl(entry));
+    showToast('cURL copied ✓'); return;
+  }
+  if (target.closest('button[data-action="copy-postman"]')) {
+    await copyToClipboard(buildPostman(entry));
+    showToast('Postman copied ✓'); return;
+  }
+  if (target.closest('button[data-action="download-json"]')) {
+    downloadBlob(JSON.stringify(entry, null, 2), `request-${id}.json`, 'application/json'); return;
+  }
+  if (target.closest('button[data-action="download-har"]')) {
+    downloadBlob(JSON.stringify(buildHAR(entry), null, 2), `request-${id}.har.json`, 'application/json'); return;
+  }
+});
+
+// capture toggle
+captureBtn.onclick = async () => {
+  const current = captureBtn.dataset.enabled === '1';
+  const next = current ? '0' : '1';
+  const r = await fetch(`/_debug/capture?enabled=${next}`, { headers: DEBUG_TOKEN ? {'x-debug-token': DEBUG_TOKEN} : {} });
+  const j = await r.json();
+  if (j.ok) {
+    captureBtn.dataset.enabled = j.enabled ? '1' : '0';
+    captureBtn.textContent = 'capture: ' + (j.enabled ? 'on' : 'off');
+    showToast('Capture ' + (j.enabled ? 'enabled' : 'paused'));
+  }
+};
+
+// init capture status
+initCaptureStatus();
+async function initCaptureStatus() {
+  try {
+    const r = await fetch('/_debug/capture/status', { headers: DEBUG_TOKEN ? {'x-debug-token': DEBUG_TOKEN} : {} });
+    const j = await r.json();
+    if (j.ok) {
+      captureBtn.dataset.enabled = j.enabled ? '1' : '0';
+      captureBtn.textContent = 'capture: ' + (j.enabled ? 'on' : 'off');
+    } else captureBtn.textContent = 'capture: ?';
+  } catch { captureBtn.textContent = 'capture: ?'; }
+}
+
+document.getElementById('refresh').onclick = reload;
+document.getElementById('toggleAuto').onclick = () => {
+  auto = !auto;
+  document.getElementById('toggleAuto').textContent = 'auto refresh: ' + (auto ? 'on' : 'off');
+  try { localStorage.setItem(LS.auto, auto ? '1' : '0'); } catch {}
+  if (auto) { reload(); timer = setInterval(reload, 2000); } else { clearInterval(timer); }
+};
+document.getElementById('q').oninput = (e) => { try { localStorage.setItem(LS.q, e.target.value); } catch {} ; filterRows(); };
+document.getElementById('status').onchange = (e) => { try { localStorage.setItem(LS.status, e.target.value); } catch {} ; filterRows(); };
+document.getElementById('onlyErr').onchange = (e) => { try { localStorage.setItem(LS.onlyErr, e.target.checked ? '1' : '0'); } catch {} ; filterRows(); };
+
+function filterRows(){
+  const q = (document.getElementById('q').value || '').toLowerCase();
+  const s = document.getElementById('status').value;
+  const onlyErr = document.getElementById('onlyErr').checked;
+  for (const tr of tbody.querySelectorAll('tr.data')) {
+    const url = tr.getAttribute('data-url') || '';
+    const method = tr.getAttribute('data-method') || '';
+    const status = tr.getAttribute('data-status') || '';
+    const matchesText = !q || url.toLowerCase().includes(q) || method.toLowerCase().includes(q) || status.includes(q);
+    const matchesStatus = !s || status.startsWith(s);
+    const matchesOnlyErr = !onlyErr || (Number(status) >= 400);
+    tr.style.display = (matchesText && matchesStatus && matchesOnlyErr) ? '' : 'none';
+  }
+}
+
+function reload(){
+  fetch('/_debug/requests.json', {
+    headers: DEBUG_TOKEN ? {'x-debug-token': DEBUG_TOKEN} : {}
+  })
+    .then(r => r.json())
+    .then(j => {
+      if (!j.ok) { alert('Error: '+(j.error||'unknown')); return; }
+      storedCount.textContent = j.total;
+
+      const existingIds = new Set(Array.from(tbody.querySelectorAll('tr.data'))
+        .map(tr => Number(tr.getAttribute('data-id'))));
+
+      const frag = document.createDocumentFragment();
+      let added = 0;
+
+      for (const e of j.entries) {
+        if (existingIds.has(e.id)) continue;
+        entriesById.set(e.id, e); // сохраняем
+        frag.prepend(rowNode(e, true));
+        added++;
+      }
+
+      if (added) {
+        const firstRow = tbody.querySelector('tr:not(.data)');
+        if (firstRow) firstRow.remove();
+
+        tbody.prepend(frag);
+
+        for (const tr of tbody.querySelectorAll('tr.data.new')) {
+          const bar = tr.querySelector('.bar > i');
+          const ms = Number(tr.getAttribute('data-ms') || '0');
+          if (bar) requestAnimationFrame(() => {
+            bar.style.width = Math.min(100, (ms / 1000) * 100) + '%';
+          });
+          tr.classList.remove('new');
+        }
+      }
+
+      filterRows();
+    })
+    .catch(console.error);
+}
+
+function rowNode(e, highlight){
+  const tr = document.createElement('tr');
+  tr.className = 'data' + (highlight ? ' new' : '');
+  tr.setAttribute('data-id', String(e.id));
+  tr.setAttribute('data-url', e.url);
+  tr.setAttribute('data-method', e.method);
+  tr.setAttribute('data-status', String(e.status));
+  tr.setAttribute('data-ms', String(e.durationMs));
+
+  tr.innerHTML = `
+    <td data-field="id">${e.id}</td>
+    <td><span class="small" data-field="time" title="${esc(e.ts)}">${fmtTs(e.ts)}</span></td>
+    <td><span class="badge method" data-field="method">${e.method}</span></td>
+    <td class="url"><a class="link" href="#" onclick="return false;" title="${esc(e.route || '')}" data-field="url">${esc(e.url)}</a></td>
+    <td><span class="badge status ${statusCls(e.status)}" data-field="status">${e.status}</span></td>
+    <td class="duration">
+      <div><span data-field="ms">${Number(e.durationMs).toFixed(2)}</span> ms</div>
+      <div class="bar"><i style="width:0"></i></div>
+    </td>
+    <td><button data-action="toggle">view</button></td>
+  `;
+
+  const details = document.createElement('tr');
+  details.className = 'details';
+  details.style.display = 'none';
+  const spans = Array.isArray(e.spans) && e.spans.length
+    ? `<div class="kv"><b>spans</b><div class="spans">${e.spans.map(s => `<span class="chip">${esc(s.label)} ${Number(s.ms).toFixed(1)}ms</span>`).join(' ')}</div></div>`
+    : '';
+  details.innerHTML = `
+    <td colspan="7">
+      <div class="details-wrap">
+        <div class="col">
+          <div class="details-actions">
+            <button class="btn" data-action="copy-ai" title="Copy request+response for AI">Copy for AI</button>
+            <button class="btn" data-action="copy-brief" title="Copy brief for AI">Copy brief</button>
+            <button class="btn" data-action="copy-curl" title="Copy cURL">Copy cURL</button>
+            <button class="btn" data-action="copy-postman" title="Copy Postman collection (single request)">Copy Postman</button>
+            <button class="btn" data-action="download-json" title="Download JSON entry">Download JSON</button>
+            <button class="btn" data-action="download-har" title="Download HAR 1.2">Download HAR</button>
+          </div>
+          <h4>Request</h4>
+          <div class="kv"><b>params</b><pre class="req-params"></pre></div>
+          <div class="kv"><b>query</b><pre class="req-query"></pre></div>
+          <div class="kv"><b>headers</b><pre class="req-headers"></pre></div>
+          <div class="kv"><b>body</b><pre class="req-body"></pre></div>
+          ${spans}
+        </div>
+        <div class="col">
+          <h4>Response</h4>
+          <div class="kv"><b>status</b><pre class="res-status"></pre></div>
+          <div class="kv"><b>headers</b><pre class="res-headers"></pre></div>
+          <div class="kv"><b>body</b><pre class="res-body"></pre></div>
+          <div class="kv small muted"><b>note</b><span class="res-note"></span></div>
+        </div>
+      </div>
+    </td>`;
+
+  // заполнение блоков (raw text)
+  details.querySelector('.req-params').textContent  = pretty(e.req && e.req.params);
+  details.querySelector('.req-query').textContent   = pretty(e.req && e.req.query);
+  details.querySelector('.req-headers').textContent = pretty(e.req && e.req.headers);
+  details.querySelector('.req-body').textContent    = pretty(e.req && e.req.body);
+
+  details.querySelector('.res-status').textContent  = String(e.status);
+  details.querySelector('.res-headers').textContent = pretty(e.res && e.res.headers);
+  details.querySelector('.res-body').textContent    = pretty(e.res && e.res.body);
+  const noteEl = details.querySelector('.res-note');
+  if (e.res && e.res.bodyTruncated) noteEl.textContent = `body was truncated to ${MAX_RES_BODY} bytes`;
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(tr);
+  frag.appendChild(details);
+  return frag;
+}
+
+function statusCls(code){
+  if (code >= 500) return 'err';
+  if (code >= 400) return 'warn';
+  return 'ok';
+}
+
+// dd.MM.yy HH:mm local time
+function fmtTs(iso){
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const yy = String(d.getFullYear()%100).padStart(2,'0');
+  const HH = String(d.getHours()).padStart(2,'0');
+  const MM = String(d.getMinutes()).padStart(2,'0');
+  const SS = String(d.getSeconds()).padStart(2,'0');
+  return `${dd}.${mm}.${yy} ${HH}:${MM}:${SS}`;
+}
+
+function esc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function pretty(v){
+  try {
+    if (v == null) return 'null';
+    return typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+async function copyToClipboard(text){
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+}
+
+function showToast(msg){
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  setTimeout(() => toastEl.classList.remove('show'), 1200);
+}
+
+function downloadBlob(text, filename, mime){
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// -------- Build texts / exports --------
+function buildAIText(e){
+  const sanitize = (h) => {
+    const S = ['authorization','cookie','set-cookie','x-api-key'];
+    const mask = (v) => typeof v === 'string'
+      ? (v.length > 12 ? v.slice(0,6)+'…'+v.slice(-4) : '***')
+      : '***';
+    const o = {};
+    for (const k in (h||{})) o[k] = S.includes(k.toLowerCase()) ? mask(h[k]) : h[k];
+    return o;
+  };
+
+  return `### API debug sample
+time: ${fmtTs(e.ts)} (${e.ts})
+method: ${e.method}
+url: ${e.url}
+route: ${e.route || '-'}
+status: ${e.status}
+duration_ms: ${e.durationMs}
+${Array.isArray(e.spans) && e.spans.length ? 'spans: ' + e.spans.map(s => `${s.label} ${s.ms}ms`).join(' · ') + '\n' : ''}
+
+Request:
+headers:
+${pretty(sanitize(e.req?.headers))}
+params:
+${pretty(e.req?.params)}
+query:
+${pretty(e.req?.query)}
+body:
+${pretty(e.req?.body)}
+
+Response:
+headers:
+${pretty(e.res?.headers)}
+body${e.res?.bodyTruncated ? ' (truncated)' : ''}:
+${pretty(e.res?.body)}
+`;
+}
+
+function buildBriefText(e){
+  return `method: ${e.method}
+url: ${e.url}
+status: ${e.status}, ${e.durationMs} ms
+req.body:
+${pretty(e.req?.body)}
+res.body${e.res?.bodyTruncated ? ' (truncated)' : ''}:
+${pretty(e.res?.body)}
+`;
+}
+
+function buildCurl(e){
+  const h = e.req?.headers || {};
+  const host = String(h['x-forwarded-host'] || h.host || 'localhost:3000');
+  const proto = String(h['x-forwarded-proto'] || 'http');
+  const fullUrl = e.url.startsWith('http') ? e.url : `${proto}://${host}${e.url}`;
+
+  const headerLines = [];
+  const ct = h['content-type'] || h['Content-Type'];
+  if (ct) headerLines.push(`-H 'Content-Type: ${ct}'`);
+  const auth = h['authorization'] || h['Authorization'];
+  if (auth) headerLines.push(`-H 'Authorization: ${auth}'`);
+
+  let data = '';
+  if (e.req?.body != null && e.method !== 'GET' && e.method !== 'HEAD') {
+    const bodyStr = typeof e.req.body === 'string' ? e.req.body : JSON.stringify(e.req.body);
+    data = `--data-raw '${bodyStr.replace(/'/g,"'\\''")}'`;
+  }
+
+  return `curl -i -X ${e.method} '${fullUrl}'
+  ${headerLines.join('\n  ')}
+  ${data}`.replace(/\n\s+\n/g, '\n');
+}
+
+function buildPostman(e){
+  const h = e.req?.headers || {};
+  const host = String(h['x-forwarded-host'] || h.host || 'localhost:3000');
+  const proto = String(h['x-forwarded-proto'] || 'http');
+  const fullUrl = e.url.startsWith('http') ? e.url : `${proto}://${host}${e.url}`;
+
+  const pm = {
+    info: { name: `Request ${e.id}`, schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+    item: [{
+      name: `${e.method} ${fullUrl}`,
+      request: {
+        method: e.method,
+        header: Object.entries(h).map(([key, value]) => ({ key, value: String(value) })),
+        url: fullUrl,
+        body: (e.req?.body != null && e.method !== 'GET' && e.method !== 'HEAD')
+          ? { mode: 'raw', raw: typeof e.req.body === 'string' ? e.req.body : JSON.stringify(e.req.body, null, 2) }
+          : undefined
+      }
+    }]
+  };
+  return JSON.stringify(pm, null, 2);
+}
+
+function buildHAR(e){
+  const startedDateTime = new Date(e.ts).toISOString();
+  const headers = (obj) => Object.entries(obj || {}).map(([name, value]) => ({ name, value: String(value) }));
+  const reqBody = (e.req?.body != null && e.method !== 'GET' && e.method !== 'HEAD')
+    ? (typeof e.req.body === 'string' ? e.req.body : JSON.stringify(e.req.body))
+    : '';
+
+  const h = e.req?.headers || {};
+  const host = String(h['x-forwarded-host'] || h.host || 'localhost:3000');
+  const proto = String(h['x-forwarded-proto'] || 'http');
+  const fullUrl = e.url.startsWith('http') ? e.url : `${proto}://${host}${e.url}`;
+
+  return {
+    log: {
+      version: '1.2',
+      creator: { name: 'RequestDebug', version: '1.0' },
+      entries: [{
+        startedDateTime,
+        time: e.durationMs,
+        request: {
+          method: e.method,
+          url: fullUrl,
+          httpVersion: 'HTTP/1.1',
+          headers: headers(e.req?.headers),
+          queryString: [],
+          postData: reqBody ? { mimeType: e.req?.headers?.['content-type'] || 'application/json', text: reqBody } : undefined,
+          headersSize: -1, bodySize: reqBody ? reqBody.length : 0
+        },
+        response: {
+          status: e.status,
+          statusText: String(e.status),
+          httpVersion: 'HTTP/1.1',
+          headers: headers(e.res?.headers),
+          content: {
+            mimeType: e.res?.headers?.['content-type'] || 'application/json',
+            text: typeof e.res?.body === 'string' ? e.res.body : JSON.stringify(e.res?.body),
+            size: typeof e.res?.body === 'string' ? e.res.body.length : JSON.stringify(e.res?.body).length
+          },
+          headersSize: -1, bodySize: -1
+        },
+        cache: {},
+        timings: { send: 0, wait: e.durationMs, receive: 0 }
+      }]
+    }
+  };
+}
+
+// первичная загрузка
+reload();
+</script>
+</body>
+</html>

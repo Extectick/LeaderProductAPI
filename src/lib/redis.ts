@@ -2,7 +2,7 @@ import { createClient, RedisClientType } from 'redis';
 
 const url = process.env.REDIS_URL || 'redis://localhost:6379';
 const prefix = process.env.REDIS_KEY_PREFIX || 'app:';
-const socketTimeout = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 10000);
+const socketTimeout = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 15000);
 
 let _client: RedisClientType | null = null;
 
@@ -11,26 +11,57 @@ export function getRedis(): RedisClientType {
 
   _client = createClient({
     url,
-    socket: { reconnectStrategy: (retries) => Math.min(1000 * retries, 5000), connectTimeout: socketTimeout }
+    socket: {
+      connectTimeout: socketTimeout,
+      // Плавный бэкофф до 5s между попытками
+      reconnectStrategy: (retries) => Math.min(1000 * retries, 5000),
+    },
   });
 
-  _client.on('error', (err) => {
-    console.error('[redis] error:', err?.message || err);
+  _client.on('connect', () => {
+    console.log('[redis] connected');
   });
   _client.on('reconnecting', () => {
     console.warn('[redis] reconnecting...');
   });
-  _client.on('connect', () => {
-    console.log('[redis] connected');
+  _client.on('error', (err: any) => {
+    const name = err?.name || '';
+    // Транзиентные ошибки не считаем «красной тревогой»
+    if (name === 'ConnectionTimeoutError' || name === 'SocketClosedUnexpectedlyError') {
+      console.warn('[redis] transient:', name, '-', err?.message || err);
+    } else {
+      console.error('[redis] error:', err?.message || err);
+    }
   });
 
-  // Важно: connect() не вызываем синхронно здесь, а при старте (см. ниже)
+  // connect() вызываем в connectRedis()
   return _client;
 }
 
-export async function connectRedis() {
+/**
+ * Подключаемся к Redis с мягким ретраем в течение maxWaitMs (по умолчанию 15s).
+ * Не спамим логами — ошибки считаем транзиентными и просто ждём следующую попытку.
+ */
+export async function connectRedis(maxWaitMs = 15000) {
   const client = getRedis();
-  if (!client.isOpen) await client.connect();
+  if (client.isOpen) return client;
+
+  const start = Date.now();
+  let attempt = 0;
+  // Первая попытка — сразу, далее ретраи каждые 500мс
+  while (!client.isOpen) {
+    try {
+      attempt++;
+      await client.connect();
+      return client;
+    } catch (e: any) {
+      if (Date.now() - start > maxWaitMs) {
+        console.error('[redis] connect failed after retries:', e?.message || e);
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   return client;
 }
 
@@ -70,12 +101,16 @@ export async function bumpVersion(key: string) {
   return r.incr(key);
 }
 
-export async function cacheGet<T=any>(key: string): Promise<T | null> {
+export async function cacheGet<T = any>(key: string): Promise<T | null> {
   const r = getRedis();
   if (!r.isOpen) return null;
   const raw = await r.get(key);
   if (!raw) return null;
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 }
 export async function cacheSet(key: string, val: any, ttlSec: number) {
   const r = getRedis();
