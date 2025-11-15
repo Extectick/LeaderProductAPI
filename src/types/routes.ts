@@ -281,3 +281,97 @@ export type QRRestoreResponse = SuccessResponse<{
   qrData: string;
   description: string | null;
 }> | ErrorResponse;
+
+// Tracking (routes & coordinates) types
+export type TrackingPointInput = {
+  latitude: number;
+  longitude: number;
+  recordedAt: string; // ISO string
+  eventType?: 'MOVE' | 'STOP';
+  accuracy?: number;
+  speed?: number;
+  heading?: number;
+  stayDurationSeconds?: number;
+};
+
+export type SaveTrackingPointsRequest = {
+  routeId?: number;
+  startNewRoute?: boolean;
+  endRoute?: boolean;
+  points: TrackingPointInput[];
+};
+
+export type SaveTrackingPointsResponse = SuccessResponse<{
+  routeId: number;
+  createdPoints: number;
+  routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+}> | ErrorResponse;
+
+export type TrackingRouteSummary = {
+  id: number;
+  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+  startedAt: string;
+  endedAt?: string | null;
+  pointsCount: number;
+};
+
+export type GetUserRoutesQuery = {
+  from?: string;
+  to?: string;
+  limit?: string;
+  offset?: string;
+};
+
+export type GetUserRoutesResponse = SuccessResponse<{
+  routes: TrackingRouteSummary[];
+}> | ErrorResponse;
+
+export type GetRoutePointsQuery = {
+  from?: string;
+  to?: string;
+  eventType?: 'MOVE' | 'STOP';
+  limit?: string;
+  offset?: string;
+  maxAccuracy?: string;
+  maxPoints?: string;
+};
+
+export type RoutePointDto = {
+  id: number;
+  latitude: number;
+  longitude: number;
+  recordedAt: string;
+  eventType: 'MOVE' | 'STOP';
+  accuracy?: number | null;
+  speed?: number | null;
+  heading?: number | null;
+  stayDurationSeconds?: number | null;
+  sequence?: number | null;
+};
+
+export type GetRoutePointsResponse = SuccessResponse<{
+  route: {
+    id: number;
+    status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+    startedAt: string;
+    endedAt?: string | null;
+  };
+  points: RoutePointDto[];
+}> | ErrorResponse;
+
+export type DailyTrackingStat = {
+  date: string;
+  totalDistanceMeters: number;
+  movingDurationSeconds: number;
+  stoppedDurationSeconds: number;
+  routesCount: number;
+};
+
+export type GetDailyTrackingStatsQuery = {
+  from?: string;
+  to?: string;
+};
+
+export type GetDailyTrackingStatsResponse = SuccessResponse<{
+  stats: DailyTrackingStat[];
+}> | ErrorResponse;

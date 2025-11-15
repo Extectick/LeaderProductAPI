@@ -3,6 +3,7 @@ import swaggerJSDoc from 'swagger-jsdoc';
 import appealsSchemas from './schemas/appeals.schema';
 import qrSchemas from './schemas/qr.schema';
 import usersSchemas from './schemas/users.schema';
+import trackingSchemas from './schemas/tracking.schema';
 
 export const swaggerSpec = swaggerJSDoc({
   definition: {
@@ -63,7 +64,8 @@ export const swaggerSpec = swaggerJSDoc({
         // ВАЖНО: подключаем схемы appeals именно сюда
         ...appealsSchemas,
         ...qrSchemas,
-        ...usersSchemas
+        ...usersSchemas,
+        ...trackingSchemas
       },
     },
   },

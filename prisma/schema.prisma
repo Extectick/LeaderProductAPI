@@ -38,6 +38,17 @@ enum AttachmentType {
   FILE
 }
 
+enum RouteStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum RouteEventType {
+  MOVE
+  STOP
+}
+
 model ClientProfile {
   id        Int      @id @default(autoincrement())
   userId    Int      @unique
@@ -117,6 +128,8 @@ model User {
   employeeProfile    EmployeeProfile?
   profileStatus      ProfileStatus       @default(PENDING)
   qrlist             QRList[]
+  routes             UserRoute[]
+  routePoints        RoutePoint[]
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
@@ -250,6 +263,41 @@ model AuditLog {
   details    String?
 
   user       User?      @relation("UserAuditLogs", fields: [userId], references: [id])
+}
+
+model UserRoute {
+  id        Int          @id @default(autoincrement())
+  userId    Int
+  user      User         @relation(fields: [userId], references: [id])
+  status    RouteStatus  @default(ACTIVE)
+  startedAt DateTime     @default(now())
+  endedAt   DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  points    RoutePoint[]
+
+  @@index([userId, startedAt])
+}
+
+model RoutePoint {
+  id                  Int             @id @default(autoincrement())
+  routeId             Int
+  route               UserRoute       @relation(fields: [routeId], references: [id])
+  userId              Int
+  user                User            @relation(fields: [userId], references: [id])
+  latitude            Float
+  longitude           Float
+  recordedAt          DateTime
+  eventType           RouteEventType  @default(MOVE)
+  accuracy            Float?
+  speed               Float?
+  heading             Float?
+  stayDurationSeconds Int?
+  sequence            Int?
+  createdAt           DateTime        @default(now())
+
+  @@index([userId, recordedAt])
+  @@index([routeId, recordedAt])
 }
 
 enum QRStatus {

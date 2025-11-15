@@ -17,6 +17,7 @@ import usersRouter from './routes/users';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
+import trackingRouter from './routes/tracking';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 // Swagger
@@ -88,6 +89,7 @@ app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
+app.use('/tracking', trackingRouter);
 
 app.use(
   '/appeals',
