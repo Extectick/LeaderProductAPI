@@ -2,7 +2,7 @@ import { AuthRequest } from './auth';
 import { Response, NextFunction } from 'express';
 import { PrismaClient, ProfileStatus } from '@prisma/client';
 
-const prisma = new PrismaClient();
+export const checkStatusPrisma = new PrismaClient();
 
 export const checkUserStatus = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const userId = req.user?.userId;
@@ -11,7 +11,7 @@ export const checkUserStatus = async (req: AuthRequest, res: Response, next: Nex
   }
 
   try {
-    const user = await prisma.user.findUnique({
+    const user = await checkStatusPrisma.user.findUnique({
       where: { id: userId },
       select: { profileStatus: true },
     });

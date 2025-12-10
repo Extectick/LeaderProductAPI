@@ -2,14 +2,14 @@ import { PrismaClient } from '@prisma/client';
 import { Profile } from '../types/userTypes';
 import { cacheGet, cacheSet, cacheDel } from '../utils/cache';
 
-const prisma = new PrismaClient();
+export const userServicePrisma = new PrismaClient();
 
 export const getProfile = async (userId: number): Promise<Profile> => {
   const cacheKey = `user:profile:${userId}`;
   const cached = await cacheGet<Profile>(cacheKey);
   if (cached) return cached;
 
-  const user = await prisma.user.findUnique({
+  const user = await userServicePrisma.user.findUnique({
     where: { id: userId },
     include: {
       role: true,
@@ -75,7 +75,7 @@ export const getProfile = async (userId: number): Promise<Profile> => {
 };
 
 export const updateProfile = async (userId: number, data: Partial<Profile>) => {
-  const updated = await prisma.user.update({
+  const updated = await userServicePrisma.user.update({
     where: { id: userId },
     data: {
       firstName: data.firstName,

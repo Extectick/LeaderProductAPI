@@ -20,7 +20,7 @@ const accessTokenSecret =
   process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 
 // единый инстанс Prisma
-const prisma = new PrismaClient();
+export const authPrisma = new PrismaClient();
 
 /**
  * Аутентификация по JWT (Bearer)
@@ -85,7 +85,7 @@ async function getRoleHierarchyByName(roleName: string): Promise<Set<string>> {
 
     // ЯВНАЯ типизация результата findUnique => нет TS7022
     const res: { parentRole: { name: string } | null } | null =
-      await prisma.role.findUnique({
+      await authPrisma.role.findUnique({
         where: { name: current },
         select: { parentRole: { select: { name: true } } },
       });
@@ -127,7 +127,7 @@ async function collectRoleChain(roleId?: number | null): Promise<Set<number>> {
   while (current) {
     if (ids.has(current)) break; // защита от циклов
     ids.add(current);
-    const next = await prisma.role.findUnique({
+    const next = await authPrisma.role.findUnique({
       where: { id: current },
       select: { parentRoleId: true },
     });
@@ -143,7 +143,7 @@ async function collectRoleChain(roleId?: number | null): Promise<Set<number>> {
  * - всех ролей из DepartmentRole (+ их иерархии).
  */
 async function computeUserPermissions(userId: number): Promise<Set<string>> {
-  const user = await prisma.user.findUnique({
+  const user = await authPrisma.user.findUnique({
     where: { id: userId },
     select: {
       roleId: true,
@@ -171,7 +171,7 @@ async function computeUserPermissions(userId: number): Promise<Set<string>> {
   if (allRoleIds.size === 0) return new Set<string>();
 
   // забираем права по всем ролям
-  const rolePerms = await prisma.rolePermissions.findMany({
+  const rolePerms = await authPrisma.rolePermissions.findMany({
     where: { roleId: { in: Array.from(allRoleIds) } },
     include: { permission: { select: { name: true } } },
   });

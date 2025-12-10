@@ -52,7 +52,7 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 
 const app = express();
 const server = http.createServer(app);
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 const port = Number(process.env.PORT) || 3000;
 

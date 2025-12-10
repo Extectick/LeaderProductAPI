@@ -50,7 +50,7 @@ describe('Appeals routes (auth + roles + permissions)', () => {
       .field('priority', AppealPriority.MEDIUM);
 
     expect(resOk.status).toBe(201);
-    expect(resOk.body?.success).toBe(true);
+    expect(resOk.body?.ok).toBe(true);
     const createdId = resOk.body?.data?.id;
     expect(createdId).toBeDefined();
 
@@ -72,7 +72,7 @@ describe('Appeals routes (auth + roles + permissions)', () => {
       .set('Authorization', `Bearer ${employeeToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body?.success).toBe(true);
+    expect(res.body?.ok).toBe(true);
     expect(Array.isArray(res.body?.data?.data)).toBe(true);
     // meta
     expect(res.body?.data?.meta).toBeDefined();
@@ -106,7 +106,7 @@ describe('Appeals routes (auth + roles + permissions)', () => {
       .send({ assigneeIds: [employeeUser.id] });
 
     expect(resManager.status).toBe(200);
-    expect(resManager.body?.success).toBe(true);
+    expect(resManager.body?.ok).toBe(true);
 
     // Проверим, что статус IN_PROGRESS
     const dbAppeal = await prisma.appeal.findUnique({ where: { id: appealId } });
@@ -160,7 +160,7 @@ describe('Appeals routes (auth + roles + permissions)', () => {
       .set('Authorization', `Bearer ${employeeToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body?.success).toBe(true);
+    expect(res.body?.ok).toBe(true);
     expect(res.body?.data?.id).toBe(appealId);
   });
 
@@ -190,8 +190,8 @@ describe('Appeals routes (auth + roles + permissions)', () => {
     expect(second.status).toBe(201);
     expect(second.body?.data?.id).not.toBe(first.body?.data?.id);
 
-    // в БД должно быть 2 сообщения
+    // в БД должно быть 3 сообщения (первое при создании + два отправленных)
     const count = await prisma.appealMessage.count({ where: { appealId } });
-    expect(count).toBe(2);
+    expect(count).toBe(3);
   });
 });

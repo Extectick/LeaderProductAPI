@@ -153,7 +153,27 @@ async function main() {
     });
   }
 
-  console.log('Seed completed: roles and permissions have been created and assigned.');
+  // ---------------------------------------------------------------
+  // 5. ���������� ��������� �������� (departments).
+  const departments = [
+    'IT отдел',
+    'Бухгалтерия',
+    'Отдел продаж',
+    'Отдел логистики',
+    'Отдел кадров',
+  ];
+
+  for (const name of departments) {
+    await prisma.department.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+    });
+  }
+
+  console.log(
+    'Seed completed: roles, permissions and departments have been created and assigned.'
+  );
 }
 
 main()

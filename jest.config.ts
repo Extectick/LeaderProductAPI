@@ -9,5 +9,7 @@ const config: Config = {
   maxWorkers: 1, // чтобы не было гонок при sqlite
   verbose: true,
   testTimeout: 30000,
+  forceExit: true,
+  detectOpenHandles: true,
 };
 export default config;

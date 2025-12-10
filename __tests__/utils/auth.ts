@@ -60,3 +60,8 @@ export function signToken(userId: number, roleName: string) {
   const jwtSecret = process.env.JWT_SECRET || 'test_jwt_secret';
   return jwt.sign({ userId, role: roleName.toUpperCase() }, jwtSecret, { expiresIn: '1h' });
 }
+
+// Закрываем подключение после завершения всех тестов
+afterAll(async () => {
+  await prisma.$disconnect().catch(() => undefined);
+});
