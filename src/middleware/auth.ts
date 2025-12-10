@@ -200,6 +200,12 @@ export function authorizePermissions(
         return res.status(401).json({ message: 'Не авторизован' });
       }
 
+      // Админские роли пропускаем без дополнительной проверки прав
+      const roleChain = await getRoleHierarchyByName(req.user.role);
+      if (roleChain.has('admin') || roleChain.has('administrator')) {
+        return next();
+      }
+
       // считаем полный набор прав пользователя из БД
       const permSet = await computeUserPermissions(req.user.userId);
 

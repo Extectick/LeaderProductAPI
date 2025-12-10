@@ -12,6 +12,25 @@ async function main() {
     'view_profile',
     'update_profile',
     'logout',
+    // Управление пользователями/ролями/отделами
+    'manage_roles',
+    'manage_permissions',
+    'assign_roles',
+    'assign_permissions',
+    'manage_departments',
+    'manage_users',
+    // Финансы
+    'view_fin_reports',
+    'approve_payments',
+    'manage_payroll',
+    // Логистика
+    'view_shipments',
+    'manage_shipments',
+    'manage_inventory',
+    // Продажи/менеджеры
+    'view_leads',
+    'manage_leads',
+    'approve_discounts',
     // Обращения права
     'create_appeal',
     'view_appeal',
@@ -80,6 +99,31 @@ async function main() {
     update: {},
     create: { name: 'admin', parentRoleId: managerRole.id },
   });
+  const supervisorRole = await prisma.role.upsert({
+    where: { name: 'supervisor' },
+    update: {},
+    create: { name: 'supervisor', parentRoleId: employeeRole.id },
+  });
+  const chiefAccountantRole = await prisma.role.upsert({
+    where: { name: 'chief_accountant' },
+    update: {},
+    create: { name: 'chief_accountant', parentRoleId: employeeRole.id },
+  });
+  const logisticsManagerRole = await prisma.role.upsert({
+    where: { name: 'logistics_manager' },
+    update: {},
+    create: { name: 'logistics_manager', parentRoleId: employeeRole.id },
+  });
+  const salesManagerRole = await prisma.role.upsert({
+    where: { name: 'sales_manager' },
+    update: {},
+    create: { name: 'sales_manager', parentRoleId: employeeRole.id },
+  });
+  const administratorRole = await prisma.role.upsert({
+    where: { name: 'administrator' },
+    update: {},
+    create: { name: 'administrator', parentRoleId: adminRole.id },
+  });
 
   // ---------------------------------------------------------------
   // 3. Определяем набор разрешений для каждой роли.
@@ -109,10 +153,55 @@ async function main() {
     'export_appeals',
   ];
 
-  // // "department_manager" — права на назначение и изменение статусов, экспорт обращений
-  // const managerPermissions = [
-  //   'export_appeals'
-  // ];
+  const supervisorPermissions = [
+    ...employeePermissions,
+    'view_fin_reports',
+  ];
+
+  const chiefAccountantPermissions = [
+    'view_profile',
+    'update_profile',
+    'logout',
+    'view_fin_reports',
+    'approve_payments',
+    'manage_payroll',
+  ];
+
+  const logisticsPermissions = [
+    'view_profile',
+    'update_profile',
+    'logout',
+    'view_shipments',
+    'manage_shipments',
+    'manage_inventory',
+  ];
+
+  const salesPermissions = [
+    'view_profile',
+    'update_profile',
+    'logout',
+    'view_leads',
+    'manage_leads',
+    'approve_discounts',
+  ];
+
+  const adminLikePermissions = [
+    ...employeePermissions,
+    'manage_roles',
+    'manage_permissions',
+    'assign_roles',
+    'assign_permissions',
+    'manage_departments',
+    'view_fin_reports',
+    'approve_payments',
+    'manage_payroll',
+    'view_shipments',
+    'manage_shipments',
+    'manage_inventory',
+    'view_leads',
+    'manage_leads',
+    'approve_discounts',
+  ];
 
   // Вспомогательная функция: удаляет старые permissions роли и добавляет новые
   async function assignPermissions(
@@ -138,18 +227,30 @@ async function main() {
   await assignPermissions(clientRole.id, []);
   await assignPermissions(supplierRole.id, []);
 
-  // Для "employee" — права на обращения
+  // Для "employee" - права на обращения
   await assignPermissions(employeeRole.id, employeePermissions);
 
-  // // Для "department_manager" — свои дополнительные права
-  // await assignPermissions(managerRole.id, managerPermissions);
+  // Для дополнительных ролей
+  await assignPermissions(supervisorRole.id, supervisorPermissions);
+  await assignPermissions(chiefAccountantRole.id, chiefAccountantPermissions);
+  await assignPermissions(logisticsManagerRole.id, logisticsPermissions);
+  await assignPermissions(salesManagerRole.id, salesPermissions);
+  await assignPermissions(managerRole.id, employeePermissions);
 
-  // Для "admin" — все существующие разрешения
+  // Для "admin" - все существующие разрешения
   const allPermissions = await prisma.permission.findMany();
   await prisma.rolePermissions.deleteMany({ where: { roleId: adminRole.id } });
   for (const permission of allPermissions) {
     await prisma.rolePermissions.create({
       data: { roleId: adminRole.id, permissionId: permission.id },
+    });
+  }
+
+  // Для "administrator" - зеркально admin
+  await prisma.rolePermissions.deleteMany({ where: { roleId: administratorRole.id } });
+  for (const permission of allPermissions) {
+    await prisma.rolePermissions.create({
+      data: { roleId: administratorRole.id, permissionId: permission.id },
     });
   }
 
@@ -161,6 +262,8 @@ async function main() {
     'Отдел продаж',
     'Отдел логистики',
     'Отдел кадров',
+    'Менеджеры',
+    'Логисты',
   ];
 
   for (const name of departments) {

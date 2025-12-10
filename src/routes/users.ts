@@ -1,8 +1,9 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, ProfileStatus } from '@prisma/client';
 import {
   authenticateToken,
   authorizeRoles,
+  authorizePermissions,
   AuthRequest
 } from '../middleware/auth';
 import {
@@ -25,6 +26,15 @@ import { getProfile } from '../services/userService';
 
 const router = express.Router();
 const prisma = new PrismaClient();
+const USER_LIST_SELECT = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  phone: true,
+  role: { select: { id: true, name: true } },
+  employeeProfile: { select: { departmentId: true } },
+};
 
 /**
  * @openapi
@@ -715,6 +725,133 @@ router.get(
 );
 
 /**
+ * Создать отдел (для админов/управления отделами)
+ */
+router.post(
+  '/departments',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_departments'], { mode: 'any' }),
+  async (req: AuthRequest<{}, DepartmentResponse, { name?: string }>, res: express.Response<DepartmentResponse>) => {
+    try {
+      const name = (req.body.name || '').trim();
+      if (!name) {
+        return res.status(400).json(errorResponse('Название отдела обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const dep = await prisma.department.upsert({
+        where: { name },
+        update: {},
+        create: { name },
+      });
+
+      res.json(successResponse([{ id: dep.id, name: dep.name }]));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка создания отдела',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Обновить отдел (переименовать)
+ */
+router.patch(
+  '/departments/:departmentId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_departments'], { mode: 'any' }),
+  async (
+    req: AuthRequest<{ departmentId: string }, DepartmentResponse, { name?: string }>,
+    res: express.Response<DepartmentResponse>
+  ) => {
+    try {
+      const departmentId = Number(req.params.departmentId);
+      if (Number.isNaN(departmentId)) {
+        return res.status(400).json(errorResponse('Некорректный ID отдела', ErrorCodes.VALIDATION_ERROR));
+      }
+      const name = (req.body.name || '').trim();
+      if (!name) {
+        return res.status(400).json(errorResponse('Название отдела обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const dep = await prisma.department.update({
+        where: { id: departmentId },
+        data: { name },
+      });
+
+      res.json(successResponse([{ id: dep.id, name: dep.name }]));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка обновления отдела',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Удалить отдел
+ */
+router.delete(
+  '/departments/:departmentId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_departments'], { mode: 'any' }),
+  async (req: AuthRequest<{ departmentId: string }>, res: express.Response<DepartmentResponse>) => {
+    try {
+      const departmentId = Number(req.params.departmentId);
+      if (Number.isNaN(departmentId)) {
+        return res.status(400).json(errorResponse('Некорректный ID отдела', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      // Снимаем ссылки, чтобы не нарушать FK (сотрудники, роли, обращения)
+      await prisma.employeeProfile.updateMany({ where: { departmentId }, data: { departmentId: null } });
+      await prisma.departmentRole.deleteMany({ where: { departmentId } });
+      // обращения, где отдел указан
+      // Обнуляем ссылку на отдел в обращениях, чтобы не ломать FK
+      await prisma.appeal.updateMany({
+        where: { toDepartmentId: departmentId },
+        data: { toDepartmentId: null as any },
+      });
+      await prisma.department.delete({ where: { id: departmentId } });
+      res.json(successResponse([{ id: departmentId, name: 'deleted' }]));
+    } catch (error) {
+      const code = (error as any)?.code;
+      const msg = (error as any)?.message?.toString() || '';
+      if (code === 'P2003' || msg.includes('Appeal_toDepartmentId_fkey') || msg.includes('violates RESTRICT')) {
+        return res.status(409).json(
+          errorResponse('Нельзя удалить отдел: есть связанные записи (сотрудники/роли/обращения)', ErrorCodes.CONFLICT)
+        );
+      }
+      if (code === 'P2025') {
+        return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
+      }
+      console.error('Ошибка удаления отдела', error);
+      res.status(500).json(
+        errorResponse(
+          'Ошибка удаления отдела',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
  * @openapi
  * /users/{userId}/department/{departmentId}/manager:
  *   post:
@@ -834,6 +971,421 @@ router.post(
 );
 
 /**
+ * Права (перечень)
+ */
+router.get(
+  '/permissions',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const permissions = await prisma.permission.findMany({ orderBy: { name: 'asc' } });
+      res.json(successResponse(permissions));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка получения списка прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Роли: список
+ */
+router.get(
+  '/roles',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_roles'], { mode: 'any' }),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const roles = await prisma.role.findMany({
+        orderBy: { name: 'asc' },
+        include: {
+          parentRole: { select: { id: true, name: true } },
+          permissions: { include: { permission: true } },
+        },
+      });
+      const data = roles.map((r) => ({
+        id: r.id,
+        name: r.name,
+        parentRole: r.parentRole ? { id: r.parentRole.id, name: r.parentRole.name } : null,
+        permissions: r.permissions.map((p) => p.permission.name),
+      }));
+      res.json(successResponse(data));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка получения списка ролей',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Список пользователей с поиском
+ */
+router.get(
+  '/',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_roles', 'manage_users'], { mode: 'any' }),
+  async (req: AuthRequest<{}, {}, {}, { search?: string }>, res: express.Response) => {
+    try {
+      const search = (req.query.search || '').trim();
+      const users = await prisma.user.findMany({
+        where: search
+          ? {
+              OR: [
+                { email: { contains: search, mode: 'insensitive' } },
+                { firstName: { contains: search, mode: 'insensitive' } },
+                { lastName: { contains: search, mode: 'insensitive' } },
+                { phone: { contains: search } },
+              ],
+            }
+          : {},
+        select: USER_LIST_SELECT,
+        orderBy: { id: 'asc' },
+        take: 50,
+      });
+      res.json(successResponse(users));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка получения пользователей',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Админ: обновить данные пользователя (ФИО, email, phone, статус, department)
+ */
+router.patch(
+  '/:userId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_users'], { mode: 'any' }),
+  async (
+    req: AuthRequest<{ userId: string }, {}, { firstName?: string; lastName?: string; middleName?: string; email?: string; phone?: string; profileStatus?: ProfileStatus; departmentId?: number | null }>,
+    res: express.Response
+  ) => {
+    try {
+      const userId = Number(req.params.userId);
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+      const data: any = {};
+      if (req.body.firstName !== undefined) data.firstName = req.body.firstName;
+      if (req.body.lastName !== undefined) data.lastName = req.body.lastName;
+      if (req.body.middleName !== undefined) data.middleName = req.body.middleName;
+      if (req.body.email !== undefined) data.email = req.body.email;
+      if (req.body.phone !== undefined) data.phone = req.body.phone;
+      if (req.body.profileStatus !== undefined) data.profileStatus = req.body.profileStatus;
+
+      if (Object.keys(data).length) {
+        await prisma.user.update({ where: { id: userId }, data });
+      }
+
+      if (req.body.departmentId !== undefined) {
+        const depId = req.body.departmentId;
+        if (depId === null) {
+          await prisma.employeeProfile.updateMany({ where: { userId }, data: { departmentId: null } });
+        } else {
+          const department = await prisma.department.findUnique({ where: { id: Number(depId) } });
+          if (!department) {
+            return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
+          }
+          await prisma.employeeProfile.updateMany({ where: { userId }, data: { departmentId: Number(depId) } });
+        }
+      }
+
+      const profile = await getProfile(userId);
+      return res.json(successResponse({ profile }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления пользователя',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Админ: смена пароля пользователя
+ */
+router.patch(
+  '/:userId/password',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_users'], { mode: 'any' }),
+  async (req: AuthRequest<{ userId: string }, {}, { password?: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.params.userId);
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+      const { password } = req.body;
+      if (!password || password.length < 6) {
+        return res.status(400).json(errorResponse('Пароль должен быть не менее 6 символов', ErrorCodes.VALIDATION_ERROR));
+      }
+      const bcrypt = require('bcrypt');
+      const passwordHash = await bcrypt.hash(password, 10);
+      await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+      return res.json(successResponse({ message: 'Пароль обновлен' }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления пароля',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Создать роль
+ */
+router.post(
+  '/roles',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_roles'], { mode: 'any' }),
+  async (req: AuthRequest<{}, {}, { name?: string; parentRoleId?: number; permissions?: string[] }>, res: express.Response) => {
+    try {
+      const name = (req.body.name || '').trim();
+      if (!name) {
+        return res.status(400).json(errorResponse('Название роли обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const role = await prisma.role.create({
+        data: {
+          name,
+          parentRoleId: req.body.parentRoleId ?? null,
+        },
+      });
+
+      const perms = Array.isArray(req.body.permissions) ? req.body.permissions : [];
+      if (perms.length) {
+        for (const permName of perms) {
+          const perm = await prisma.permission.findUnique({ where: { name: permName } });
+          if (perm) {
+            await prisma.rolePermissions.create({ data: { roleId: role.id, permissionId: perm.id } });
+          }
+        }
+      }
+
+      res.json(successResponse({ id: role.id, name: role.name }));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка создания роли',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Обновить роль (имя/parent)
+ */
+router.patch(
+  '/roles/:roleId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_roles'], { mode: 'any' }),
+  async (req: AuthRequest<{ roleId: string }, {}, { name?: string; parentRoleId?: number }>, res: express.Response) => {
+    try {
+      const roleId = Number(req.params.roleId);
+      if (Number.isNaN(roleId)) {
+        return res.status(400).json(errorResponse('Некорректный ID роли', ErrorCodes.VALIDATION_ERROR));
+      }
+      const data: any = {};
+      if (req.body.name) data.name = req.body.name.trim();
+      if (req.body.parentRoleId !== undefined) data.parentRoleId = req.body.parentRoleId ?? null;
+      if (!Object.keys(data).length) {
+        return res.status(400).json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const role = await prisma.role.update({ where: { id: roleId }, data });
+      res.json(successResponse({ id: role.id, name: role.name }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка обновления роли',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Задать права роли
+ */
+router.patch(
+  '/roles/:roleId/permissions',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (req: AuthRequest<{ roleId: string }, {}, { permissions?: string[] }>, res: express.Response) => {
+    try {
+      const roleId = Number(req.params.roleId);
+      if (Number.isNaN(roleId)) {
+        return res.status(400).json(errorResponse('Некорректный ID роли', ErrorCodes.VALIDATION_ERROR));
+      }
+      const permNames = Array.isArray(req.body.permissions) ? req.body.permissions : [];
+
+      await prisma.rolePermissions.deleteMany({ where: { roleId } });
+      if (permNames.length) {
+        const perms = await prisma.permission.findMany({ where: { name: { in: permNames } } });
+        for (const perm of perms) {
+          await prisma.rolePermissions.create({ data: { roleId, permissionId: perm.id } });
+        }
+      }
+
+      res.json(successResponse({ message: 'Права роли обновлены' }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка обновления прав роли',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Удалить роль
+ */
+router.delete(
+  '/roles/:roleId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_roles'], { mode: 'any' }),
+  async (req: AuthRequest<{ roleId: string }>, res: express.Response) => {
+    try {
+      const roleId = Number(req.params.roleId);
+      if (Number.isNaN(roleId)) {
+        return res.status(400).json(errorResponse('Некорректный ID роли', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      // Снимаем внешние связи перед удалением роли
+      const baseUserRole = await prisma.role.findUnique({ where: { name: 'user' } });
+      await prisma.user.updateMany({
+        where: { roleId },
+        data: baseUserRole?.id ? { roleId: baseUserRole.id } : { roleId: null as any },
+      });
+      await prisma.role.updateMany({
+        where: { parentRoleId: roleId },
+        data: { parentRoleId: null },
+      });
+      await prisma.departmentRole.deleteMany({ where: { roleId } });
+      await prisma.rolePermissions.deleteMany({ where: { roleId } });
+
+      await prisma.role.delete({ where: { id: roleId } });
+      res.json(successResponse({ message: 'Роль удалена' }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка удаления роли',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Назначить основную роль пользователю
+ */
+router.post(
+  '/:userId/role',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['assign_roles'], { mode: 'any' }),
+  async (req: AuthRequest<{ userId: string }, {}, { roleId?: number; roleName?: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.params.userId);
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      let role = null;
+      if (req.body.roleId) {
+        role = await prisma.role.findUnique({ where: { id: Number(req.body.roleId) } });
+      } else if (req.body.roleName) {
+        role = await prisma.role.findUnique({ where: { name: req.body.roleName } });
+      }
+      if (!role) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+
+      await prisma.user.update({
+        where: { id: userId },
+        data: { roleId: role.id },
+      });
+
+      res.json(successResponse({ message: 'Роль пользователя обновлена' }));
+    } catch (error) {
+      const isNotFound = (error as any)?.code === 'P2025';
+      if (isNotFound) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка назначения роли пользователю',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
  * @openapi
  * /users/{userId}/profile:
  *   get:
@@ -891,7 +1443,7 @@ router.get(
           where: { id: requesterId },
           include: { role: true },
         });
-        const isAdmin = requester?.role?.name === 'admin';
+        const isAdmin = requester?.role?.name === 'admin' || requester?.role?.name === 'administrator';
         if (!isAdmin) {
           return res
             .status(403)
@@ -911,6 +1463,43 @@ router.get(
       return res.status(500).json(
         errorResponse(
           'Ошибка получения профиля пользователя',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Список пользователей по отделу
+ */
+router.get(
+  '/departments/:departmentId/users',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_departments'], { mode: 'any' }),
+  async (req: AuthRequest<{ departmentId: string }>, res: express.Response) => {
+    try {
+      const departmentId = Number(req.params.departmentId);
+      if (Number.isNaN(departmentId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный ID отдела', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const users = await prisma.user.findMany({
+        where: { employeeProfile: { departmentId } },
+        select: USER_LIST_SELECT,
+        orderBy: { id: 'asc' },
+      });
+
+      return res.json(successResponse(users));
+    } catch (error) {
+      console.error('Ошибка получения пользователей отдела', error);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения пользователей отдела',
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? error : undefined
         )
