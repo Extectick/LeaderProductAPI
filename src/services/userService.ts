@@ -1,14 +1,9 @@
 import { PrismaClient } from '@prisma/client';
 import { Profile } from '../types/userTypes';
-import { cacheGet, cacheSet, cacheDel } from '../utils/cache';
 
 export const userServicePrisma = new PrismaClient();
 
 export const getProfile = async (userId: number): Promise<Profile> => {
-  const cacheKey = `user:profile:${userId}`;
-  const cached = await cacheGet<Profile>(cacheKey);
-  if (cached) return cached;
-
   const user = await userServicePrisma.user.findUnique({
     where: { id: userId },
     include: {
@@ -70,7 +65,6 @@ export const getProfile = async (userId: number): Promise<Profile> => {
       employeeProfile: user.employeeProfile
   };
 
-  await cacheSet(cacheKey, profile, 300);
   return profile;
 };
 
@@ -85,7 +79,6 @@ export const updateProfile = async (userId: number, data: Partial<Profile>) => {
       avatarUrl: data.avatarUrl
     }
   });
-  await cacheDel(`user:profile:${userId}`);
   return updated;
 };
 

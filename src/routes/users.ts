@@ -276,6 +276,7 @@ router.get(
         );
       }
 
+      res.set('Cache-Control', 'no-store');
       res.json(successResponse({ profile }));
     } catch (error) {
       res.status(500).json(

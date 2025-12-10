@@ -552,10 +552,13 @@ router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res
           throw new Error('Не удалось получить новый refresh токен после создания');
         }
 
-    res.json(successResponse({
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken.token
-    }));
+        const profile = await getProfile(user.id);
+
+        res.json(successResponse({
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken.token,
+          profile
+        }));
       } catch (e) {
         console.error('Ошибка создания нового refresh токена:', e);
         res.status(500).json(
@@ -751,10 +754,12 @@ router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, r
 
     const accessToken = generateAccessToken(userWithRole as UserWithRolePermissions);
     const refreshToken = await createUniqueRefreshToken(userWithRole.id);
+    const profile = await getProfile(userWithRole.id);
 
     res.json(successResponse({
       accessToken,
       refreshToken,
+      profile,
       message: 'Аккаунт подтвержден и активирован'
     }));
   } catch (error) {
