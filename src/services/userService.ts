@@ -1,7 +1,7 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../prisma/client';
 import { Profile } from '../types/userTypes';
 
-export const userServicePrisma = new PrismaClient();
+export const userServicePrisma = prisma;
 
 export const getProfile = async (userId: number): Promise<Profile> => {
   const user = await userServicePrisma.user.findUnique({

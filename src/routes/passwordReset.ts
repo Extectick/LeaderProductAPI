@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../prisma/client';
 import { sendVerificationEmail } from '../services/mailService';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import {
@@ -13,7 +13,6 @@ import {
 } from '../types/routes';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 const PASSWORD_RESET_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
 

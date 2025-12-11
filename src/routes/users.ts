@@ -1,5 +1,6 @@
 import express from 'express';
-import { PrismaClient, ProfileStatus } from '@prisma/client';
+import { ProfileStatus } from '@prisma/client';
+import prisma from '../prisma/client';
 import {
   authenticateToken,
   authorizeRoles,
@@ -25,7 +26,6 @@ import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse
 import { getProfile } from '../services/userService';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 const USER_LIST_SELECT = {
   id: true,
   email: true,

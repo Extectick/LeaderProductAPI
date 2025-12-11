@@ -1,8 +1,9 @@
 import { AuthRequest } from './auth';
 import { Response, NextFunction } from 'express';
-import { PrismaClient, ProfileStatus } from '@prisma/client';
+import { ProfileStatus } from '@prisma/client';
+import prisma from '../prisma/client';
 
-export const checkStatusPrisma = new PrismaClient();
+export const checkStatusPrisma = prisma;
 
 export const checkUserStatus = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const userId = req.user?.userId;

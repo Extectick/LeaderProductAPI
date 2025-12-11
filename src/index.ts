@@ -4,12 +4,12 @@ import http from 'http';
 // import dotenv from 'dotenv';
 import './env'; // ❌ убираем, чтобы .env не грузился дважды
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
 import morgan from 'morgan';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { Server as SocketIOServer } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import prisma from './prisma/client';
 
 // Routers
 import authRouter from './routes/auth';
@@ -18,6 +18,7 @@ import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
 import trackingRouter from './routes/tracking';
+import onecRouter from './modules/onec/onec.routes';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 // Swagger
@@ -52,7 +53,6 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 
 const app = express();
 const server = http.createServer(app);
-export const prisma = new PrismaClient();
 
 const port = Number(process.env.PORT) || 3000;
 
@@ -90,6 +90,7 @@ app.use('/users', usersRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
 app.use('/tracking', trackingRouter);
+app.use('/api/1c', onecRouter);
 
 app.use(
   '/appeals',
@@ -258,4 +259,5 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
 
+export { prisma };
 export default app;

@@ -1,8 +1,6 @@
 import request from 'supertest';
-import { PrismaClient } from '@prisma/client';
 import app from '../index';
-
-const prisma = new PrismaClient();
+import prisma from '../prisma/client';
 
 beforeAll(async () => {
   // Optionally run migrations or setup test DB here

@@ -1,9 +1,9 @@
 import request from 'supertest';
-import { PrismaClient, AppealStatus, AppealPriority } from '@prisma/client';
+import { AppealStatus, AppealPriority } from '@prisma/client';
 import { attachIoStub } from '../utils/app';
 import { createUserWithRole, signToken } from '../utils/auth';
+import prisma from '../../src/prisma/client';
 
-const prisma = new PrismaClient();
 let app: any;
 
 

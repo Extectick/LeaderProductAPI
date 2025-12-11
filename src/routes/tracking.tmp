@@ -1,5 +1,5 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../prisma/client';
 import {
   authenticateToken,
   AuthRequest,
@@ -24,7 +24,6 @@ import {
 } from '../types/routes';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 const MAX_POINTS_BATCH = 500;
 const DEFAULT_MAX_ACCURACY_METERS = 100;

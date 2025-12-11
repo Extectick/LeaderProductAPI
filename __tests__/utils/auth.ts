@@ -1,8 +1,7 @@
 // __tests__/utils/auth.ts
 import jwt from 'jsonwebtoken';
-import { PrismaClient, ProfileType, ProfileStatus } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { ProfileType, ProfileStatus } from '@prisma/client';
+import prisma from '../../src/prisma/client';
 
 function uniqEmail(base: string): string {
   const [local, domain = 'example.com'] = base.split('@');

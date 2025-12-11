@@ -4,12 +4,12 @@ import express from 'express';
 import multer from 'multer';
 import { Parser } from 'json2csv';
 import {
-  PrismaClient,
   Prisma,
   AppealStatus,
   AppealPriority,
   AttachmentType,
 } from '@prisma/client';
+import prisma from '../prisma/client';
 import { z } from 'zod';
 
 import {
@@ -64,7 +64,6 @@ type HasAppealAttachment = {
 };
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // Храним файлы в памяти, чтобы получить file.buffer и отправить в MinIO
 const upload = multer({

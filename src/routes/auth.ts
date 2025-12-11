@@ -1,7 +1,8 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt, { VerifyErrors } from 'jsonwebtoken';
-import { PrismaClient, User, Role, Permission } from '@prisma/client';
+import { User, Role, Permission } from '@prisma/client';
+import prisma from '../prisma/client';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { sendVerificationEmail } from '../services/mailService';
 import passwordResetRouter from './passwordReset';
@@ -35,8 +36,6 @@ const router = express.Router();
  */
 
 router.use(passwordResetRouter);
-
-const prisma = new PrismaClient();
 
 const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || 'yourrefreshtokensecret';

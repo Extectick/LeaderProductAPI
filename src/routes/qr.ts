@@ -3,11 +3,11 @@ import multer from 'multer';
 import { Parser } from 'json2csv';
 import {
   Prisma,
-  PrismaClient,
   AppealStatus,
   AppealPriority,
   AttachmentType,
 } from '@prisma/client';
+import prisma from '../prisma/client';
 import {
   authenticateToken,
   authorizePermissions,
@@ -48,7 +48,6 @@ const validator = require('validator');
 const UAParser = require('ua-parser-js');
 
 const router = express.Router();
-const prisma = new PrismaClient();
 const generateShortId = customAlphabet(
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
   8

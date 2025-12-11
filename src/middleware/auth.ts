@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { PrismaClient, ProfileStatus } from '@prisma/client';
+import { ProfileStatus } from '@prisma/client';
+import prisma from '../prisma/client';
 
 interface JwtPayload {
   userId: number;
@@ -20,7 +21,7 @@ const accessTokenSecret =
   process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 
 // единый инстанс Prisma
-export const authPrisma = new PrismaClient();
+export const authPrisma = prisma;
 
 /**
  * Аутентификация по JWT (Bearer)

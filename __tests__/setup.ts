@@ -1,6 +1,4 @@
-import { PrismaClient } from '@prisma/client';
 import * as path from 'path';
-import * as fs from 'fs';
 import dotenv from 'dotenv';
 import { execSync } from 'child_process';
 
@@ -8,6 +6,10 @@ process.env.NODE_ENV = 'test';
 
 // Подхватываем .env.test заранее, чтобы Prisma видел корректный postgres URL
 dotenv.config({ path: path.resolve(process.cwd(), '.env.test') });
+
+// Инициализируем Prisma после загрузки env, чтобы взять правильный DATABASE_URL
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const prisma = require('../src/prisma/client').default as typeof import('../src/prisma/client').default;
 
 // Отключаем Redis в тестах, чтобы не было лишних подключений/ошибок
 process.env.REDIS_URL = '';
@@ -21,20 +23,17 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret';
 process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || process.env.JWT_SECRET;
 process.env.REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'test_refresh_secret';
 
-// Применяем миграции к тестовой базе перед запуском
+// Синхронизируем схему с тестовой БД (без миграций, чтобы не требовать history)
 try {
-  execSync('npx prisma migrate deploy --schema prisma/schema.prisma', {
+  execSync('npx prisma db push --schema prisma/schema.prisma --config prisma.config.js --accept-data-loss', {
     stdio: 'inherit',
     env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL as string },
     cwd: process.cwd(),
   });
 } catch (e) {
-  // если миграции не проходят - падаем явно
-  console.error('Failed to run prisma migrate deploy for tests', e);
+  console.error('Failed to run prisma db push for tests', e);
   throw e;
 }
-
-const prisma = new PrismaClient();
 
 beforeAll(async () => {
   // Применяем миграции
@@ -126,28 +125,4 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.$disconnect().catch(() => undefined);
-  // Закрываем Prisma внутри src/index.ts (тот же инстанс используется приложением)
-  try {
-    const mod = await import('../src/index');
-    if (mod.prisma) {
-      await mod.prisma.$disconnect().catch(() => undefined);
-    }
-    const auth = await import('../src/middleware/auth');
-    if (auth.authPrisma) {
-      await auth.authPrisma.$disconnect().catch(() => undefined);
-    }
-    const checkStatus = await import('../src/middleware/checkUserStatus');
-    if (checkStatus.checkStatusPrisma) {
-      await checkStatus.checkStatusPrisma.$disconnect().catch(() => undefined);
-    }
-    const userSvc = await import('../src/services/userService');
-    if (userSvc.userServicePrisma) {
-      await userSvc.userServicePrisma.$disconnect().catch(() => undefined);
-    }
-  } catch {
-    // ignore
-  }
-});
-afterAll(async () => {
-  await prisma.$disconnect();
 });
