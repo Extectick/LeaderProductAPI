@@ -1,12 +1,16 @@
 import { createClient, RedisClientType } from 'redis';
 
 const url = process.env.REDIS_URL || 'redis://localhost:6379';
+const disabled = process.env.REDIS_DISABLE === '1';
 const prefix = process.env.REDIS_KEY_PREFIX || 'app:';
 const socketTimeout = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 15000);
 
 let _client: RedisClientType | null = null;
 
 export function getRedis(): RedisClientType {
+  if (disabled) {
+    throw new Error('Redis is disabled via REDIS_DISABLE=1');
+  }
   if (_client) return _client;
 
   _client = createClient({
@@ -34,6 +38,14 @@ export function getRedis(): RedisClientType {
     }
   });
 
+  // Подстраховка: перехватываем ошибки сокета, чтобы процесс не падал
+  const rawSocket: any = ( _client as any )?.socket;
+  if (rawSocket?.on) {
+    rawSocket.on('error', (err: any) => {
+      console.warn('[redis] socket error:', err?.message || err);
+    });
+  }
+
   // connect() вызываем в connectRedis()
   return _client;
 }
@@ -43,6 +55,7 @@ export function getRedis(): RedisClientType {
  * Не спамим логами — ошибки считаем транзиентными и просто ждём следующую попытку.
  */
 export async function connectRedis(maxWaitMs = 15000) {
+  if (disabled) return null;
   const client = getRedis();
   if (client.isOpen) return client;
 
@@ -92,16 +105,19 @@ export const redisKeys = {
 };
 
 export async function getVersion(key: string) {
+  if (disabled) return 1;
   const r = getRedis();
   const v = await r.get(key);
   return v ? parseInt(v, 10) || 1 : 1;
 }
 export async function bumpVersion(key: string) {
+  if (disabled) return 1;
   const r = getRedis();
   return r.incr(key);
 }
 
 export async function cacheGet<T = any>(key: string): Promise<T | null> {
+  if (disabled) return null;
   const r = getRedis();
   if (!r.isOpen) return null;
   const raw = await r.get(key);
@@ -113,6 +129,7 @@ export async function cacheGet<T = any>(key: string): Promise<T | null> {
   }
 }
 export async function cacheSet(key: string, val: any, ttlSec: number) {
+  if (disabled) return;
   const r = getRedis();
   if (!r.isOpen) return;
   await r.set(key, JSON.stringify(val), { EX: ttlSec });

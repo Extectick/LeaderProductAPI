@@ -297,9 +297,6 @@ export type TrackingPointInput = {
 };
 
 export type SaveTrackingPointsRequest = {
-  routeId?: number;
-  startNewRoute?: boolean;
-  endRoute?: boolean;
   points: TrackingPointInput[];
 };
 
@@ -340,6 +337,7 @@ export type GetRoutePointsQuery = {
 
 export type RoutePointDto = {
   id: number;
+  routeId?: number;
   latitude: number;
   longitude: number;
   recordedAt: string;
@@ -361,6 +359,19 @@ export type GetRoutePointsResponse = SuccessResponse<{
   points: RoutePointDto[];
 }> | ErrorResponse;
 
+export type GetUserPointsQuery = {
+  from?: string;
+  to?: string;
+  eventType?: 'MOVE' | 'STOP';
+  maxAccuracy?: string;
+  maxPoints?: string;
+};
+
+export type GetUserPointsResponse = SuccessResponse<{
+  user: { id: number };
+  points: RoutePointDto[];
+}> | ErrorResponse;
+
 export type DailyTrackingStat = {
   date: string;
   totalDistanceMeters: number;
@@ -376,4 +387,23 @@ export type GetDailyTrackingStatsQuery = {
 
 export type GetDailyTrackingStatsResponse = SuccessResponse<{
   stats: DailyTrackingStat[];
+}> | ErrorResponse;
+
+// Admin/manager view: routes with points for a user and period
+export type GetUserRoutesWithPointsQuery = {
+  from?: string;
+  to?: string;
+  maxAccuracy?: string;
+  maxPoints?: string;
+};
+
+export type GetUserRoutesWithPointsResponse = SuccessResponse<{
+  user: { id: number };
+  routes: Array<{
+    id: number;
+    status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+    startedAt: string;
+    endedAt?: string | null;
+    points: RoutePointDto[];
+  }>;
 }> | ErrorResponse;

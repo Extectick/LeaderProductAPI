@@ -57,13 +57,29 @@ const server = http.createServer(app);
 const port = Number(process.env.PORT) || 3000;
 
 // ---- CORS ----
-const corsOrigins = ['http://localhost:8081', 'http://192.168.30.54:8081'];
+// Разрешаем все origin, чтобы веб и мобильные клиенты работали из любой сети.
+// Если понадобится ограничение по доменам, верните проверку и список разрешённых.
+const corsOrigins: string[] = [];
+
+// Ручной preflight, чтобы гарантировать заголовки даже если cors не сработал
+app.use((req, res, next) => {
+  const origin = req.headers.origin as string | undefined;
+  res.header('Access-Control-Allow-Origin', origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  res.header(
+    'Access-Control-Allow-Headers',
+    (req.headers['access-control-request-headers'] as string) ||
+      'Content-Type, Authorization, X-Requested-With'
+  );
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 app.use(
   cors({
-    origin: (origin, cb) => {
-      if (!origin || corsOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);
-    },
+    origin: true, // allow all origins
     credentials: true,
   })
 );
@@ -195,7 +211,7 @@ app.get('/', async (_req, res) => {
 // ---- Socket.IO ----
 const io = new SocketIOServer(server, {
   cors: {
-    origin: corsOrigins,
+    origin: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
   },
@@ -225,8 +241,12 @@ io.on('connection', (socket) => {
 // ---- Start ----
 if (ENV !== 'test') {
   (async () => {
-    // 1) Подключаемся к Redis один раз, терпеливо ждём до 15с
-    await connectRedis();
+    // 1) Подключаемся к Redis один раз, терпеливо ждём до 15с, но не падаем, если недоступен
+    try {
+      await connectRedis();
+    } catch (e: any) {
+      console.warn('[startup] Redis connect failed, continuing without cache:', e?.message || e);
+    }
 
     // 2) Запускаем проверки сервисов (Redis уже подключен — только ping)
     await startupChecks();
@@ -256,6 +276,11 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Promise rejection:', reason);
 });
 process.on('uncaughtException', (err) => {
+  // Игнорируем transient ошибки Redis, чтобы не падать при нестабильном соединении
+  if ((err as any)?.name === 'SocketClosedUnexpectedlyError') {
+    console.warn('Redis socket closed unexpectedly (ignored)', err?.message || err);
+    return;
+  }
   console.error('Uncaught Exception:', err);
 });
 

@@ -21,6 +21,10 @@ import {
   RoutePointDto,
   GetDailyTrackingStatsQuery,
   GetDailyTrackingStatsResponse,
+  GetUserRoutesWithPointsQuery,
+  GetUserRoutesWithPointsResponse,
+  GetUserPointsQuery,
+  GetUserPointsResponse,
 } from '../types/routes';
 
 const router = express.Router();
@@ -81,18 +85,9 @@ function haversineDistanceMeters(
  *           schema:
  *             type: object
  *             properties:
- *               routeId:
- *                 type: integer
- *                 description: ID существующего маршрута (опционально)
- *               startNewRoute:
- *                 type: boolean
- *                 description: Создать новый маршрут для переданных точек
- *               endRoute:
- *                 type: boolean
- *                 description: Завершить маршрут (поставить endedAt и статус COMPLETED)
  *               points:
  *                 type: array
- *                 description: Массив точек маршрута
+ *                 description: Массив точек геолокации
  *                 items:
  *                   type: object
  *                   required: [latitude, longitude, recordedAt]
@@ -165,7 +160,7 @@ router.post(
           .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
       }
 
-      const { routeId, startNewRoute, endRoute, points } = req.body || {};
+      const { points } = req.body || {};
 
       if (!Array.isArray(points) || points.length === 0) {
         return res.status(400).json(
@@ -180,15 +175,6 @@ router.post(
         return res.status(400).json(
           errorResponse(
             `Превышен максимальный размер batch: ${MAX_POINTS_BATCH} точек`,
-            ErrorCodes.VALIDATION_ERROR
-          )
-        );
-      }
-
-      if (routeId && startNewRoute) {
-        return res.status(400).json(
-          errorResponse(
-            'Нельзя одновременно передавать routeId и startNewRoute',
             ErrorCodes.VALIDATION_ERROR
           )
         );
@@ -276,47 +262,23 @@ router.post(
       let routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
 
       await prisma.$transaction(async (tx) => {
-        if (routeId) {
-          const existing = await tx.userRoute.findFirst({
-            where: { id: routeId, userId },
-          });
-          if (!existing) {
-            throw errorResponse(
-              'Маршрут не найден или не принадлежит пользователю',
-              ErrorCodes.NOT_FOUND
-            );
-          }
-          targetRouteId = existing.id;
-          routeStatus = existing.status;
-        } else if (startNewRoute) {
-          const created = await tx.userRoute.create({
+        // Всегда используем один непрерывный активный маршрут пользователя,
+        // чтобы писать точки круглосуточно. Если нет — создаём.
+        let active = await tx.userRoute.findFirst({
+          where: { userId, status: 'ACTIVE' },
+          orderBy: { startedAt: 'desc' },
+        });
+        if (!active) {
+          active = await tx.userRoute.create({
             data: {
               userId,
               startedAt: minTs,
-              status: endRoute ? 'COMPLETED' : 'ACTIVE',
-              endedAt: endRoute ? maxTs : null,
+              status: 'ACTIVE',
             },
           });
-          targetRouteId = created.id;
-          routeStatus = created.status;
-        } else {
-          // Используем последний активный маршрут пользователя или создаём новый
-          let active = await tx.userRoute.findFirst({
-            where: { userId, status: 'ACTIVE' },
-            orderBy: { startedAt: 'desc' },
-          });
-          if (!active) {
-            active = await tx.userRoute.create({
-              data: {
-                userId,
-                startedAt: minTs,
-                status: 'ACTIVE',
-              },
-            });
-          }
-          targetRouteId = active.id;
-          routeStatus = active.status;
         }
+        targetRouteId = active.id;
+        routeStatus = active.status;
 
         const existingPointsCount = await tx.routePoint.count({
           where: { routeId: targetRouteId },
@@ -337,17 +299,6 @@ router.post(
         }));
 
         await tx.routePoint.createMany({ data });
-
-        if (endRoute && targetRouteId) {
-          const updated = await tx.userRoute.update({
-            where: { id: targetRouteId },
-            data: {
-              status: 'COMPLETED',
-              endedAt: maxTs,
-            },
-          });
-          routeStatus = updated.status;
-        }
       });
 
       return res.json(
@@ -1382,6 +1333,314 @@ router.get(
       return res.status(500).json(
         errorResponse(
           'Ошибка получения статистики по трекингу',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? err : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Получить маршруты и точки выбранного пользователя за период (для владельца или админа/менеджера)
+ */
+router.get(
+  '/admin/users/:userId/routes-with-points',
+  authenticateToken,
+  checkUserStatus,
+  async (
+    req: AuthRequest<{ userId: string }, GetUserRoutesWithPointsResponse, {}, GetUserRoutesWithPointsQuery>,
+    res: express.Response<GetUserRoutesWithPointsResponse>
+  ) => {
+    try {
+      const requesterId = req.user?.userId;
+      if (!requesterId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const userIdNum = parseInt(req.params.userId, 10);
+      if (isNaN(userIdNum)) {
+        return res.status(400).json(
+          errorResponse(
+            'userId должен быть целым числом',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      const role = (req.user?.role || '').toLowerCase();
+      const canViewOthers =
+        role.includes('admin') || role.includes('manager');
+      if (!canViewOthers && requesterId !== userIdNum) {
+        return res.status(403).json(
+          errorResponse(
+            'Недостаточно прав для просмотра маршрутов этого пользователя',
+            ErrorCodes.FORBIDDEN
+          )
+        );
+      }
+
+      const { from, to, maxAccuracy, maxPoints } = req.query;
+      const fromDate = parseDate(from);
+      const toDate = parseDate(to);
+      if (from && !fromDate) {
+        return res.status(400).json(
+          errorResponse(
+            'Некорректное значение параметра from',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+      if (to && !toDate) {
+        return res.status(400).json(
+          errorResponse(
+            'Некорректное значение параметра to',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      const routeWhere: any = { userId: userIdNum };
+      if (fromDate || toDate) {
+        routeWhere.startedAt = {};
+        if (fromDate) routeWhere.startedAt.gte = fromDate;
+        if (toDate) routeWhere.startedAt.lte = toDate;
+      }
+
+      const routes = await prisma.userRoute.findMany({
+        where: routeWhere,
+        orderBy: { startedAt: 'desc' },
+      });
+
+      const routeIds = routes.map((r) => r.id);
+      let points: RoutePointDto[] = [];
+      if (routeIds.length > 0) {
+        const pointsWhere: any = { routeId: { in: routeIds }, userId: userIdNum };
+        if (fromDate || toDate) {
+          pointsWhere.recordedAt = {};
+          if (fromDate) pointsWhere.recordedAt.gte = fromDate;
+          if (toDate) pointsWhere.recordedAt.lte = toDate;
+        }
+
+        const rawPoints = await prisma.routePoint.findMany({
+          where: pointsWhere,
+          orderBy: [{ routeId: 'asc' }, { recordedAt: 'asc' }],
+        });
+
+        const maxAccuracyNum = maxAccuracy ? parseFloat(maxAccuracy) : DEFAULT_MAX_ACCURACY_METERS;
+        const filtered = rawPoints.filter(
+          (p) =>
+            p.accuracy === null ||
+            p.accuracy === undefined ||
+            (isNaN(maxAccuracyNum) ? true : p.accuracy <= maxAccuracyNum)
+        );
+
+        points = filtered.map((p) => ({
+          id: p.id,
+          routeId: p.routeId,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          recordedAt: p.recordedAt.toISOString(),
+          eventType: p.eventType,
+          accuracy: p.accuracy,
+          speed: p.speed,
+          heading: p.heading,
+          stayDurationSeconds: p.stayDurationSeconds,
+          sequence: p.sequence ?? null,
+        }));
+      }
+
+      const maxPointsNum = maxPoints ? parseInt(maxPoints, 10) : undefined;
+      const grouped = new Map<number, RoutePointDto[]>();
+      for (const pt of points) {
+        if (!pt.routeId) continue;
+        const arr = grouped.get(pt.routeId) ?? [];
+        arr.push(pt);
+        grouped.set(pt.routeId, arr);
+      }
+
+      // downsample per route if requested
+      const downsample = (list: RoutePointDto[]): RoutePointDto[] => {
+        if (
+          !maxPointsNum ||
+          isNaN(maxPointsNum) ||
+          maxPointsNum <= 0 ||
+          list.length <= maxPointsNum
+        ) {
+          return list;
+        }
+        const step = Math.ceil(list.length / maxPointsNum);
+        const sampled: RoutePointDto[] = [];
+        for (let i = 0; i < list.length; i += step) {
+          sampled.push(list[i]);
+        }
+        if (sampled[sampled.length - 1]?.id !== list[list.length - 1]?.id) {
+          sampled.push(list[list.length - 1]);
+        }
+        return sampled;
+      };
+
+      const responseRoutes = routes.map((r) => {
+        const pts = (grouped.get(r.id) ?? []).sort((a, b) =>
+          a.recordedAt.localeCompare(b.recordedAt)
+        );
+        return {
+          id: r.id,
+          status: r.status,
+          startedAt: r.startedAt.toISOString(),
+          endedAt: r.endedAt ? r.endedAt.toISOString() : null,
+          points: downsample(pts),
+        };
+      });
+
+      return res.json(
+        successResponse(
+          { user: { id: userIdNum }, routes: responseRoutes },
+          'Маршруты пользователя с точками получены'
+        )
+      );
+    } catch (err) {
+      console.error('Ошибка получения маршрутов пользователя:', err);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения маршрутов пользователя',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? err : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Получить сырые точки пользователя за период (без маршрутов)
+ */
+router.get(
+  '/users/:userId/points',
+  authenticateToken,
+  checkUserStatus,
+  async (
+    req: AuthRequest<{ userId: string }, GetUserPointsResponse, {}, GetUserPointsQuery>,
+    res: express.Response<GetUserPointsResponse>
+  ) => {
+    try {
+      const requesterId = req.user?.userId;
+      if (!requesterId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const userIdNum = parseInt(req.params.userId, 10);
+      if (isNaN(userIdNum)) {
+        return res.status(400).json(
+          errorResponse(
+            'userId должен быть целым числом',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      const role = (req.user?.role || '').toLowerCase();
+      const canViewOthers = role.includes('admin') || role.includes('manager');
+      if (!canViewOthers && requesterId !== userIdNum) {
+        return res.status(403).json(
+          errorResponse(
+            'Недостаточно прав для просмотра точек этого пользователя',
+            ErrorCodes.FORBIDDEN
+          )
+        );
+      }
+
+      const { from, to, eventType, maxAccuracy, maxPoints } = req.query;
+      const fromDate = parseDate(from);
+      const toDate = parseDate(to);
+      if (from && !fromDate) {
+        return res.status(400).json(
+          errorResponse(
+            'Некорректное значение параметра from',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+      if (to && !toDate) {
+        return res.status(400).json(
+          errorResponse(
+            'Некорректное значение параметра to',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      const where: any = { userId: userIdNum };
+      if (fromDate || toDate) {
+        where.recordedAt = {};
+        if (fromDate) where.recordedAt.gte = fromDate;
+        if (toDate) where.recordedAt.lte = toDate;
+      }
+      if (eventType === 'MOVE' || eventType === 'STOP') {
+        where.eventType = eventType;
+      }
+
+      const maxAccuracyNum = maxAccuracy ? parseFloat(maxAccuracy) : DEFAULT_MAX_ACCURACY_METERS;
+      if (!isNaN(maxAccuracyNum)) {
+        where.OR = [
+          { accuracy: null },
+          { accuracy: { lte: maxAccuracyNum } },
+        ];
+      }
+
+      const rawPoints = await prisma.routePoint.findMany({
+        where,
+        orderBy: [{ recordedAt: 'asc' }, { id: 'asc' }],
+      });
+
+      const mapped: RoutePointDto[] = rawPoints.map((p) => ({
+        id: p.id,
+        routeId: p.routeId || undefined,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        recordedAt: p.recordedAt.toISOString(),
+        eventType: p.eventType,
+        accuracy: p.accuracy,
+        speed: p.speed,
+        heading: p.heading,
+        stayDurationSeconds: p.stayDurationSeconds,
+        sequence: p.sequence ?? null,
+      }));
+
+      const maxPointsNum = maxPoints ? parseInt(maxPoints, 10) : undefined;
+      let points = mapped;
+      if (
+        maxPointsNum &&
+        !isNaN(maxPointsNum) &&
+        maxPointsNum > 0 &&
+        mapped.length > maxPointsNum
+      ) {
+        const step = Math.ceil(mapped.length / maxPointsNum);
+        const sampled: RoutePointDto[] = [];
+        for (let i = 0; i < mapped.length; i += step) {
+          sampled.push(mapped[i]);
+        }
+        if (sampled[sampled.length - 1]?.id !== mapped[mapped.length - 1]?.id) {
+          sampled.push(mapped[mapped.length - 1]);
+        }
+        points = sampled;
+      }
+
+      return res.json(
+        successResponse(
+          { user: { id: userIdNum }, points },
+          'Точки пользователя за период получены'
+        )
+      );
+    } catch (err) {
+      console.error('Ошибка получения точек пользователя:', err);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения точек пользователя',
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? err : undefined
         )
