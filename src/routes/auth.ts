@@ -39,7 +39,8 @@ router.use(passwordResetRouter);
 
 const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || 'yourrefreshtokensecret';
-const accessTokenLife = '15m';
+// временно уменьшенный TTL для access-токена (2 минуты) для отладки фона
+const accessTokenLife = '30m';
 const refreshTokenLife = '14d';
 const MAX_FAILED_LOGIN_ATTEMPTS = 19;
 const MAX_VERIFICATION_ATTEMPTS = 5;

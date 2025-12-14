@@ -30,21 +30,25 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
   const authHeader = req.headers['authorization'];
 
   if (!authHeader) {
+    console.warn('[auth] no Authorization header', { path: req.path });
     return res.status(401).json({ message: 'Требуется токен авторизации', code: 'NO_TOKEN' });
   }
 
   const parts = authHeader.split(' ');
   if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    console.warn('[auth] bad auth format', { path: req.path, header: authHeader });
     return res.status(401).json({ message: 'Неверный формат токена', code: 'BAD_AUTH_FORMAT' });
   }
 
   const token = parts[1].trim();
   if (!token) {
+    console.warn('[auth] empty token', { path: req.path });
     return res.status(401).json({ message: 'Токен отсутствует', code: 'EMPTY_TOKEN' });
   }
 
   // Проверка символов (только ASCII)
   if (!/^[\x00-\x7F]*$/.test(token)) {
+    console.warn('[auth] invalid chars in token', { path: req.path });
     return res.status(401).json({ message: 'Недопустимые символы в токене', code: 'INVALID_CHARS' });
   }
 
@@ -57,6 +61,7 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
     const decoded = jwt.verify(token, accessTokenSecret) as JwtPayload;
 
     if (!decoded?.userId || !decoded?.role) {
+      console.warn('[auth] invalid payload', { path: req.path, decoded });
       return res.status(401).json({ message: 'Неверный payload токена', code: 'INVALID_PAYLOAD' });
     }
 
@@ -64,6 +69,12 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
     next();
   } catch (err: any) {
     const isExpired = err?.name === 'TokenExpiredError';
+
+    console.warn('[auth] token verify failed', {
+      path: req.path,
+      name: err?.name,
+      message: err?.message,
+    });
 
     return res.status(401).json({
       message: isExpired ? 'Токен просрочен' : 'Недействительный токен',
