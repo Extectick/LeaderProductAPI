@@ -10,7 +10,7 @@
     "prisma": "prisma",
     "prisma:generate": "dotenv -e .env.dev -- prisma generate",
     "prisma:migrate": "dotenv -e .env.dev -- prisma migrate deploy",
-    "studio": "dotenv -e .env.dev -- prisma studio",
+    "studio": "node scripts/run-prisma-studio.js",
     "prisma:seed": "dotenv -e .env.dev -- ts-node --transpile-only src/prisma/seed.ts",
     "postinstall": "prisma generate",
     "test": "cross-env NODE_ENV=test jest --config jest.config.ts",

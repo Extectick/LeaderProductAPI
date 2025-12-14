@@ -31,6 +31,7 @@ const router = express.Router();
 
 const MAX_POINTS_BATCH = 500;
 const DEFAULT_MAX_ACCURACY_METERS = 100;
+const MIN_DISTANCE_METERS = 5;
 
 function parseDate(value?: string): Date | undefined {
   if (!value) return undefined;
@@ -245,29 +246,72 @@ router.post(
         });
       }
 
-      const minTs =
-        parsedPoints.reduce(
-          (min, p) =>
-            p.recordedAt < min ? p.recordedAt : min,
-          parsedPoints[0].recordedAt
-        );
-      const maxTs =
-        parsedPoints.reduce(
-          (max, p) =>
-            p.recordedAt > max ? p.recordedAt : max,
-          parsedPoints[0].recordedAt
-        );
-
       let targetRouteId: number | undefined;
-      let routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+      let routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED' = 'ACTIVE';
+      let createdPoints = 0;
 
       await prisma.$transaction(async (tx) => {
         // Всегда используем один непрерывный активный маршрут пользователя,
-        // чтобы писать точки круглосуточно. Если нет — создаём.
+        // чтобы писать точки круглосуточно. Если нет - создаём.
         let active = await tx.userRoute.findFirst({
           where: { userId, status: 'ACTIVE' },
           orderBy: { startedAt: 'desc' },
         });
+        const lastSavedPoint = active
+          ? await tx.routePoint.findFirst({
+              where: { routeId: active.id, userId },
+              orderBy: { recordedAt: 'desc' },
+            })
+          : null;
+
+        const filteredPoints: typeof parsedPoints = [];
+        for (const p of parsedPoints) {
+          const prev = filteredPoints.length
+            ? filteredPoints[filteredPoints.length - 1]
+            : lastSavedPoint;
+          if (prev) {
+            const distance = haversineDistanceMeters(
+              prev.latitude,
+              prev.longitude,
+              p.latitude,
+              p.longitude
+            );
+            if (distance < MIN_DISTANCE_METERS) {
+              continue;
+            }
+          }
+          filteredPoints.push(p);
+        }
+
+        if (!filteredPoints.length) {
+          if (!active) {
+            const fallbackStartedAt = parsedPoints[0].recordedAt;
+            active = await tx.userRoute.create({
+              data: {
+                userId,
+                startedAt: fallbackStartedAt,
+                status: 'ACTIVE',
+              },
+            });
+          }
+          targetRouteId = active.id;
+          routeStatus = active.status;
+          return;
+        }
+
+        const minTs =
+          filteredPoints.reduce(
+            (min, p) =>
+              p.recordedAt < min ? p.recordedAt : min,
+            filteredPoints[0].recordedAt
+          );
+        const maxTs =
+          filteredPoints.reduce(
+            (max, p) =>
+              p.recordedAt > max ? p.recordedAt : max,
+            filteredPoints[0].recordedAt
+          );
+
         if (!active) {
           active = await tx.userRoute.create({
             data: {
@@ -284,7 +328,7 @@ router.post(
           where: { routeId: targetRouteId },
         });
 
-        const data = parsedPoints.map((p, idx) => ({
+        const data = filteredPoints.map((p, idx) => ({
           routeId: targetRouteId!,
           userId,
           latitude: p.latitude,
@@ -299,13 +343,27 @@ router.post(
         }));
 
         await tx.routePoint.createMany({ data });
+        createdPoints = data.length;
       });
+
+      if (createdPoints === 0) {
+        return res.json(
+          successResponse(
+            {
+              routeId: targetRouteId!,
+              createdPoints: 0,
+              routeStatus,
+            },
+            'Новые точки не сохранены: смещение менее 5 метров'
+          )
+        );
+      }
 
       return res.json(
         successResponse(
           {
             routeId: targetRouteId!,
-            createdPoints: parsedPoints.length,
+            createdPoints,
             routeStatus: routeStatus!,
           },
           'Точки маршрута успешно сохранены'
