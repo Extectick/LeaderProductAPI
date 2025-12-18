@@ -1460,55 +1460,50 @@ router.get(
         );
       }
 
-      const routeWhere: any = { userId: userIdNum };
+      const pointsWhere: any = { userId: userIdNum };
       if (fromDate || toDate) {
-        routeWhere.startedAt = {};
-        if (fromDate) routeWhere.startedAt.gte = fromDate;
-        if (toDate) routeWhere.startedAt.lte = toDate;
+        pointsWhere.recordedAt = {};
+        if (fromDate) pointsWhere.recordedAt.gte = fromDate;
+        if (toDate) pointsWhere.recordedAt.lte = toDate;
       }
 
-      const routes = await prisma.userRoute.findMany({
-        where: routeWhere,
-        orderBy: { startedAt: 'desc' },
+      const rawPoints = await prisma.routePoint.findMany({
+        where: pointsWhere,
+        orderBy: [{ routeId: 'asc' }, { recordedAt: 'asc' }],
       });
 
-      const routeIds = routes.map((r) => r.id);
-      let points: RoutePointDto[] = [];
-      if (routeIds.length > 0) {
-        const pointsWhere: any = { routeId: { in: routeIds }, userId: userIdNum };
-        if (fromDate || toDate) {
-          pointsWhere.recordedAt = {};
-          if (fromDate) pointsWhere.recordedAt.gte = fromDate;
-          if (toDate) pointsWhere.recordedAt.lte = toDate;
-        }
+      const maxAccuracyNum = maxAccuracy ? parseFloat(maxAccuracy) : DEFAULT_MAX_ACCURACY_METERS;
+      const filtered = rawPoints.filter(
+        (p) =>
+          p.accuracy === null ||
+          p.accuracy === undefined ||
+          (isNaN(maxAccuracyNum) ? true : p.accuracy <= maxAccuracyNum)
+      );
 
-        const rawPoints = await prisma.routePoint.findMany({
-          where: pointsWhere,
-          orderBy: [{ routeId: 'asc' }, { recordedAt: 'asc' }],
-        });
+      const points: RoutePointDto[] = filtered.map((p) => ({
+        id: p.id,
+        routeId: p.routeId,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        recordedAt: p.recordedAt.toISOString(),
+        eventType: p.eventType,
+        accuracy: p.accuracy,
+        speed: p.speed,
+        heading: p.heading,
+        stayDurationSeconds: p.stayDurationSeconds,
+        sequence: p.sequence ?? null,
+      }));
 
-        const maxAccuracyNum = maxAccuracy ? parseFloat(maxAccuracy) : DEFAULT_MAX_ACCURACY_METERS;
-        const filtered = rawPoints.filter(
-          (p) =>
-            p.accuracy === null ||
-            p.accuracy === undefined ||
-            (isNaN(maxAccuracyNum) ? true : p.accuracy <= maxAccuracyNum)
-        );
+      const routeIds = Array.from(
+        new Set(points.map((p) => p.routeId).filter((id): id is number => Boolean(id)))
+      );
 
-        points = filtered.map((p) => ({
-          id: p.id,
-          routeId: p.routeId,
-          latitude: p.latitude,
-          longitude: p.longitude,
-          recordedAt: p.recordedAt.toISOString(),
-          eventType: p.eventType,
-          accuracy: p.accuracy,
-          speed: p.speed,
-          heading: p.heading,
-          stayDurationSeconds: p.stayDurationSeconds,
-          sequence: p.sequence ?? null,
-        }));
-      }
+      const routes = routeIds.length
+        ? await prisma.userRoute.findMany({
+            where: { id: { in: routeIds }, userId: userIdNum },
+            orderBy: { startedAt: 'desc' },
+          })
+        : [];
 
       const maxPointsNum = maxPoints ? parseInt(maxPoints, 10) : undefined;
       const grouped = new Map<number, RoutePointDto[]>();
