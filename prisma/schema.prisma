@@ -140,6 +140,8 @@ model User {
   appealWatchers    AppealWatcher[]
   appealMessages    AppealMessage[]
   appealStatusHistory AppealStatusHistory[]
+  deviceTokens      DeviceToken[]
+  appealMessageReads AppealMessageRead[]
 
   @@index([email])
 }
@@ -411,6 +413,7 @@ model AppealMessage {
   appeal    Appeal   @relation(fields: [appealId], references: [id])
   sender    User     @relation(fields: [senderId], references: [id])
   attachments AppealAttachment[]
+  reads     AppealMessageRead[]
 }
 
 model AppealAttachment {
@@ -422,6 +425,26 @@ model AppealAttachment {
   createdAt  DateTime       @default(now())
 
   message    AppealMessage  @relation(fields: [messageId], references: [id])
+}
+
+model AppealMessageRead {
+  id        Int            @id @default(autoincrement())
+  message   AppealMessage  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId Int
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  readAt    DateTime       @default(now())
+
+  @@unique([messageId, userId])
+}
+
+model DeviceToken {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  token     String   @unique
+  platform  String?
+  createdAt DateTime @default(now())
 }
 
 // ==========================

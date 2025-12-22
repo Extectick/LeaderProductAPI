@@ -55,13 +55,23 @@ import {
 
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
 import { uploadMulterFile } from '../storage/minio';
-import { cacheGet, cacheSet, cacheDel } from '../utils/cache';
+import { cacheGet, cacheSet, cacheDel, cacheDelPrefix } from '../utils/cache';
 import { randomUUID } from 'node:crypto';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
 type HasAppealAttachment = {
   appealAttachment: Prisma.AppealAttachmentDelegate<any>;
 };
+
+type MessageWithRelations = Prisma.AppealMessageGetPayload<{
+  include: {
+    attachments: true;
+    reads: { select: { userId: true; readAt: true } };
+    sender: {
+      select: { id: true; email: true; firstName: true; lastName: true };
+    };
+  };
+}>;
 
 const router = express.Router();
 
@@ -107,6 +117,47 @@ async function saveMulterFilesToAppealMessage(
         fileType: detectAttachmentType(file.mimetype),
       },
     });
+  }
+}
+
+/** Приведение сообщения к фронтовому виду с флагом прочтения */
+function mapMessageWithReads(
+  message: MessageWithRelations,
+  currentUserId: number
+) {
+  const readBy = (message.reads ?? []).map((r) => ({
+    userId: r.userId,
+    readAt: r.readAt,
+  }));
+  // Считаем собственные сообщения прочитанными для себя, чтобы они не попадали в unread
+  const isOwn = message.senderId === currentUserId;
+  return {
+    id: message.id,
+    appealId: message.appealId,
+    senderId: message.senderId,
+    text: message.text,
+    editedAt: message.editedAt,
+    deleted: message.deleted,
+    createdAt: message.createdAt,
+    attachments: message.attachments,
+    sender: message.sender,
+    readBy,
+    isRead: isOwn || readBy.some((r) => r.userId === currentUserId),
+  };
+}
+
+/** Заглушка для пушей: сохраняем точку расширения */
+async function sendPushToUsers(
+  userIds: number[],
+  title: string,
+  body: string
+) {
+  const tokens = await prisma.deviceToken.findMany({
+    where: { userId: { in: userIds } },
+  });
+  // Здесь можно подключить FCM/Expo. Пока пишем в лог, чтобы не падать API.
+  for (const t of tokens) {
+    console.log('[PUSH][stub]', { token: t.token, title, body });
   }
 }
 
@@ -205,6 +256,10 @@ router.post(
 
         return appeal;
       });
+
+      // Инвалидация кэша списков/деталей, чтобы новое обращение появилось сразу
+      await cacheDelPrefix('appeals:list:');
+      await cacheDelPrefix('appeal:');
 
       // 6) WebSocket-уведомление отдела-получателя
       const io = req.app.get('io') as SocketIOServer;
@@ -308,6 +363,28 @@ router.get(
                 user: { select: { id: true, email: true, firstName: true, lastName: true } },
               },
             },
+            messages: {
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              include: {
+                attachments: true,
+                reads: { select: { userId: true, readAt: true } },
+                sender: {
+                  select: { id: true, email: true, firstName: true, lastName: true },
+                },
+              },
+            },
+            _count: {
+              select: {
+                messages: {
+                  where: {
+                    deleted: false,
+                    senderId: { not: userId },
+                    reads: { none: { userId } },
+                  },
+                },
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
           skip: offset,
@@ -315,7 +392,20 @@ router.get(
         }),
       ]);
 
-      const responseData = { data: appeals, meta: { total, limit, offset } };
+      const responseData = {
+        data: appeals.map((a: any) => {
+          const { messages, _count, ...rest } = a;
+          const lastMessage = messages?.[0]
+            ? mapMessageWithReads(messages[0] as MessageWithRelations, userId)
+            : null;
+          return {
+            ...rest,
+            lastMessage,
+            unreadCount: _count?.messages ?? 0,
+          };
+        }),
+        meta: { total, limit, offset },
+      };
       await cacheSet(cacheKey, responseData, 60);
 
       return res.json(successResponse(responseData, 'Список обращений'));
@@ -352,30 +442,28 @@ router.get(
       }
       const { id: appealId } = parsed.data;
 
-      const cacheKey = `appeal:${appealId}`;
-      let appeal = await cacheGet<any>(cacheKey);
-      if (!appeal) {
-        appeal = await prisma.appeal.findUnique({
-          where: { id: appealId },
-          include: {
-            fromDepartment: true,
-            toDepartment: true,
-            createdBy: true,
-            assignees: { include: { user: true } },
-            watchers: { include: { user: true } },
-            statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
-            messages: {
-              orderBy: { createdAt: 'asc' },
-              include: { sender: true, attachments: true },
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          fromDepartment: true,
+          toDepartment: true,
+          createdBy: true,
+          assignees: { include: { user: true } },
+          watchers: { include: { user: true } },
+          statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
+          messages: {
+            orderBy: { createdAt: 'asc' },
+            include: {
+              sender: { select: { id: true, email: true, firstName: true, lastName: true } },
+              attachments: true,
+              reads: { select: { userId: true, readAt: true } },
             },
           },
-        });
+        },
+      });
 
-        if (!appeal) {
-          return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
-        }
-
-        await cacheSet(cacheKey, appeal, 60);
+      if (!appeal) {
+        return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
       const userId = req.user!.userId;
@@ -391,7 +479,14 @@ router.get(
           .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
       }
 
-      return res.json(successResponse(appeal, 'Детали обращения'));
+      const mappedAppeal = {
+        ...appeal,
+        messages: appeal.messages.map((m) =>
+          mapMessageWithReads(m as MessageWithRelations, userId)
+        ),
+      };
+
+      return res.json(successResponse(mappedAppeal, 'Детали обращения'));
     } catch (error) {
       console.error('Ошибка получения обращения:', error);
       return res
@@ -435,7 +530,13 @@ router.put(
       const { id: appealId } = p.data;
       const { assigneeIds } = b.data as { assigneeIds: number[] };
 
-      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          assignees: { select: { userId: true } },
+          watchers: { select: { userId: true } },
+        },
+      });
       if (!appeal) {
         return res
           .status(404)
@@ -516,7 +617,13 @@ router.put(
       const { id: appealId } = p.data;
       const { status } = b.data as { status: AppealStatus };
 
-      const appeal = await prisma.appeal.findUnique({ where: { id: appealId } });
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          assignees: { select: { userId: true } },
+          watchers: { select: { userId: true } },
+        },
+      });
       if (!appeal) {
         return res
           .status(404)
@@ -687,33 +794,183 @@ router.post(
         }
       }
 
+      const fullMessage = await prisma.appealMessage.findUnique({
+        where: { id: message.id },
+        include: {
+          attachments: true,
+          reads: { select: { userId: true, readAt: true } },
+          sender: {
+            select: { id: true, email: true, firstName: true, lastName: true },
+          },
+        },
+      });
+
+      const mappedMessage = fullMessage
+        ? mapMessageWithReads(fullMessage as MessageWithRelations, req.user!.userId)
+        : {
+            id: message.id,
+            appealId,
+            senderId: req.user!.userId,
+            text: message.text,
+            createdAt: message.createdAt,
+            attachments: [],
+            readBy: [],
+            isRead: true,
+          };
+
       // 6) Инвалидация кэша обращения + обновляем версию
       await cacheDel(`appeal:${appealId}`);
-      await cacheDel(`appeals:list:*`);
+      await cacheDelPrefix('appeals:list:');
       await prisma.appeal.update({
         where: { id: appealId },
         data: { updatedAt: new Date() },
       });
 
+      const recipients = new Set<number>();
+      // отправителя тоже уведомляем, чтобы список у него обновился без ручного рефреша
+      recipients.add(req.user!.userId);
+      if (appeal.createdById !== req.user!.userId) {
+        recipients.add(appeal.createdById);
+      }
+      const assignees = (appeal as any).assignees as { userId: number }[] | undefined;
+      assignees?.forEach((a) => {
+        if (a.userId !== req.user!.userId) recipients.add(a.userId);
+      });
+      const watchers = (appeal as any).watchers as { userId: number }[] | undefined;
+      watchers?.forEach((w) => {
+        if (w.userId !== req.user!.userId) recipients.add(w.userId);
+      });
+
       // 7) Уведомляем всех подписчиков по WebSocket
       const io = req.app.get('io') as unknown as SocketIOServer;
-      io.to(`appeal:${appealId}`).emit('messageAdded', {
-        appealId,
-        messageId: message.id,
-        senderId: req.user!.userId,
-        text: message.text,
-        createdAt: message.createdAt,
-      });
+      io.to(`appeal:${appealId}`).emit('messageAdded', mappedMessage);
+      // Уведомляем участников персонально (чтобы список обращений получил событие)
+      if (recipients.size) {
+        for (const uid of recipients) {
+          io.to(`user:${uid}`).emit('messageAdded', mappedMessage);
+        }
+      }
+      // Уведомляем отдел-получатель (для вкладки "Задачи отдела")
+      if (appeal.toDepartmentId) {
+        io.to(`department:${appeal.toDepartmentId}`).emit('messageAdded', mappedMessage);
+      }
+
+      // 7.1) Отправляем пуши адресатам (без отправителя)
+      if (recipients.size) {
+        await sendPushToUsers(
+          Array.from(recipients),
+          `Новое сообщение в обращении #${appealId}`,
+          mappedMessage.text ? String(mappedMessage.text).slice(0, 120) : '[Вложение]'
+        );
+      }
 
       // 8) Отправляем ответ
       return res
         .status(201)
-        .json(successResponse({ id: message.id, createdAt: message.createdAt }, 'Сообщение добавлено'));
+        .json(
+          successResponse(
+            { id: mappedMessage.id, createdAt: mappedMessage.createdAt },
+            'Сообщение добавлено'
+          )
+        );
     } catch (error) {
       console.error('[APPEAL MESSAGE][ERROR]', { requestId, error });
       return res
         .status(500)
         .json(errorResponse('Ошибка добавления сообщения', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+/**
+ * @openapi
+ * /appeals/{appealId}/messages/{messageId}/read:
+ *   post:
+ *     tags: [Appeals]
+ *     summary: Пометить сообщение обращения прочитанным
+ *     security: [ { bearerAuth: [] } ]
+ *     x-permissions: ["view_appeal"]
+ */
+router.post(
+  '/:appealId/messages/:messageId/read',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['view_appeal']),
+  async (
+    req: AuthRequest<{ appealId: string; messageId: string }>,
+    res: express.Response
+  ) => {
+    try {
+      const appealId = Number(req.params.appealId);
+      const messageId = Number(req.params.messageId);
+      if (Number.isNaN(appealId) || Number.isNaN(messageId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный идентификатор', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const message = await prisma.appealMessage.findFirst({
+        where: { id: messageId, appealId, deleted: false },
+        include: {
+          appeal: {
+            select: {
+              id: true,
+              createdById: true,
+              toDepartmentId: true,
+              assignees: { select: { userId: true } },
+            },
+          },
+        },
+      });
+
+      if (!message) {
+        return res.status(404).json(errorResponse('Сообщение не найдено', ErrorCodes.NOT_FOUND));
+      }
+
+      const userId = req.user!.userId;
+      const appeal = message.appeal;
+      const isCreator = appeal.createdById === userId;
+      const isAssignee = appeal.assignees.some((a) => a.userId === userId);
+      const employee = await prisma.employeeProfile.findFirst({
+        where: { userId, departmentId: appeal.toDepartmentId },
+      });
+
+      if (!isCreator && !isAssignee && !employee) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
+      }
+
+      const read = await prisma.appealMessageRead.upsert({
+        where: { messageId_userId: { messageId, userId } },
+        update: { readAt: new Date() },
+        create: { messageId, userId },
+      });
+
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
+      const io = req.app.get('io') as SocketIOServer;
+      io.to(`appeal:${appealId}`).emit('messageRead', {
+        appealId,
+        messageId,
+        userId,
+        readAt: read.readAt,
+      });
+
+      return res.json(
+        successResponse(
+          { appealId, messageId, readAt: read.readAt },
+          'Сообщение помечено прочитанным'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка пометки прочитанного сообщения:', error);
+      return res
+        .status(500)
+        .json(
+          errorResponse('Ошибка пометки прочитанного сообщения', ErrorCodes.INTERNAL_ERROR)
+        );
     }
   }
 );
