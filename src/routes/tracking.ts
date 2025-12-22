@@ -29,7 +29,7 @@ import {
 
 const router = express.Router();
 
-const MAX_POINTS_BATCH = 500;
+const MAX_POINTS_BATCH = 1000;
 const DEFAULT_MAX_ACCURACY_METERS = 100;
 const MIN_DISTANCE_METERS = 5;
 
