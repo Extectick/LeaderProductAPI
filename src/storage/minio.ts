@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "node:crypto";
@@ -130,6 +131,17 @@ export async function uploadBuffer(
   return { bucket: S3_BUCKET!, key, url, contentType };
 }
 
+/** Удаление объекта в MinIO */
+export async function deleteObject(key: string) {
+  await s3.send(
+    new DeleteObjectCommand({
+      Bucket: S3_BUCKET!,
+      Key: key,
+    })
+  );
+  return { bucket: S3_BUCKET!, key };
+}
+
 /** Заливка файла из multer */
 export async function uploadMulterFile(
   file: Express.Multer.File,
@@ -205,6 +217,7 @@ export default {
   presignPut,
   presignGet,
   uploadBuffer,
+  deleteObject,
   uploadMulterFile,
   saveAppealAttachment,
   saveAppealAttachments,

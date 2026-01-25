@@ -48,6 +48,62 @@ enum RouteEventType {
   STOP
 }
 
+enum AppPlatform {
+  ANDROID
+  IOS
+}
+
+enum AppUpdateEventType {
+  CHECK
+  PROMPT_SHOWN
+  UPDATE_CLICK
+  DISMISS
+}
+
+model AppUpdate {
+  id                      Int         @id @default(autoincrement())
+  platform                AppPlatform
+  channel                 String      @default("prod")
+  versionCode             Int
+  versionName             String
+  minSupportedVersionCode Int
+  isMandatory             Boolean     @default(false)
+  rolloutPercent          Int         @default(100)
+  isActive                Boolean     @default(true)
+  releaseNotes            String?
+  storeUrl                String?
+  apkKey                  String?
+  fileSize                Int?
+  checksum                String?
+  checksumMd5             String?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  events                  AppUpdateEvent[]
+
+  @@unique([platform, channel, versionCode])
+  @@index([platform, channel, versionCode])
+  @@index([platform, channel, minSupportedVersionCode])
+}
+
+model AppUpdateEvent {
+  id          Int               @id @default(autoincrement())
+  updateId    Int?
+  update      AppUpdate?        @relation(fields: [updateId], references: [id])
+  platform    AppPlatform
+  channel     String
+  versionCode Int
+  versionName String?
+  deviceId    String?
+  eventType   AppUpdateEventType
+  userId      Int?
+  user        User?             @relation(fields: [userId], references: [id])
+  createdAt   DateTime          @default(now())
+
+  @@index([platform, channel, versionCode])
+  @@index([deviceId])
+  @@index([updateId])
+}
+
 model ClientProfile {
   id        Int      @id @default(autoincrement())
   userId    Int      @unique
@@ -142,6 +198,7 @@ model User {
   appealStatusHistory AppealStatusHistory[]
   deviceTokens      DeviceToken[]
   appealMessageReads AppealMessageRead[]
+  updateEvents      AppUpdateEvent[]
 
   @@index([email])
 }

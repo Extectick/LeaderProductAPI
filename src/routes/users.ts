@@ -1070,6 +1070,117 @@ router.get(
 );
 
 /**
+ * @openapi
+ * /users/profile:
+ *   patch:
+ *     tags: [Users]
+ *     summary: Обновить профиль текущего пользователя
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName: { type: string, nullable: true }
+ *               lastName: { type: string, nullable: true }
+ *               middleName: { type: string, nullable: true }
+ *               email: { type: string }
+ *               phone: { type: string, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Профиль обновлён
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         profile:
+ *                           $ref: '#/components/schemas/UserProfile'
+ *       400: { description: Неверные данные }
+ *       401: { description: Не авторизован }
+ *       409: { description: Email уже используется }
+ */
+router.patch(
+  '/profile',
+  authenticateToken,
+  checkUserStatus,
+  auditLog('Пользователь обновил профиль'),
+  async (
+    req: AuthRequest<{}, UserProfileResponse, { firstName?: string | null; lastName?: string | null; middleName?: string | null; email?: string; phone?: string | null }>,
+    res: express.Response<UserProfileResponse>
+  ) => {
+    try {
+      const userId = req.user!.userId;
+      const data: Record<string, any> = {};
+      let employeePhone: string | null | undefined = undefined;
+      const normalize = (val: unknown) => (val === null ? null : String(val).trim());
+
+      if (req.body.firstName !== undefined) {
+        const value = normalize(req.body.firstName);
+        data.firstName = value || null;
+      }
+      if (req.body.lastName !== undefined) {
+        const value = normalize(req.body.lastName);
+        data.lastName = value || null;
+      }
+      if (req.body.middleName !== undefined) {
+        const value = normalize(req.body.middleName);
+        data.middleName = value || null;
+      }
+      if (req.body.email !== undefined) {
+        const value = normalize(req.body.email);
+        if (!value) {
+          return res.status(400).json(
+            errorResponse('Email обязателен', ErrorCodes.VALIDATION_ERROR)
+          );
+        }
+        data.email = value;
+      }
+      if (req.body.phone !== undefined) {
+        const value = normalize(req.body.phone);
+        data.phone = value || null;
+        employeePhone = value || null;
+      }
+
+      if (Object.keys(data).length) {
+        await prisma.user.update({ where: { id: Number(userId) }, data });
+      }
+
+      if (employeePhone !== undefined) {
+        await prisma.employeeProfile.updateMany({
+          where: { userId: Number(userId) },
+          data: { phone: employeePhone },
+        });
+      }
+
+      const profile = await getProfile(Number(userId));
+      return res.json(successResponse({ profile }, 'Профиль обновлён'));
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        return res.status(409).json(
+          errorResponse('Email уже используется', ErrorCodes.CONFLICT)
+        );
+      }
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления профиля',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
  * Админ: обновить данные пользователя (ФИО, email, phone, статус, department)
  */
 router.patch(

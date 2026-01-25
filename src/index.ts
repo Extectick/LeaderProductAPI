@@ -18,6 +18,7 @@ import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
 import trackingRouter from './routes/tracking';
+import updatesRouter from './routes/updates';
 import onecRouter from './modules/onec/onec.routes';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
@@ -106,6 +107,7 @@ app.use('/users', usersRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
 app.use('/tracking', trackingRouter);
+app.use('/updates', updatesRouter);
 app.use('/api/1c', onecRouter);
 
 app.use(

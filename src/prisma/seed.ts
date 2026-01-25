@@ -26,6 +26,7 @@ async function main() {
     'delete_appeal_message',
     'manage_appeal_watchers',
     'export_appeals',
+    'manage_updates',
   ];
 
   for (const name of permissionNames) {
