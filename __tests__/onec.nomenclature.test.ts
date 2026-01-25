@@ -21,6 +21,13 @@ const prismaMock = {
   $transaction: jest.fn(async (cb: any) => cb(tx)),
   $disconnect: jest.fn(),
   $connect: jest.fn(),
+  syncRun: {
+    create: jest.fn(),
+    update: jest.fn(),
+  },
+  syncRunItem: {
+    createMany: jest.fn(),
+  },
 };
 
 jest.mock('../src/prisma/client', () => ({
@@ -42,6 +49,9 @@ describe('POST /api/1c/nomenclature/batch', () => {
     tx.productPackage.upsert.mockResolvedValue({});
     tx.productPackage.create.mockResolvedValue({});
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx));
+    prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
+    prismaMock.syncRun.update.mockResolvedValue({});
+    prismaMock.syncRunItem.createMany.mockResolvedValue({ count: 0 });
   });
 
   it('returns 200 and upserts entities on success', async () => {

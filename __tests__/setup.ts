@@ -25,7 +25,7 @@ process.env.REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'test_ref
 
 // Синхронизируем схему с тестовой БД (без миграций, чтобы не требовать history)
 try {
-  execSync('npx prisma db push --schema prisma/schema.prisma --config prisma.config.js --accept-data-loss', {
+  execSync('npx prisma db push --schema prisma --config prisma.config.js --accept-data-loss', {
     stdio: 'inherit',
     env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL as string },
     cwd: process.cwd(),

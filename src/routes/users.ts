@@ -354,7 +354,17 @@ router.post(
   ) => {
     try {
       const userId = req.user!.userId;
-      const { user: userData, phone, address } = req.body;
+      const {
+        user: userData,
+        phone,
+        address,
+        counterpartyGuid,
+        activeAgreementGuid,
+        activeContractGuid,
+        activeWarehouseGuid,
+        activePriceTypeGuid,
+        activeDeliveryAddressGuid,
+      } = req.body;
 
       if (!userData?.firstName) {
         return res.status(400).json(
@@ -393,11 +403,183 @@ router.post(
         addressId = createdAddress.id;
       }
 
+      const ensureEntityActive = <T extends { isActive?: boolean | null }>(entity: T | null, label: string) => {
+        if (!entity) {
+          res.status(404).json(errorResponse(`${label} не найден`, ErrorCodes.NOT_FOUND));
+          return null;
+        }
+        if (entity.isActive === false) {
+          res.status(400).json(errorResponse(`${label} неактивен`, ErrorCodes.VALIDATION_ERROR));
+          return null;
+        }
+        return entity;
+      };
+
+      let counterpartyRecord = counterpartyGuid
+        ? ensureEntityActive(
+            await prisma.counterparty.findUnique({
+              where: { guid: counterpartyGuid },
+              select: { id: true, guid: true, name: true, isActive: true },
+            }),
+            'Контрагент'
+          )
+        : null;
+      if (counterpartyGuid && !counterpartyRecord) return;
+
+      const agreementRecord = activeAgreementGuid
+        ? ensureEntityActive(
+            await prisma.clientAgreement.findUnique({
+              where: { guid: activeAgreementGuid },
+              select: {
+                id: true,
+                guid: true,
+                name: true,
+                isActive: true,
+                counterpartyId: true,
+                contractId: true,
+                warehouseId: true,
+                priceTypeId: true,
+              },
+            }),
+            'Соглашение'
+          )
+        : null;
+      if (activeAgreementGuid && !agreementRecord) return;
+
+      const contractRecord = activeContractGuid
+        ? ensureEntityActive(
+            await prisma.clientContract.findUnique({
+              where: { guid: activeContractGuid },
+              select: { id: true, guid: true, number: true, isActive: true, counterpartyId: true },
+            }),
+            'Договор'
+          )
+        : null;
+      if (activeContractGuid && !contractRecord) return;
+
+      const warehouseRecord = activeWarehouseGuid
+        ? ensureEntityActive(
+            await prisma.warehouse.findUnique({
+              where: { guid: activeWarehouseGuid },
+              select: { id: true, guid: true, name: true, isActive: true },
+            }),
+            'Склад'
+          )
+        : null;
+      if (activeWarehouseGuid && !warehouseRecord) return;
+
+      const priceTypeRecord = activePriceTypeGuid
+        ? ensureEntityActive(
+            await prisma.priceType.findUnique({
+              where: { guid: activePriceTypeGuid },
+              select: { id: true, guid: true, name: true, isActive: true },
+            }),
+            'Тип цен'
+          )
+        : null;
+      if (activePriceTypeGuid && !priceTypeRecord) return;
+
+      const deliveryAddressRecord = activeDeliveryAddressGuid
+        ? ensureEntityActive(
+            await prisma.deliveryAddress.findUnique({
+              where: { guid: activeDeliveryAddressGuid },
+              select: { id: true, guid: true, fullAddress: true, isActive: true, counterpartyId: true },
+            }),
+            'Адрес доставки'
+          )
+        : null;
+      if (activeDeliveryAddressGuid && !deliveryAddressRecord) return;
+
+      let resolvedCounterpartyId = counterpartyRecord?.id ?? null;
+
+      if (agreementRecord?.counterpartyId) {
+        if (resolvedCounterpartyId && resolvedCounterpartyId !== agreementRecord.counterpartyId) {
+          return res
+            .status(400)
+            .json(errorResponse('Соглашение не принадлежит выбранному контрагенту', ErrorCodes.VALIDATION_ERROR));
+        }
+        resolvedCounterpartyId = agreementRecord.counterpartyId;
+      }
+
+      if (contractRecord) {
+        if (resolvedCounterpartyId && resolvedCounterpartyId !== contractRecord.counterpartyId) {
+          return res
+            .status(400)
+            .json(errorResponse('Договор не принадлежит выбранному контрагенту', ErrorCodes.VALIDATION_ERROR));
+        }
+        resolvedCounterpartyId = contractRecord.counterpartyId;
+      }
+
+      if (deliveryAddressRecord?.counterpartyId) {
+        if (resolvedCounterpartyId && resolvedCounterpartyId !== deliveryAddressRecord.counterpartyId) {
+          return res
+            .status(400)
+            .json(errorResponse('Адрес не принадлежит выбранному контрагенту', ErrorCodes.VALIDATION_ERROR));
+        }
+        resolvedCounterpartyId = deliveryAddressRecord.counterpartyId;
+      }
+
+      if (
+        agreementRecord &&
+        contractRecord &&
+        agreementRecord.contractId &&
+        agreementRecord.contractId !== contractRecord.id
+      ) {
+        return res
+          .status(400)
+          .json(errorResponse('Договор не соответствует соглашению', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (
+        agreementRecord &&
+        warehouseRecord &&
+        agreementRecord.warehouseId &&
+        agreementRecord.warehouseId !== warehouseRecord.id
+      ) {
+        return res
+          .status(400)
+          .json(errorResponse('Склад не соответствует соглашению', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (
+        agreementRecord &&
+        priceTypeRecord &&
+        agreementRecord.priceTypeId &&
+        agreementRecord.priceTypeId !== priceTypeRecord.id
+      ) {
+        return res
+          .status(400)
+          .json(errorResponse('Тип цен не соответствует соглашению', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (resolvedCounterpartyId && (!counterpartyRecord || counterpartyRecord.id !== resolvedCounterpartyId)) {
+        counterpartyRecord = ensureEntityActive(
+          await prisma.counterparty.findUnique({
+            where: { id: resolvedCounterpartyId },
+            select: { id: true, guid: true, name: true, isActive: true },
+          }),
+          'Контрагент'
+        );
+        if (!counterpartyRecord) return;
+      }
+
+      const resolvedAgreementId = agreementRecord?.id ?? null;
+      const resolvedContractId = contractRecord?.id ?? agreementRecord?.contractId ?? null;
+      const resolvedWarehouseId = warehouseRecord?.id ?? agreementRecord?.warehouseId ?? null;
+      const resolvedPriceTypeId = priceTypeRecord?.id ?? agreementRecord?.priceTypeId ?? null;
+      const resolvedDeliveryAddressId = deliveryAddressRecord?.id ?? null;
+
       await prisma.clientProfile.create({
         data: {
           userId,
           phone,
-          ...(addressId && { addressId })
+          ...(addressId && { addressId }),
+          counterpartyId: resolvedCounterpartyId ?? null,
+          activeAgreementId: resolvedAgreementId,
+          activeContractId: resolvedContractId,
+          activeWarehouseId: resolvedWarehouseId,
+          activePriceTypeId: resolvedPriceTypeId,
+          activeDeliveryAddressId: resolvedDeliveryAddressId,
         }
       });
 

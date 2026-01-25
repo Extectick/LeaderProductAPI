@@ -8,8 +8,22 @@ export const getProfile = async (userId: number): Promise<Profile> => {
     where: { id: userId },
     include: {
       role: true,
-      clientProfile: true,
-      supplierProfile: true,
+      clientProfile: {
+        include: {
+          address: true,
+          counterparty: { select: { guid: true, name: true, isActive: true } },
+          activeAgreement: { select: { guid: true, name: true, currency: true, isActive: true } },
+          activeContract: { select: { guid: true, number: true, isActive: true } },
+          activeWarehouse: { select: { guid: true, name: true, isActive: true, isDefault: true, isPickup: true } },
+          activePriceType: { select: { guid: true, name: true, isActive: true } },
+          activeDeliveryAddress: { select: { guid: true, fullAddress: true, isActive: true, isDefault: true } },
+        }
+      },
+      supplierProfile: {
+        include: {
+          address: true,
+        }
+      },
       employeeProfile: {
         include: {
           department: true,
@@ -36,17 +50,72 @@ export const getProfile = async (userId: number): Promise<Profile> => {
     role: dr.role
   }));
 
-  // Преобразуем профили клиента/поставщика
-  const transformProfile = (profile: any) => profile ? {
-    ...profile,
-    address: profile.addressId ? {
-      street: '',
-      city: '',
-      country: '',
-      state: null,
-      postalCode: null
-    } : null
-  } : null;
+  // Преобразуем профили клиента/поставщика в предсказуемую форму
+  const transformProfile = (profile: any) =>
+    profile
+      ? {
+          id: profile.id,
+          phone: profile.phone ?? null,
+          status: profile.status,
+          address: profile.address
+            ? {
+                street: profile.address.street,
+                city: profile.address.city,
+                state: profile.address.state,
+                postalCode: profile.address.postalCode,
+                country: profile.address.country,
+              }
+            : null,
+          counterparty: profile.counterparty
+            ? {
+                guid: profile.counterparty.guid,
+                name: profile.counterparty.name,
+                isActive: profile.counterparty.isActive,
+              }
+            : null,
+          activeAgreement: profile.activeAgreement
+            ? {
+                guid: profile.activeAgreement.guid,
+                name: profile.activeAgreement.name,
+                currency: profile.activeAgreement.currency ?? null,
+                isActive: profile.activeAgreement.isActive,
+              }
+            : null,
+          activeContract: profile.activeContract
+            ? {
+                guid: profile.activeContract.guid,
+                number: profile.activeContract.number,
+                isActive: profile.activeContract.isActive,
+              }
+            : null,
+          activeWarehouse: profile.activeWarehouse
+            ? {
+                guid: profile.activeWarehouse.guid,
+                name: profile.activeWarehouse.name,
+                isActive: profile.activeWarehouse.isActive,
+                isDefault: profile.activeWarehouse.isDefault,
+                isPickup: profile.activeWarehouse.isPickup,
+              }
+            : null,
+          activePriceType: profile.activePriceType
+            ? {
+                guid: profile.activePriceType.guid,
+                name: profile.activePriceType.name,
+                isActive: profile.activePriceType.isActive,
+              }
+            : null,
+          activeDeliveryAddress: profile.activeDeliveryAddress
+            ? {
+                guid: profile.activeDeliveryAddress.guid,
+                fullAddress: profile.activeDeliveryAddress.fullAddress,
+                isActive: profile.activeDeliveryAddress.isActive,
+                isDefault: profile.activeDeliveryAddress.isDefault,
+              }
+            : null,
+          createdAt: profile.createdAt,
+          updatedAt: profile.updatedAt,
+        }
+      : null;
 
   const profile: Profile = {
       id: user.id,

@@ -142,6 +142,12 @@ export type CreateClientProfileRequest = {
     postalCode?: string;
     country: string;
   };
+  counterpartyGuid?: string;
+  activeAgreementGuid?: string;
+  activeContractGuid?: string;
+  activeWarehouseGuid?: string;
+  activePriceTypeGuid?: string;
+  activeDeliveryAddressGuid?: string;
 };
 
 export type CreateSupplierProfileRequest = {

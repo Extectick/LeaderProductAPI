@@ -1,0 +1,72 @@
+// ==========================
+// 1C Sync journal and meta
+// ==========================
+
+enum SyncDirection {
+  IMPORT
+  EXPORT
+}
+
+enum SyncStatus {
+  STARTED
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum SyncItemStatus {
+  OK
+  ERROR
+  SKIPPED
+}
+
+enum SyncEntityType {
+  NOMENCLATURE
+  WAREHOUSES
+  COUNTERPARTIES
+  AGREEMENTS
+  PRODUCT_PRICES
+  SPECIAL_PRICES
+  STOCK
+  ORDERS_EXPORT
+  ORDERS_STATUS
+}
+
+model SyncRun {
+  id           String        @id @default(cuid())
+  requestId    String        @unique
+  entity       SyncEntityType
+  direction    SyncDirection
+  status       SyncStatus    @default(STARTED)
+
+  totalCount   Int           @default(0)
+  successCount Int           @default(0)
+  errorCount   Int           @default(0)
+
+  startedAt    DateTime      @default(now())
+  finishedAt   DateTime?
+  notes        String?
+  meta         Json?
+
+  items        SyncRunItem[]
+
+  @@index([entity, direction, startedAt])
+  @@index([status, startedAt])
+}
+
+model SyncRunItem {
+  id        String       @id @default(cuid())
+  runId     String
+  key       String
+  status    SyncItemStatus
+  error     String?
+  payload   Json?
+  createdAt DateTime     @default(now())
+
+  run       SyncRun      @relation(fields: [runId], references: [id])
+
+  @@index([runId])
+  @@index([key])
+  @@index([status])
+}
+

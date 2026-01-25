@@ -111,9 +111,33 @@ model ClientProfile {
   addressId Int?
   address   Address? @relation(fields: [addressId], references: [id])
   phone     String?
+  counterpartyId String?
+  counterparty   Counterparty? @relation("ClientProfileCounterparty", fields: [counterpartyId], references: [id])
+
+  activeAgreementId String?
+  activeAgreement   ClientAgreement? @relation("ClientProfileActiveAgreement", fields: [activeAgreementId], references: [id])
+
+  activeContractId String?
+  activeContract   ClientContract? @relation("ClientProfileActiveContract", fields: [activeContractId], references: [id])
+
+  activeWarehouseId String?
+  activeWarehouse   Warehouse? @relation("ClientProfileActiveWarehouse", fields: [activeWarehouseId], references: [id])
+
+  activePriceTypeId String?
+  activePriceType   PriceType? @relation("ClientProfileActivePriceType", fields: [activePriceTypeId], references: [id])
+
+  activeDeliveryAddressId String?
+  activeDeliveryAddress   DeliveryAddress? @relation("ClientProfileActiveDeliveryAddress", fields: [activeDeliveryAddressId], references: [id])
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([counterpartyId])
+  @@index([activeAgreementId])
+  @@index([activeContractId])
+  @@index([activeWarehouseId])
+  @@index([activePriceTypeId])
+  @@index([activeDeliveryAddressId])
 }
 
 model SupplierProfile {
@@ -504,328 +528,6 @@ model DeviceToken {
   createdAt DateTime @default(now())
 }
 
-// ==========================
-// 1C Integration models
-// ==========================
 
-enum OrderStatus {
-  DRAFT
-  QUEUED
-  SENT_TO_1C
-  CONFIRMED
-  PARTIAL
-  REJECTED
-  CANCELLED
-}
+// 1C integration models moved to prisma/schema.onec.prisma
 
-model Counterparty {
-  id          String   @id @default(cuid())
-  guid        String   @unique
-  name        String
-  fullName    String?
-  inn         String?
-  kpp         String?
-  phone       String?
-  email       String?
-  isActive    Boolean  @default(true)
-
-  contracts     ClientContract[]
-  agreements    ClientAgreement[]
-  addresses     DeliveryAddress[]
-  specialPrices SpecialPrice[]
-  orders        Order[]
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model DeliveryAddress {
-  id             String   @id @default(cuid())
-  guid           String?  @unique
-  counterpartyId String
-
-  name           String?
-  fullAddress    String
-  city           String?
-  street         String?
-  house          String?
-  building       String?
-  apartment      String?
-  postcode       String?
-
-  isDefault      Boolean  @default(false)
-  isActive       Boolean  @default(true)
-
-  counterparty   Counterparty @relation(fields: [counterpartyId], references: [id])
-  orders         Order[]
-
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-}
-
-model ProductGroup {
-  id        String   @id @default(cuid())
-  guid      String   @unique
-  name      String
-  code      String?
-  isActive  Boolean  @default(true)
-
-  parentId  String?
-  parent    ProductGroup? @relation("ProductGroupHierarchy", fields: [parentId], references: [id])
-  children  ProductGroup[] @relation("ProductGroupHierarchy")
-
-  products  Product[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model Unit {
-  id       String   @id @default(cuid())
-  guid     String?  @unique
-  name     String
-  code     String?
-  symbol   String?
-
-  products Product[]       @relation("Product_baseUnit")
-  packages ProductPackage[]
-  orderItems OrderItem[]   @relation("OrderItem_unit")
-}
-
-model Product {
-  id           String   @id @default(cuid())
-  guid         String   @unique
-  name         String
-  code         String?
-  article      String?
-  sku          String?
-  groupId      String?
-  isWeight     Boolean  @default(false)
-  isService    Boolean  @default(false)
-  isActive     Boolean  @default(true)
-
-  group        ProductGroup? @relation(fields: [groupId], references: [id])
-
-  baseUnitId   String?
-  baseUnit     Unit?    @relation("Product_baseUnit", fields: [baseUnitId], references: [id])
-
-  packages     ProductPackage[]
-  stocks       StockBalance[]
-  specialPrices SpecialPrice[]
-  orderItems   OrderItem[]
-
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@index([groupId])
-}
-
-model ProductPackage {
-  id         String   @id @default(cuid())
-  guid       String?  @unique
-  productId  String
-  unitId     String
-  name       String
-  multiplier Decimal   @db.Decimal(18, 4)
-  barcode    String?
-  isDefault  Boolean   @default(false)
-  sortOrder  Int       @default(0)
-
-  product    Product @relation(fields: [productId], references: [id])
-  unit       Unit    @relation(fields: [unitId], references: [id])
-
-  orderItems OrderItem[]
-
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
-  @@index([productId])
-}
-
-model Warehouse {
-  id        String   @id @default(cuid())
-  guid      String   @unique
-  name      String
-  code      String?
-  isActive  Boolean  @default(true)
-  isDefault Boolean  @default(false)
-  isPickup  Boolean  @default(false)
-  address   String?
-
-  stocks    StockBalance[]
-  agreements ClientAgreement[]
-  orders    Order[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model StockBalance {
-  id          String   @id @default(cuid())
-  productId   String
-  warehouseId String
-  quantity    Decimal  @db.Decimal(18, 3)
-  reserved    Decimal? @db.Decimal(18, 3)
-  updatedAt   DateTime
-
-  product     Product   @relation(fields: [productId], references: [id])
-  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
-
-  @@unique([productId, warehouseId])
-}
-
-model ClientContract {
-  id             String   @id @default(cuid())
-  guid           String   @unique
-  counterpartyId String
-  number         String
-  date           DateTime
-  validFrom      DateTime?
-  validTo        DateTime?
-  isActive       Boolean  @default(true)
-  comment        String?
-
-  counterparty   Counterparty   @relation(fields: [counterpartyId], references: [id])
-  agreements     ClientAgreement[]
-  orders         Order[]
-
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  @@index([counterpartyId])
-}
-
-model PriceType {
-  id           String   @id @default(cuid())
-  guid         String   @unique
-  name         String
-  code         String?
-  isActive     Boolean  @default(true)
-
-  agreements    ClientAgreement[]
-  specialPrices SpecialPrice[]
-
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-}
-
-model ClientAgreement {
-  id              String   @id @default(cuid())
-  guid            String   @unique
-  name            String
-  counterpartyId  String?
-  contractId      String?
-  priceTypeId     String?
-  warehouseId     String?
-  currency        String?
-
-  isActive        Boolean  @default(true)
-
-  counterparty    Counterparty?   @relation(fields: [counterpartyId], references: [id])
-  contract        ClientContract? @relation(fields: [contractId], references: [id])
-  warehouse       Warehouse?      @relation(fields: [warehouseId], references: [id])
-  priceType       PriceType?      @relation(fields: [priceTypeId], references: [id])
-
-  specialPrices   SpecialPrice[]
-  orders          Order[]
-
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@index([counterpartyId])
-  @@index([contractId])
-  @@index([warehouseId])
-  @@index([priceTypeId])
-}
-
-model SpecialPrice {
-  id              String   @id @default(cuid())
-  guid            String?  @unique
-
-  productId       String
-  counterpartyId  String?
-  agreementId     String?
-  priceTypeId     String?
-
-  price           Decimal  @db.Decimal(18, 4)
-  currency        String?
-  startDate       DateTime?
-  endDate         DateTime?
-  minQty          Decimal? @db.Decimal(18, 3)
-  isActive        Boolean  @default(true)
-
-  product         Product        @relation(fields: [productId], references: [id])
-  counterparty    Counterparty?  @relation(fields: [counterpartyId], references: [id])
-  agreement       ClientAgreement? @relation(fields: [agreementId], references: [id])
-  priceType       PriceType?     @relation(fields: [priceTypeId], references: [id])
-
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@index([productId])
-  @@index([productId, counterpartyId])
-  @@index([productId, agreementId])
-  @@index([productId, priceTypeId])
-  @@unique([productId, counterpartyId, agreementId, priceTypeId, startDate])
-}
-
-model Order {
-  id                String       @id @default(cuid())
-  guid              String?      @unique
-  number1c          String?
-  date1c            DateTime?
-
-  counterpartyId    String
-  agreementId       String?
-  contractId        String?
-  warehouseId       String?
-  deliveryAddressId String?
-
-  status            OrderStatus @default(DRAFT)
-  comment           String?
-  deliveryDate      DateTime?
-  totalAmount       Decimal?    @db.Decimal(18, 2)
-  currency          String?
-
-  counterparty      Counterparty    @relation(fields: [counterpartyId], references: [id])
-  agreement         ClientAgreement? @relation(fields: [agreementId], references: [id])
-  contract          ClientContract? @relation(fields: [contractId], references: [id])
-  warehouse         Warehouse?      @relation(fields: [warehouseId], references: [id])
-  deliveryAddress   DeliveryAddress? @relation(fields: [deliveryAddressId], references: [id])
-
-  items             OrderItem[]
-
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  @@index([counterpartyId])
-  @@index([agreementId])
-  @@index([contractId])
-  @@index([warehouseId])
-}
-
-model OrderItem {
-  id              String   @id @default(cuid())
-  orderId         String
-  productId       String
-  packageId       String?
-  unitId          String?
-
-  quantity        Decimal  @db.Decimal(18, 3)
-  quantityBase    Decimal? @db.Decimal(18, 3)
-  price           Decimal  @db.Decimal(18, 4)
-  discountPercent Decimal? @db.Decimal(5, 2)
-  lineAmount      Decimal? @db.Decimal(18, 2)
-  comment         String?
-
-  order           Order          @relation(fields: [orderId], references: [id])
-  product         Product        @relation(fields: [productId], references: [id])
-  package         ProductPackage? @relation(fields: [packageId], references: [id])
-  unit            Unit?          @relation("OrderItem_unit", fields: [unitId], references: [id])
-
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@index([orderId])
-  @@index([productId])
-}

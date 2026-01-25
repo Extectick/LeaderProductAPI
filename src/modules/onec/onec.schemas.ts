@@ -1,14 +1,21 @@
+import { OrderStatus } from '@prisma/client';
 import { z } from 'zod';
 
 const envelope = {
   secret: z.string().min(1, 'secret is required'),
 };
 
+const nullableDate = z.preprocess(
+  (value) => (value === null || value === undefined || value === '' ? undefined : value),
+  z.coerce.date().optional()
+);
+
 const unitSchema = z.object({
   guid: z.string().min(1),
   name: z.string().min(1),
   code: z.string().optional(),
   symbol: z.string().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const packageSchema = z.object({
@@ -19,6 +26,7 @@ const packageSchema = z.object({
   barcode: z.string().optional(),
   isDefault: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const nomenclatureItemSchema = z.object({
@@ -34,6 +42,7 @@ const nomenclatureItemSchema = z.object({
   isService: z.boolean().optional(),
   baseUnit: unitSchema.optional(),
   packages: z.array(packageSchema).optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 export const nomenclatureBatchSchema = z.object({
@@ -66,6 +75,7 @@ const addressSchema = z.object({
   postcode: z.string().nullable().optional(),
   isDefault: z.boolean().optional(),
   isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const counterpartySchema = z.object({
@@ -78,6 +88,7 @@ const counterpartySchema = z.object({
   email: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
   addresses: z.array(addressSchema).optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 export const counterpartiesBatchSchema = z.object({
@@ -93,6 +104,7 @@ const warehouseSchema = z.object({
   isDefault: z.boolean().optional(),
   isPickup: z.boolean().optional(),
   address: z.string().nullable().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 export const warehousesBatchSchema = z.object({
@@ -105,6 +117,7 @@ const priceTypeSchema = z.object({
   name: z.string().min(1),
   code: z.string().optional(),
   isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const contractSchema = z.object({
@@ -112,10 +125,11 @@ const contractSchema = z.object({
   counterpartyGuid: z.string().min(1),
   number: z.string().min(1),
   date: z.coerce.date(),
-  validFrom: z.preprocess((val) => (val === null ? undefined : val), z.coerce.date().optional()),
-  validTo: z.preprocess((val) => (val === null ? undefined : val), z.coerce.date().optional()),
+  validFrom: nullableDate,
+  validTo: nullableDate,
   isActive: z.boolean().optional(),
   comment: z.string().nullable().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const agreementSchema = z.object({
@@ -127,6 +141,7 @@ const agreementSchema = z.object({
   warehouseGuid: z.string().optional(),
   currency: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 const agreementItemSchema = z.object({
@@ -140,11 +155,6 @@ export const agreementsBatchSchema = z.object({
   items: z.array(agreementItemSchema).min(1),
 });
 
-const nullableDate = z.preprocess(
-  (value) => (value === null ? undefined : value),
-  z.coerce.date().optional()
-);
-
 const specialPriceItemSchema = z.object({
   guid: z.string().optional(),
   productGuid: z.string().min(1),
@@ -157,9 +167,57 @@ const specialPriceItemSchema = z.object({
   endDate: nullableDate,
   minQty: z.number().optional(),
   isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
 });
 
 export const specialPricesBatchSchema = z.object({
   ...envelope,
   items: z.array(specialPriceItemSchema).min(1),
 });
+
+const productPriceItemSchema = z.object({
+  guid: z.string().optional(),
+  productGuid: z.string().min(1),
+  priceTypeGuid: z.string().optional(),
+  price: z.number(),
+  currency: z.string().optional(),
+  startDate: nullableDate,
+  endDate: nullableDate,
+  minQty: z.number().optional(),
+  isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
+});
+
+export const productPricesBatchSchema = z.object({
+  ...envelope,
+  items: z.array(productPriceItemSchema).min(1),
+});
+
+const orderStatusItemSchema = z.object({
+  guid: z.string().min(1),
+  status: z.nativeEnum(OrderStatus),
+  number1c: z.string().optional(),
+  date1c: nullableDate,
+  comment: z.string().nullable().optional(),
+  totalAmount: z.number().optional(),
+  currency: z.string().optional(),
+  sourceUpdatedAt: nullableDate,
+});
+
+export const ordersStatusBatchSchema = z.object({
+  ...envelope,
+  items: z.array(orderStatusItemSchema).min(1),
+});
+
+export const orderAckSchema = z.object({
+  ...envelope,
+  status: z.nativeEnum(OrderStatus).optional(),
+  number1c: z.string().optional(),
+  date1c: nullableDate,
+  sentTo1cAt: nullableDate,
+  sourceUpdatedAt: nullableDate,
+  error: z.string().optional(),
+});
+
+export type OrdersStatusBatch = z.infer<typeof ordersStatusBatchSchema>;
+export type OrderAckBody = z.infer<typeof orderAckSchema>;
