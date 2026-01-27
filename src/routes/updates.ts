@@ -652,7 +652,9 @@ router.put(
         );
       }
 
-      if (!data.apkKey && !data.storeUrl && !current.apkKey && !current.storeUrl) {
+      const nextApkKey = data.apkKey !== undefined ? data.apkKey : current.apkKey;
+      const nextStoreUrl = data.storeUrl !== undefined ? data.storeUrl : current.storeUrl;
+      if (!nextApkKey && !nextStoreUrl) {
         return res
           .status(400)
           .json(errorResponse('Нужно указать apkKey или storeUrl', ErrorCodes.VALIDATION_ERROR));

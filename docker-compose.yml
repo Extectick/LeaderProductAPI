@@ -1,23 +1,169 @@
-version: "3.9"
-
 services:
   api:
     build: .
-    image: leader-api:latest        # ← ОБЯЗАТЕЛЬНО: так образ будет с локальным тегом
+    image: leader-api:latest
     container_name: leader_api
     restart: unless-stopped
     env_file:
       - .env.production
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
+      S3_ENDPOINT: http://minio:9000
+      REDIS_URL: redis://redis:6379
+      DEBUG_REQUESTS: "1"
     ports:
       - "3000:3000"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: leader_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: LeaderAPI
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Ovogup73_
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d LeaderAPI"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: leader_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: leader_minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio-minio-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: leader_minio_init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minio minio-minio-minio &&
+      mc mb -p local/leader-product-prod || true &&
+      mc mb -p local/leader-product-dev || true
+      "
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: leader_kafka
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/tmp/kafka-logs
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: leader_kafka_ui
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_METRICS_PORT: 9999
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+
+  db-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    container_name: leader_postgres_backup
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: LeaderAPI
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Ovogup73_
+      POSTGRES_PORT: 5432
+      SCHEDULE: "0 */6 * * *"
+      BACKUP_KEEP_DAYS: 7
+      BACKUP_KEEP_WEEKS: 4
+      BACKUP_KEEP_MONTHS: 6
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      - postgres
 
   studio:
-    image: leader-api:latest        # ← тот же локальный тег, без build
+    image: leader-api:latest
     container_name: leader_prisma_studio
     depends_on:
-      - api                         # сначала построится/запустится api → образ уже будет
+      - api
+      - postgres
     env_file:
       - .env.production
-    command: sh -c "npx prisma studio --port 5555 --hostname 0.0.0.0"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
+    command: sh -c "npx prisma studio --port 5555 --browser none"
     ports:
       - "5555:5555"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  kafka_data:

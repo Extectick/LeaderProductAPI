@@ -4,6 +4,7 @@
   
   # схема нужна ДО npm ci (postinstall: prisma generate)
   COPY package*.json ./
+  COPY prisma.config.js ./
   COPY prisma ./prisma
   RUN npm ci
   
@@ -13,6 +14,8 @@
   # генерируем клиент и строим
   RUN npx prisma generate
   RUN npm run build
+  # статические файлы debug-ui не попадают в dist при tsc
+  RUN mkdir -p dist/middleware && cp -r src/middleware/debug-ui dist/middleware/
   
   # ---- runtime stage ----
   FROM node:20-alpine AS runner
@@ -26,6 +29,7 @@
   COPY --from=builder /app/prisma ./prisma
   COPY --from=builder /app/dist ./dist
   COPY package*.json ./
+  COPY prisma.config.js ./
   
   # оставляем только прод-зависимости (prisma у тебя в "dependencies", значит не удалится)
   RUN npm prune --production

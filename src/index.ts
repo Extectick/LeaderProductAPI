@@ -41,6 +41,8 @@ import { errorHandler } from './middleware/errorHandler';
 import { s3 } from './storage/minio';
 import { HeadBucketCommand, ListBucketsCommand } from '@aws-sdk/client-s3';
 import { requestDebugMiddleware, requestDebugRoutes } from './middleware/requestDebug';
+import { kafkaRequestLogger } from './middleware/kafkaRequestLogger';
+import { disconnectKafka } from './lib/kafka';
 
 // dotenv.config({ path: path.resolve(process.cwd(), envFile) });
 
@@ -91,6 +93,7 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+app.use(kafkaRequestLogger);
 
 if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_REQUESTS === '1') {
   app.use(requestDebugMiddleware);
@@ -268,12 +271,14 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
+  await disconnectKafka().catch(() => {});
   server.close(() => process.exit(0));
 });
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
+  await disconnectKafka().catch(() => {});
   server.close(() => process.exit(0));
 });
 process.on('unhandledRejection', (reason) => {

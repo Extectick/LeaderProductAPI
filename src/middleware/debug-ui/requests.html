@@ -15,6 +15,17 @@
     </div>
     <div class="controls">
       <input id="q" placeholder="filter: url / method / status" />
+      <select id="method">
+        <option value="">method: any</option>
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+        <option value="PUT">PUT</option>
+        <option value="PATCH">PATCH</option>
+        <option value="DELETE">DELETE</option>
+        <option value="OPTIONS">OPTIONS</option>
+        <option value="HEAD">HEAD</option>
+      </select>
+      <input id="route" placeholder="route contains" />
       <select id="status">
         <option value="">status: any</option>
         <option value="2">2xx</option>
@@ -26,6 +37,11 @@
       <button id="toggleAuto">auto refresh: off</button>
       <button id="refresh">refresh</button>
       <button id="captureBtn" title="Pause/resume capture">capture: …</button>
+      <button id="clearFilters" title="Clear filters">clear filters</button>
+      <button id="copyLatestAi" title="Copy latest visible request for AI">copy latest for AI</button>
+      <span id="lastUpdate" class="stat">last update: —</span>
+      <span id="newCount" class="stat">new: 0</span>
+      <span id="errCount" class="stat">errors: 0</span>
     </div>
   </header>
 
@@ -59,6 +75,12 @@ const tbody = document.getElementById('tbody');
 const storedCount = document.getElementById('stored-count');
 const toastEl = document.getElementById('toast');
 const captureBtn = document.getElementById('captureBtn');
+const toggleAutoBtn = document.getElementById('toggleAuto');
+const lastUpdateEl = document.getElementById('lastUpdate');
+const newCountEl = document.getElementById('newCount');
+const errCountEl = document.getElementById('errCount');
+const copyLatestAiBtn = document.getElementById('copyLatestAi');
+const clearFiltersBtn = document.getElementById('clearFilters');
 let auto = false, timer = null;
 
 // хранение «сырых» записей по id для кнопок копирования/экспорта
@@ -67,6 +89,8 @@ const entriesById = new Map();
 // ---------- settings persistence ----------
 const LS = {
   q: 'rd.q',
+  method: 'rd.method',
+  route: 'rd.route',
   status: 'rd.status',
   auto: 'rd.auto',
   onlyErr: 'rd.onlyErr',
@@ -75,13 +99,18 @@ const LS = {
 function applySavedSettings() {
   try {
     const q = localStorage.getItem(LS.q) || '';
+    const method = localStorage.getItem(LS.method) || '';
+    const route = localStorage.getItem(LS.route) || '';
     const st = localStorage.getItem(LS.status) || '';
-    const aut = localStorage.getItem(LS.auto) === '1';
+    const savedAuto = localStorage.getItem(LS.auto);
+    const aut = savedAuto == null ? true : savedAuto === '1';
     const onlyErr = localStorage.getItem(LS.onlyErr) === '1';
     document.getElementById('q').value = q;
+    document.getElementById('method').value = method;
+    document.getElementById('route').value = route;
     document.getElementById('status').value = st;
     document.getElementById('onlyErr').checked = onlyErr;
-    if (aut) document.getElementById('toggleAuto').click(); // toggles + sets timer
+    setAuto(aut, { silent: true, immediate: false });
   } catch {}
 }
 applySavedSettings();
@@ -160,33 +189,87 @@ async function initCaptureStatus() {
   } catch { captureBtn.textContent = 'capture: ?'; }
 }
 
-document.getElementById('refresh').onclick = reload;
-document.getElementById('toggleAuto').onclick = () => {
-  auto = !auto;
-  document.getElementById('toggleAuto').textContent = 'auto refresh: ' + (auto ? 'on' : 'off');
-  try { localStorage.setItem(LS.auto, auto ? '1' : '0'); } catch {}
-  if (auto) { reload(); timer = setInterval(reload, 2000); } else { clearInterval(timer); }
-};
+document.getElementById('refresh').onclick = () => reload({ full: true });
+toggleAutoBtn.onclick = () => setAuto(!auto);
 document.getElementById('q').oninput = (e) => { try { localStorage.setItem(LS.q, e.target.value); } catch {} ; filterRows(); };
+document.getElementById('method').onchange = (e) => { try { localStorage.setItem(LS.method, e.target.value); } catch {} ; filterRows(); };
+document.getElementById('route').oninput = (e) => { try { localStorage.setItem(LS.route, e.target.value); } catch {} ; filterRows(); };
 document.getElementById('status').onchange = (e) => { try { localStorage.setItem(LS.status, e.target.value); } catch {} ; filterRows(); };
 document.getElementById('onlyErr').onchange = (e) => { try { localStorage.setItem(LS.onlyErr, e.target.checked ? '1' : '0'); } catch {} ; filterRows(); };
+clearFiltersBtn.onclick = () => {
+  document.getElementById('q').value = '';
+  document.getElementById('method').value = '';
+  document.getElementById('route').value = '';
+  document.getElementById('status').value = '';
+  document.getElementById('onlyErr').checked = false;
+  try {
+    localStorage.setItem(LS.q, '');
+    localStorage.setItem(LS.method, '');
+    localStorage.setItem(LS.route, '');
+    localStorage.setItem(LS.status, '');
+    localStorage.setItem(LS.onlyErr, '0');
+  } catch {}
+  filterRows();
+};
+copyLatestAiBtn.onclick = async () => {
+  const entry = getFirstVisibleEntry();
+  if (!entry) { showToast('No visible requests'); return; }
+  await copyToClipboard(buildAIText(entry));
+  showToast('Latest copied for AI ✓');
+};
+
+document.addEventListener('visibilitychange', () => {
+  if (!auto) return;
+  if (document.hidden) {
+    clearInterval(timer);
+    timer = null;
+  } else if (!timer) {
+    reload();
+    timer = setInterval(reload, 2000);
+  }
+});
+
+function setAuto(next, { silent = false, immediate = true } = {}) {
+  auto = next;
+  toggleAutoBtn.textContent = 'auto refresh: ' + (auto ? 'on' : 'off');
+  try { localStorage.setItem(LS.auto, auto ? '1' : '0'); } catch {}
+  if (auto) {
+    if (immediate) reload();
+    if (!timer) timer = setInterval(reload, 2000);
+  } else {
+    clearInterval(timer);
+    timer = null;
+  }
+  if (!silent) showToast('Auto refresh ' + (auto ? 'on' : 'off'));
+}
 
 function filterRows(){
   const q = (document.getElementById('q').value || '').toLowerCase();
+  const m = (document.getElementById('method').value || '').toUpperCase();
+  const r = (document.getElementById('route').value || '').toLowerCase();
   const s = document.getElementById('status').value;
   const onlyErr = document.getElementById('onlyErr').checked;
   for (const tr of tbody.querySelectorAll('tr.data')) {
     const url = tr.getAttribute('data-url') || '';
     const method = tr.getAttribute('data-method') || '';
+    const route = tr.getAttribute('data-route') || '';
     const status = tr.getAttribute('data-status') || '';
     const matchesText = !q || url.toLowerCase().includes(q) || method.toLowerCase().includes(q) || status.includes(q);
+    const matchesMethod = !m || method.toUpperCase() === m;
+    const matchesRoute = !r || route.toLowerCase().includes(r);
     const matchesStatus = !s || status.startsWith(s);
     const matchesOnlyErr = !onlyErr || (Number(status) >= 400);
-    tr.style.display = (matchesText && matchesStatus && matchesOnlyErr) ? '' : 'none';
+    const visible = matchesText && matchesMethod && matchesRoute && matchesStatus && matchesOnlyErr;
+    tr.style.display = visible ? '' : 'none';
+    const details = tr.nextElementSibling;
+    if (!visible && details && details.classList.contains('details')) {
+      details.style.display = 'none';
+    }
   }
 }
 
-function reload(){
+function reload(opts = {}){
+  const forceFull = opts.full === true;
   fetch('/_debug/requests.json', {
     headers: DEBUG_TOKEN ? {'x-debug-token': DEBUG_TOKEN} : {}
   })
@@ -195,16 +278,27 @@ function reload(){
       if (!j.ok) { alert('Error: '+(j.error||'unknown')); return; }
       storedCount.textContent = j.total;
 
+      if (forceFull) {
+        renderAll(j);
+        updateStats(j, 0);
+        filterRows();
+        return;
+      }
+
       const existingIds = new Set(Array.from(tbody.querySelectorAll('tr.data'))
         .map(tr => Number(tr.getAttribute('data-id'))));
 
       const frag = document.createDocumentFragment();
       let added = 0;
-
-      for (const e of j.entries) {
+      const newEntries = [];
+      for (const e of (j.entries || [])) {
         if (existingIds.has(e.id)) continue;
-        entriesById.set(e.id, e); // сохраняем
-        frag.prepend(rowNode(e, true));
+        newEntries.push(e);
+      }
+      newEntries.sort((a,b) => (b.id || 0) - (a.id || 0));
+      for (const e of newEntries) {
+        entriesById.set(e.id, e);
+        frag.appendChild(rowNode(e, true));
         added++;
       }
 
@@ -225,6 +319,7 @@ function reload(){
       }
 
       filterRows();
+      updateStats(j, added);
     })
     .catch(console.error);
 }
@@ -235,6 +330,7 @@ function rowNode(e, highlight){
   tr.setAttribute('data-id', String(e.id));
   tr.setAttribute('data-url', e.url);
   tr.setAttribute('data-method', e.method);
+  tr.setAttribute('data-route', e.route || '');
   tr.setAttribute('data-status', String(e.status));
   tr.setAttribute('data-ms', String(e.durationMs));
 
@@ -333,6 +429,58 @@ function pretty(v){
   } catch {
     return String(v);
   }
+}
+
+function fmtClock(d){
+  const HH = String(d.getHours()).padStart(2,'0');
+  const MM = String(d.getMinutes()).padStart(2,'0');
+  const SS = String(d.getSeconds()).padStart(2,'0');
+  return `${HH}:${MM}:${SS}`;
+}
+
+function updateStats(j, added){
+  const now = new Date();
+  if (lastUpdateEl) lastUpdateEl.textContent = 'last update: ' + fmtClock(now);
+  if (newCountEl) newCountEl.textContent = 'new: ' + String(added || 0);
+  const errCount = Array.isArray(j.entries) ? j.entries.filter(e => Number(e.status) >= 400).length : 0;
+  if (errCountEl) errCountEl.textContent = 'errors: ' + String(errCount);
+  try {
+    document.title = `Request Debug (${j.total}${errCount ? ' / ' + errCount + ' err' : ''})`;
+  } catch {}
+}
+
+function renderAll(j){
+  entriesById.clear();
+  tbody.innerHTML = '';
+  const entries = Array.isArray(j.entries) ? j.entries.slice() : [];
+  entries.sort((a,b) => (b.id || 0) - (a.id || 0));
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td class="small" colspan="7">no data</td></tr>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const e of entries) {
+    entriesById.set(e.id, e);
+    frag.appendChild(rowNode(e, false));
+  }
+  tbody.appendChild(frag);
+  for (const tr of tbody.querySelectorAll('tr.data')) {
+    const bar = tr.querySelector('.bar > i');
+    const ms = Number(tr.getAttribute('data-ms') || '0');
+    if (bar) requestAnimationFrame(() => {
+      bar.style.width = Math.min(100, (ms / 1000) * 100) + '%';
+    });
+  }
+}
+function getFirstVisibleEntry(){
+  const rows = tbody.querySelectorAll('tr.data');
+  for (const tr of rows) {
+    if (tr.style.display === 'none') continue;
+    const id = Number(tr.getAttribute('data-id'));
+    const entry = entriesById.get(id);
+    if (entry) return entry;
+  }
+  return null;
 }
 
 async function copyToClipboard(text){
@@ -506,7 +654,7 @@ function buildHAR(e){
 }
 
 // первичная загрузка
-reload();
+reload({ full: true });
 </script>
 </body>
 </html>

@@ -20,6 +20,7 @@ input,select,button,.btn{
 button,.btn{cursor:pointer;transition:transform .08s ease, background .2s ease}
 button:hover,.btn:hover{background:#132154}
 button:active,.btn:active{transform:translateY(1px)}
+.stat{display:inline-flex;align-items:center;gap:6px;background:#0f1b3d;border:1px solid #223056;color:var(--muted);padding:6px 10px;border-radius:999px;font-size:12px;white-space:nowrap}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:600;font-size:12px}
 .method{background:#1f2a48;border:1px solid #2c3f76}
 .status{background:#1f2a48;border:1px solid #2c3f76}
