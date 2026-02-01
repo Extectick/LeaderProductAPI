@@ -78,8 +78,8 @@ services:
     depends_on:
       - minio
     ports:
-      - "80:80"
-      - "443:443"
+      - "9012:80"
+      - "9013:443"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
