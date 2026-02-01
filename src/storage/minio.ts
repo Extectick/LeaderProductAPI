@@ -29,6 +29,7 @@ const {
   S3_SECRET_KEY,
   S3_BUCKET,
   S3_PUBLIC_BASE,
+  S3_PRESIGN_ENDPOINT,
   PRESIGN_PUT_TTL = "600",
   PRESIGN_GET_TTL = "600",
   S3_KEY_PREFIX = "uploads",
@@ -52,6 +53,16 @@ export const s3 = new S3Client({
   },
 });
 
+const presignClient = new S3Client({
+  endpoint: S3_PRESIGN_ENDPOINT || S3_ENDPOINT,
+  region: S3_REGION,
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: S3_ACCESS_KEY || "",
+    secretAccessKey: S3_SECRET_KEY || "",
+  },
+});
+
 export function attachmentTypeByMime(mime?: string): AttachmentType {
   if (mime?.startsWith("image/")) return "IMAGE";
   if (mime?.startsWith("audio/")) return "AUDIO";
@@ -61,6 +72,14 @@ export function attachmentTypeByMime(mime?: string): AttachmentType {
 function safeFilename(original?: string) {
   const base = (original || "file").replace(/[^\w.\- ]+/g, "_");
   return base.length > 150 ? base.slice(0, 150) : base;
+}
+
+export function buildObjectKey(originalName?: string, keyPrefix = S3_KEY_PREFIX) {
+  const ext = path.extname(originalName || "");
+  const name = safeFilename(originalName);
+  const hash = crypto.randomBytes(4).toString("hex");
+  const key = `${keyPrefix}/${Date.now()}_${hash}${ext || ""}`;
+  return { key, fileName: name, ext };
 }
 
 function publicUrlOrNull(key: string): string | null {
@@ -80,7 +99,7 @@ export async function presignPut(
     Key: key,
     ContentType: contentType,
   });
-  const url = await getSignedUrl(s3, cmd, { expiresIn: ttlSec });
+  const url = await getSignedUrl(presignClient, cmd, { expiresIn: ttlSec });
   return { bucket: S3_BUCKET!, key, url, expiresIn: ttlSec };
 }
 
@@ -93,7 +112,7 @@ export async function presignGet(
     Bucket: S3_BUCKET!,
     Key: key,
   });
-  const url = await getSignedUrl(s3, cmd, { expiresIn: ttlSec });
+  const url = await getSignedUrl(presignClient, cmd, { expiresIn: ttlSec });
   return { bucket: S3_BUCKET!, key, url, expiresIn: ttlSec };
 }
 

@@ -71,6 +71,20 @@ services:
       timeout: 5s
       retries: 5
 
+  minio-https:
+    image: caddy:2-alpine
+    container_name: leader_minio_https
+    restart: unless-stopped
+    depends_on:
+      - minio
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
   minio-init:
     image: minio/mc:latest
     container_name: leader_minio_init
@@ -80,7 +94,23 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 minio minio-minio-minio &&
       mc mb -p local/leader-product-prod || true &&
-      mc mb -p local/leader-product-dev || true
+      mc mb -p local/leader-product-dev || true &&
+      cat >/tmp/cors.json <<'EOF'
+      {
+        \"CORSRules\": [
+          {
+            \"AllowedOrigins\": [\"*\"],
+            \"AllowedMethods\": [\"GET\",\"PUT\",\"POST\",\"DELETE\",\"HEAD\"],
+            \"AllowedHeaders\": [\"*\"],
+            \"ExposeHeaders\": [\"ETag\",\"x-amz-request-id\",\"x-amz-id-2\",\"x-amz-version-id\"],
+            \"MaxAgeSeconds\": 3600
+          }
+        ]
+      }
+      EOF
+      &&
+      mc cors set local/leader-product-prod /tmp/cors.json &&
+      mc cors set local/leader-product-dev /tmp/cors.json
       "
 
   kafka:
@@ -109,7 +139,7 @@ services:
     volumes:
       - kafka_data:/tmp/kafka-logs
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -162,8 +192,25 @@ services:
     ports:
       - "5555:5555"
 
+  seed:
+    image: leader-api:latest
+    container_name: leader_prisma_seed
+    profiles: ["seed"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
+    command: sh -c "node dist/prisma/seed.js"
+
 volumes:
   postgres_data:
   redis_data:
   minio_data:
   kafka_data:
+  caddy_data:
+  caddy_config:

@@ -29,8 +29,23 @@ async function main() {
     'manage_updates',
   ];
 
+  const departmentNames = [
+    'IT Отдел',
+    'Бухгалтерия',
+    'Маркетинг',
+    'Менеджеры',
+  ];
+
   for (const name of permissionNames) {
     await prisma.permission.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+    });
+  }
+
+  for (const name of departmentNames) {
+    await prisma.department.upsert({
       where: { name },
       update: {},
       create: { name },

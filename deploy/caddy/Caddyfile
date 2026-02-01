@@ -1,0 +1,16 @@
+minio.extectick.keenetic.pro {
+  @preflight method OPTIONS
+  header {
+    Access-Control-Allow-Origin "*"
+    Access-Control-Allow-Methods "GET,PUT,POST,DELETE,HEAD,OPTIONS"
+    Access-Control-Allow-Headers "*"
+    Access-Control-Allow-Credentials "true"
+    Access-Control-Expose-Headers "ETag,x-amz-request-id,x-amz-id-2,x-amz-version-id"
+  }
+  handle @preflight {
+    respond "" 204
+  }
+  reverse_proxy minio:9000 {
+    header_up Host {http.request.host}
+  }
+}

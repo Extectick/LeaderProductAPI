@@ -15,7 +15,7 @@ import {
   ErrorCodes,
   successResponse,
 } from '../utils/apiResponse';
-import { deleteObject, presignGet, uploadMulterFile } from '../storage/minio';
+import { buildObjectKey, deleteObject, presignGet, presignPut, uploadMulterFile } from '../storage/minio';
 import {
   CreateUpdateRequest,
   CreateUpdateResponse,
@@ -30,11 +30,14 @@ const router = express.Router();
 const DEFAULT_CHANNEL = 'prod';
 const MAX_ROLLOUT = 100;
 const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
+const UPDATE_PRESIGN_TTL = Number(process.env.UPDATE_PRESIGN_PUT_TTL || process.env.PRESIGN_PUT_TTL || 600);
+const UPDATE_MAX_FILESIZE = 300 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = Number(process.env.UPDATE_UPLOAD_TIMEOUT_MS || 20 * 60 * 1000);
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 300 * 1024 * 1024,
+    fileSize: UPDATE_MAX_FILESIZE,
     files: 1,
   },
 });
@@ -816,10 +819,61 @@ router.post(
  *     security: [ { bearerAuth: [] } ]
  */
 router.post(
+  '/upload-url',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_updates']),
+  async (
+    req: AuthRequest<{}, any, { fileName?: string; contentType?: string; fileSize?: number }>,
+    res: express.Response
+  ) => {
+    try {
+      const fileNameRaw = req.body?.fileName ? String(req.body.fileName) : 'app.apk';
+      const contentType = req.body?.contentType
+        ? String(req.body.contentType)
+        : 'application/vnd.android.package-archive';
+      const fileSize = req.body?.fileSize ? Number(req.body.fileSize) : undefined;
+      if (fileSize && Number.isFinite(fileSize) && fileSize > UPDATE_MAX_FILESIZE) {
+        return res
+          .status(413)
+          .json(errorResponse('Файл слишком большой', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const { key, fileName } = buildObjectKey(fileNameRaw, 'updates');
+      const presigned = await presignPut(key, contentType, UPDATE_PRESIGN_TTL);
+
+      return res.json(
+        successResponse(
+          {
+            key,
+            url: presigned.url,
+            bucket: presigned.bucket,
+            expiresIn: presigned.expiresIn,
+            fileName,
+            contentType,
+          },
+          'Upload URL создан'
+        )
+      );
+    } catch (err) {
+      console.error('Update upload-url error:', err);
+      return res.status(500).json(
+        errorResponse('Ошибка получения ссылки для загрузки', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+router.post(
   '/upload',
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['manage_updates']),
+  (req, res, next) => {
+    req.setTimeout(UPLOAD_TIMEOUT_MS);
+    res.setTimeout(UPLOAD_TIMEOUT_MS);
+    next();
+  },
   upload.single('apk'),
   async (
     req: AuthRequest<{}, CreateUpdateResponse, CreateUpdateRequest>,
