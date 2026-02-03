@@ -1,5 +1,5 @@
 import express from 'express';
-import { ProfileStatus } from '@prisma/client';
+import { ProfileStatus, ProfileType } from '@prisma/client';
 import prisma from '../prisma/client';
 import {
   authenticateToken,
@@ -24,6 +24,7 @@ import { checkUserStatus } from '../middleware/checkUserStatus';
 import { auditLog } from '../middleware/audit';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import { getProfile } from '../services/userService';
+import { notifyProfileActivated } from '../services/pushService';
 
 const router = express.Router();
 const USER_LIST_SELECT = {
@@ -1252,6 +1253,162 @@ router.get(
 );
 
 /**
+ * Зарегистрировать push-токен устройства
+ */
+router.post(
+  '/device-tokens',
+  authenticateToken,
+  async (req: AuthRequest<{}, {}, { token?: string; platform?: string }>, res: express.Response) => {
+    try {
+      const userId = req.user!.userId;
+      const token = (req.body?.token || '').trim();
+      const platform = (req.body?.platform || '').trim();
+      if (!token) {
+        return res.status(400).json(errorResponse('Требуется токен устройства', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const existing = await prisma.deviceToken.findUnique({ where: { token } });
+      if (existing) {
+        await prisma.deviceToken.update({
+          where: { token },
+          data: { userId, platform: platform || existing.platform || null },
+        });
+      } else {
+        await prisma.deviceToken.create({
+          data: { userId, token, platform: platform || null },
+        });
+      }
+
+      return res.json(successResponse({ message: 'Токен устройства сохранён' }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка сохранения токена устройства',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Удалить push-токен устройства
+ */
+router.delete(
+  '/device-tokens',
+  authenticateToken,
+  async (req: AuthRequest<{}, {}, { token?: string }>, res: express.Response) => {
+    try {
+      const userId = req.user!.userId;
+      const token = (req.body?.token || '').trim();
+      if (!token) {
+        return res.status(400).json(errorResponse('Требуется токен устройства', ErrorCodes.VALIDATION_ERROR));
+      }
+      await prisma.deviceToken.deleteMany({ where: { token, userId } });
+      return res.json(successResponse({ message: 'Токен устройства удалён' }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка удаления токена устройства',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * @openapi
+ * /users/me/current-profile:
+ *   patch:
+ *     tags: [Users]
+ *     summary: Выбрать активный профиль текущего пользователя
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [CLIENT, SUPPLIER, EMPLOYEE, null]
+ *     responses:
+ *       200:
+ *         description: Активный профиль обновлён
+ *       400: { description: Неверные параметры }
+ *       404: { description: Профиль не найден }
+ */
+router.patch(
+  '/me/current-profile',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{}, UserProfileResponse, { type?: ProfileType | null }>, res: express.Response<UserProfileResponse>) => {
+    try {
+      const userId = req.user!.userId;
+      const type = req.body?.type;
+
+      if (type === undefined) {
+        return res.status(400).json(
+          errorResponse('Требуется тип профиля', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const allowedTypes: Array<ProfileType> = ['CLIENT', 'SUPPLIER', 'EMPLOYEE'];
+      if (type !== null && !allowedTypes.includes(type)) {
+        return res.status(400).json(
+          errorResponse('Некорректный тип профиля', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: Number(userId) },
+        include: {
+          clientProfile: { select: { id: true } },
+          supplierProfile: { select: { id: true } },
+          employeeProfile: { select: { id: true } },
+        },
+      });
+      if (!user) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      if (type !== null) {
+        const hasProfile =
+          (type === 'CLIENT' && !!user.clientProfile) ||
+          (type === 'SUPPLIER' && !!user.supplierProfile) ||
+          (type === 'EMPLOYEE' && !!user.employeeProfile);
+        if (!hasProfile) {
+          return res.status(404).json(
+            errorResponse('Профиль выбранного типа не найден', ErrorCodes.NOT_FOUND)
+          );
+        }
+      }
+
+      await prisma.user.update({
+        where: { id: Number(userId) },
+        data: { currentProfileType: type ?? null },
+      });
+
+      const profile = await getProfile(Number(userId));
+      return res.json(successResponse({ profile }, 'Активный профиль обновлён'));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления активного профиля',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
  * @openapi
  * /users/profile:
  *   patch:
@@ -1793,6 +1950,169 @@ router.get(
       return res.status(500).json(
         errorResponse(
           'Ошибка получения пользователей отдела',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Админ: обновить профиль пользователя (статус/телефон/адрес/отдел)
+ */
+router.patch(
+  '/:userId/profiles/:type',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_users'], { mode: 'any' }),
+  async (
+    req: AuthRequest<
+      { userId: string; type: string },
+      {},
+      {
+        status?: ProfileStatus;
+        phone?: string | null;
+        departmentId?: number | null;
+        address?: { street: string; city: string; state?: string | null; postalCode?: string | null; country: string } | null;
+      }
+    >,
+    res: express.Response
+  ) => {
+    try {
+      const userId = Number(req.params.userId);
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const type = String(req.params.type || '').toUpperCase() as ProfileType;
+      const allowedTypes: Array<ProfileType> = ['CLIENT', 'SUPPLIER', 'EMPLOYEE'];
+      if (!allowedTypes.includes(type)) {
+        return res.status(400).json(errorResponse('Некорректный тип профиля', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const { status, phone, departmentId, address } = req.body || {};
+      if (status !== undefined && !Object.values(ProfileStatus).includes(status)) {
+        return res.status(400).json(errorResponse('Некорректный статус профиля', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const ensureAddressValid = (addr: NonNullable<typeof address>) => {
+        if (!addr.street || !addr.city || !addr.country) {
+          return errorResponse(
+            'Для адреса обязательны поля street, city, country',
+            ErrorCodes.VALIDATION_ERROR
+          );
+        }
+        return null;
+      };
+
+      let prevStatus: ProfileStatus | null = null;
+      let nextStatus: ProfileStatus | null = null;
+
+      if (type === 'EMPLOYEE') {
+        const profile = await prisma.employeeProfile.findUnique({ where: { userId } });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND));
+        }
+        prevStatus = profile.status;
+
+        const data: any = {};
+        if (status !== undefined) data.status = status;
+        if (phone !== undefined) data.phone = phone;
+        if (departmentId !== undefined) {
+          if (departmentId === null) {
+            data.departmentId = null;
+          } else {
+            const dep = await prisma.department.findUnique({ where: { id: Number(departmentId) } });
+            if (!dep) {
+              return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
+            }
+            data.departmentId = Number(departmentId);
+          }
+        }
+
+        if (!Object.keys(data).length) {
+          return res.status(400).json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
+        }
+
+        await prisma.employeeProfile.update({ where: { userId }, data });
+        nextStatus = status ?? profile.status;
+      } else if (type === 'CLIENT') {
+        const profile = await prisma.clientProfile.findUnique({
+          where: { userId },
+          include: { address: true },
+        });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Клиентский профиль не найден', ErrorCodes.NOT_FOUND));
+        }
+        prevStatus = profile.status;
+
+        const data: any = {};
+        if (status !== undefined) data.status = status;
+        if (phone !== undefined) data.phone = phone;
+        if (address !== undefined) {
+          if (address === null) {
+            data.address = { disconnect: true };
+          } else {
+            const addrErr = ensureAddressValid(address);
+            if (addrErr) return res.status(400).json(addrErr);
+            data.address = profile.addressId
+              ? { update: { ...address } }
+              : { create: { ...address } };
+          }
+        }
+
+        if (!Object.keys(data).length) {
+          return res.status(400).json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
+        }
+
+        await prisma.clientProfile.update({ where: { userId }, data });
+        nextStatus = status ?? profile.status;
+      } else if (type === 'SUPPLIER') {
+        const profile = await prisma.supplierProfile.findUnique({
+          where: { userId },
+          include: { address: true },
+        });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Профиль поставщика не найден', ErrorCodes.NOT_FOUND));
+        }
+        prevStatus = profile.status;
+
+        const data: any = {};
+        if (status !== undefined) data.status = status;
+        if (phone !== undefined) data.phone = phone;
+        if (address !== undefined) {
+          if (address === null) {
+            data.address = { disconnect: true };
+          } else {
+            const addrErr = ensureAddressValid(address);
+            if (addrErr) return res.status(400).json(addrErr);
+            data.address = profile.addressId
+              ? { update: { ...address } }
+              : { create: { ...address } };
+          }
+        }
+
+        if (!Object.keys(data).length) {
+          return res.status(400).json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
+        }
+
+        await prisma.supplierProfile.update({ where: { userId }, data });
+        nextStatus = status ?? profile.status;
+      }
+
+      if (prevStatus && nextStatus === 'ACTIVE' && prevStatus !== 'ACTIVE') {
+        notifyProfileActivated(userId, type).catch((e) =>
+          console.warn('[push] notifyProfileActivated failed:', e)
+        );
+      }
+
+      const profile = await getProfile(userId);
+      return res.json(successResponse({ profile }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления профиля пользователя',
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? error : undefined
         )

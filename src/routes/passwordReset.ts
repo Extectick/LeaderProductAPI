@@ -15,6 +15,16 @@ import {
 const router = Router();
 
 const PASSWORD_RESET_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
+const RESET_RESEND_INTERVAL_MS = 25 * 1000; // 25 секунд
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function isValidEmail(email: string) {
+  return EMAIL_REGEX.test(email);
+}
 
 /**
  * @openapi
@@ -58,17 +68,55 @@ function generateResetCode() {
  *       500:
  *         description: Внутренняя ошибка
  */
-router.post('/password-reset/request', async (req: Request<{}, {}, PasswordResetRequestRequest>, res: Response<PasswordResetRequestResponse>) => {
+router.post('/request', async (req: Request<{}, {}, PasswordResetRequestRequest>, res: Response<PasswordResetRequestResponse>) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json(
       errorResponse('Требуется email', ErrorCodes.VALIDATION_ERROR)
     );
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+    });
     if (!user) {
       // Чтобы не давать подсказки, возвращаем 200 всегда
       return res.json(successResponse(null));
+    }
+
+    const now = new Date();
+    const existingReset = await prisma.passwordReset.findFirst({
+      where: { userId: user.id, used: false },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingReset) {
+      if (existingReset.expiresAt <= now) {
+        await prisma.passwordReset.update({
+          where: { id: existingReset.id },
+          data: { used: true },
+        });
+      } else {
+        const sinceLast = now.getTime() - existingReset.createdAt.getTime();
+        if (sinceLast < RESET_RESEND_INTERVAL_MS) {
+          return res.status(429).json(
+            errorResponse(
+              'Код был отправлен недавно. Пожалуйста, подождите перед повторным запросом.',
+              ErrorCodes.TOO_MANY_REQUESTS
+            )
+          );
+        }
+        await prisma.passwordReset.update({
+          where: { id: existingReset.id },
+          data: { used: true },
+        });
+      }
     }
 
     // Генерируем код
@@ -85,7 +133,7 @@ router.post('/password-reset/request', async (req: Request<{}, {}, PasswordReset
     });
 
     // Отправляем email с кодом
-    await sendVerificationEmail(email, code);
+    await sendVerificationEmail(normalizedEmail, code, 'passwordReset');
 
     res.json(successResponse(null));
   } catch (error) {
@@ -127,31 +175,54 @@ router.post('/password-reset/request', async (req: Request<{}, {}, PasswordReset
  *       500:
  *         description: Внутренняя ошибка
  */
-router.post('/password-reset/verify', async (req: Request<{}, {}, { email: string; code: string }>, res: Response<PasswordResetVerifyResponse>) => {
+router.post('/verify', async (req: Request<{}, {}, { email: string; code: string }>, res: Response<PasswordResetVerifyResponse>) => {
   try {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json(
       errorResponse('Требуется email и код', ErrorCodes.VALIDATION_ERROR)
     );
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const trimmedCode = String(code).trim();
+    if (!trimmedCode) {
+      return res.status(400).json(
+        errorResponse('Требуется код', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+    });
     if (!user) return res.status(400).json(
       errorResponse('Неверные email или код', ErrorCodes.VALIDATION_ERROR)
     );
 
-    const resetRequest = await prisma.passwordReset.findFirst({
-      where: {
-        userId: user.id,
-        code,
-        used: false,
-        expiresAt: { gt: new Date() },
-      },
+    const latestReset = await prisma.passwordReset.findFirst({
+      where: { userId: user.id, used: false },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!resetRequest) {
+    if (!latestReset || latestReset.expiresAt <= new Date()) {
+      if (latestReset && latestReset.expiresAt <= new Date()) {
+        await prisma.passwordReset.update({
+          where: { id: latestReset.id },
+          data: { used: true },
+        });
+      }
       return res.status(400).json(
         errorResponse('Неверный или просроченный код', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    if (latestReset.code !== trimmedCode) {
+      return res.status(400).json(
+        errorResponse('Неверный код', ErrorCodes.VALIDATION_ERROR)
       );
     }
 
@@ -206,12 +277,26 @@ router.post('/password-reset/verify', async (req: Request<{}, {}, { email: strin
  *       500:
  *         description: Внутренняя ошибка
  */
-router.post('/password-reset/change', async (req: Request<{}, {}, PasswordResetSubmitRequest>, res: Response<PasswordResetSubmitResponse>) => {
+router.post('/change', async (req: Request<{}, {}, PasswordResetSubmitRequest>, res: Response<PasswordResetSubmitResponse>) => {
   try {
     const { email, code, newPassword } = req.body;
     if (!email || !code || !newPassword) {
       return res.status(400).json(
         errorResponse('Требуются email, код и новый пароль', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const trimmedCode = String(code).trim();
+    if (!trimmedCode) {
+      return res.status(400).json(
+        errorResponse('Требуется код', ErrorCodes.VALIDATION_ERROR)
       );
     }
 
@@ -221,24 +306,33 @@ router.post('/password-reset/change', async (req: Request<{}, {}, PasswordResetS
       );
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+    });
     if (!user) return res.status(400).json(
       errorResponse('Неверные email или код', ErrorCodes.VALIDATION_ERROR)
     );
 
-    const resetRequest = await prisma.passwordReset.findFirst({
-      where: {
-        userId: user.id,
-        code,
-        used: false,
-        expiresAt: { gt: new Date() },
-      },
+    const latestReset = await prisma.passwordReset.findFirst({
+      where: { userId: user.id, used: false },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!resetRequest) {
+    if (!latestReset || latestReset.expiresAt <= new Date()) {
+      if (latestReset && latestReset.expiresAt <= new Date()) {
+        await prisma.passwordReset.update({
+          where: { id: latestReset.id },
+          data: { used: true },
+        });
+      }
       return res.status(400).json(
         errorResponse('Неверный или просроченный код', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    if (latestReset.code !== trimmedCode) {
+      return res.status(400).json(
+        errorResponse('Неверный код', ErrorCodes.VALIDATION_ERROR)
       );
     }
 
@@ -253,7 +347,7 @@ router.post('/password-reset/change', async (req: Request<{}, {}, PasswordResetS
 
     // Отмечаем код сброса как использованный
     await prisma.passwordReset.update({
-      where: { id: resetRequest.id },
+      where: { id: latestReset.id },
       data: { used: true },
     });
 

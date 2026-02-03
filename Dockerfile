@@ -5,6 +5,7 @@
   # схема нужна ДО npm ci (postinstall: prisma generate)
   COPY package*.json ./
   COPY prisma.config.js ./
+  COPY scripts ./scripts
   COPY prisma ./prisma
   RUN npm ci
   
@@ -30,6 +31,7 @@
   COPY --from=builder /app/dist ./dist
   COPY package*.json ./
   COPY prisma.config.js ./
+  COPY scripts ./scripts
   
   # оставляем только прод-зависимости (prisma у тебя в "dependencies", значит не удалится)
   RUN npm prune --production
@@ -50,6 +52,6 @@
   
   USER app
   
-  # применяем миграции и запускаем API
-  CMD sh -c "npx prisma migrate deploy && node dist/index.js"
+  # инициализируем БД (push/migrate) + seed при пустой базе и запускаем API
+  CMD sh -c "node scripts/init-db.js && node dist/index.js"
   

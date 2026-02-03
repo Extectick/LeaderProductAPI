@@ -37,6 +37,7 @@
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
+    "expo-server-sdk": "^4.0.0",
     "express": "^5.1.0",
     "geoip-lite": "^1.4.10",
     "json2csv": "^6.0.0-alpha.2",

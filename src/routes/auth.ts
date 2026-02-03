@@ -5,7 +5,6 @@ import { User, Role, Permission } from '@prisma/client';
 import prisma from '../prisma/client';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { sendVerificationEmail } from '../services/mailService';
-import passwordResetRouter from './passwordReset';
 import crypto, { randomUUID } from 'crypto';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import {
@@ -35,7 +34,6 @@ const router = express.Router();
  * # - Для /auth/logout требуется bearer JWT.
  */
 
-router.use(passwordResetRouter);
 
 const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensecret';
 const refreshTokenSecret = process.env.REFRESH_TOKEN_SECRET || 'yourrefreshtokensecret';
@@ -46,6 +44,7 @@ const MAX_FAILED_LOGIN_ATTEMPTS = 19;
 const MAX_VERIFICATION_ATTEMPTS = 5;
 const RESEND_CODE_INTERVAL_MS = 25 * 1000; // 25 секунд
 const VERIFICATION_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Тип для User с ролью и правами
 type UserWithRolePermissions = User & {
@@ -60,6 +59,14 @@ type UserWithRolePermissions = User & {
   employeeProfile?: any;
   name?: string;
 };
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function isValidEmail(email: string) {
+  return EMAIL_REGEX.test(email);
+}
 
 function generateAccessToken(user: UserWithRolePermissions) {
   const payload = {
@@ -99,20 +106,35 @@ async function sendVerificationCodeEmail(userId: number, email: string) {
 
   if (existingVerification) {
     const now = new Date();
-    if (
-      existingVerification.lastSentAt &&
-      now.getTime() - existingVerification.lastSentAt.getTime() < RESEND_CODE_INTERVAL_MS
-    ) {
-      throw new Error(
-        'Verification code was sent recently. Please wait before requesting a new code.'
-      );
+    if (existingVerification.attemptsCount >= MAX_VERIFICATION_ATTEMPTS) {
+      await prisma.emailVerification.update({
+        where: { id: existingVerification.id },
+        data: { used: true },
+      });
+    } else if (existingVerification.expiresAt <= now) {
+      await prisma.emailVerification.update({
+        where: { id: existingVerification.id },
+        data: { used: true },
+      });
+    } else {
+      if (
+        existingVerification.lastSentAt &&
+        now.getTime() - existingVerification.lastSentAt.getTime() < RESEND_CODE_INTERVAL_MS
+      ) {
+        throw new Error(
+          'Код уже был отправлен недавно. Пожалуйста, подождите перед повторным запросом.'
+        );
+      }
+      await prisma.emailVerification.update({
+        where: { id: existingVerification.id },
+        data: {
+          lastSentAt: now,
+          expiresAt: new Date(now.getTime() + VERIFICATION_CODE_EXPIRATION_MS),
+        },
+      });
+      await sendVerificationEmail(email, existingVerification.code, 'verification');
+      return;
     }
-    await prisma.emailVerification.update({
-      where: { id: existingVerification.id },
-      data: { lastSentAt: new Date() },
-    });
-    await sendVerificationEmail(email, existingVerification.code);
-    return;
   }
 
   const code = generateVerificationCode();
@@ -126,7 +148,7 @@ async function sendVerificationCodeEmail(userId: number, email: string) {
       lastSentAt: new Date(),
     },
   });
-  await sendVerificationEmail(email, code);
+  await sendVerificationEmail(email, code, 'verification');
 }
 
 function generateSecureRandomToken(length = 64) {
@@ -197,27 +219,31 @@ export async function createUniqueRefreshToken(userId: number): Promise<string> 
  */
 router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest>, res: express.Response<AuthRegisterResponse>) => {
   try {
-    const { email, password } = req.body;
-  if (!email || !password)
-    return res.status(400).json(
-      errorResponse('Требуется email и пароль', ErrorCodes.VALIDATION_ERROR)
-    );
+    const { email, password, name } = req.body;
+    if (!email || !password) {
+      return res.status(400).json(
+        errorResponse('Требуется email и пароль', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email))
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
       return res.status(400).json(
         errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
       );
+    }
 
     if (password.length < 6)
       return res.status(400).json(
         errorResponse('Пароль должен быть не менее 6 символов', ErrorCodes.VALIDATION_ERROR)
       );
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const existingUser = await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+    });
     if (existingUser) {
       if (!existingUser.isActive) {
-        await sendVerificationCodeEmail(existingUser.id, email);
+        await sendVerificationCodeEmail(existingUser.id, existingUser.email);
         return res.status(200).json(
           successResponse(null, 
             'Пользователь уже зарегистрирован, но не активирован. Код подтверждения отправлен повторно.')
@@ -231,20 +257,21 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
       data: {
-        email,
+        email: normalizedEmail,
         passwordHash,
         isActive: false,
         role: { connect: { name: 'user' } },
+        firstName: typeof name === 'string' && name.trim() ? name.trim() : undefined,
       },
     });
 
-    await sendVerificationCodeEmail(user.id, email);
+    await sendVerificationCodeEmail(user.id, user.email);
 
     res.status(201).json(
       successResponse(null, 'Пользователь зарегистрирован. Пожалуйста, подтвердите email.')
     );
   } catch (error: any) {
-    if (error.message && error.message.includes('recently')) {
+    if (error.message && /recently|недавно/i.test(error.message)) {
       return res.status(429).json(
         errorResponse(error.message, ErrorCodes.TOO_MANY_REQUESTS)
       );
@@ -253,6 +280,87 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
     res.status(500).json(
       errorResponse('Ошибка регистрации', ErrorCodes.INTERNAL_ERROR,
         process.env.NODE_ENV === 'development' ? error : undefined)
+    );
+  }
+});
+
+/**
+ * @openapi
+ * /auth/resend:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Повторная отправка кода подтверждения
+ *     description: Отправляет новый код подтверждения, если аккаунт ещё не активирован.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *             required: [email]
+ *     responses:
+ *       200:
+ *         description: Код отправлен повторно
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Ошибка валидации или аккаунт уже активирован
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       429:
+ *         description: Слишком частые запросы
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       500:
+ *         description: Внутренняя ошибка
+ */
+router.post('/resend', async (req: express.Request, res: express.Response) => {
+  try {
+    const { email } = req.body as { email?: string };
+    if (!email) {
+      return res.status(400).json(
+        errorResponse('Требуется email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+    });
+    if (!user) {
+      return res.json(
+        successResponse(null, 'Если аккаунт существует, код подтверждения отправлен.')
+      );
+    }
+    if (user.isActive) {
+      return res.status(400).json(
+        errorResponse('Аккаунт уже активирован', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    await sendVerificationCodeEmail(user.id, normalizedEmail);
+    return res.json(
+      successResponse(null, 'Код подтверждения отправлен повторно.')
+    );
+  } catch (error: any) {
+    if (error.message && /recently|недавно/i.test(error.message)) {
+      return res.status(429).json(
+        errorResponse(error.message, ErrorCodes.TOO_MANY_REQUESTS)
+      );
+    }
+    console.error('Ошибка повторной отправки кода:', error);
+    return res.status(500).json(
+      errorResponse('Ошибка отправки кода подтверждения', ErrorCodes.INTERNAL_ERROR)
     );
   }
 });
@@ -300,14 +408,21 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
  */
 router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res: express.Response<AuthLoginResponse>) => {
   const { email, password } = req.body;
-  if (!email || !password)
+  if (!email || !password) {
     return res.status(400).json(
       errorResponse('Требуется email и пароль', ErrorCodes.VALIDATION_ERROR)
     );
+  }
+  const normalizedEmail = normalizeEmail(email);
+  if (!isValidEmail(normalizedEmail)) {
+    return res.status(400).json(
+      errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+    );
+  }
 
   try {
-    const user = (await prisma.user.findUnique({
-      where: { email },
+    const user = (await prisma.user.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
       include: {
         role: {
           include: {
@@ -347,7 +462,8 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
         data: { userId: user.id, success: false, ip: req.ip },
       });
 
-      const failedAttemptsCount = (user.loginAttempts ?? []).filter((a) => !a.success).length;
+      const failedAttemptsCount =
+        (user.loginAttempts ?? []).filter((a) => !a.success).length + 1;
 
       if (failedAttemptsCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
         await prisma.user.update({
@@ -385,12 +501,6 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
     if (profileType === 'CLIENT') activeProfile = user.clientProfile;
     else if (profileType === 'SUPPLIER') activeProfile = user.supplierProfile;
     else if (profileType === 'EMPLOYEE') activeProfile = user.employeeProfile;
-
-    if (activeProfile?.status === 'BLOCKED') {
-      return res.status(403).json(
-        errorResponse('Слишком много неудачных попыток. Ваш аккаунт заблокирован.', ErrorCodes.FORBIDDEN)
-      );
-    }
 
     const accessToken = generateAccessToken(user);
     // Создаём refresh токен и сохраняем сразу
@@ -676,12 +786,27 @@ router.post('/logout', authenticateToken, async (req: AuthRequest & { body: Auth
 router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, res: express.Response<AuthVerifyResponse>) => {
   try {
     const { email, code } = req.body;
-    if (!email || !code)
+    if (!email || !code) {
       return res.status(400).json(
         errorResponse('Требуется email и код', ErrorCodes.VALIDATION_ERROR)
       );
+    }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json(
+        errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const trimmedCode = String(code).trim();
+    if (!trimmedCode) {
+      return res.status(400).json(
+        errorResponse('Требуется код подтверждения', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (!user) return res.status(404).json(
       errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND)
     );
@@ -689,35 +814,52 @@ router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, r
       errorResponse('Аккаунт уже активирован', ErrorCodes.VALIDATION_ERROR)
     );
 
-    const verification = await prisma.emailVerification.findFirst({
-      where: { userId: user.id, code, used: false, expiresAt: { gt: new Date() } },
+    const latestVerification = await prisma.emailVerification.findFirst({
+      where: { userId: user.id, used: false },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!verification) {
-      const lastVerification = await prisma.emailVerification.findFirst({
-        where: { userId: user.id, used: false },
-        orderBy: { createdAt: 'desc' },
+    if (!latestVerification) {
+      return res.status(400).json(
+        errorResponse('Код подтверждения не найден. Запросите новый код.', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const now = new Date();
+    if (latestVerification.expiresAt <= now) {
+      await prisma.emailVerification.update({
+        where: { id: latestVerification.id },
+        data: { used: true },
       });
-      if (lastVerification) {
-        const newAttempts = (lastVerification.attemptsCount || 0) + 1;
-        if (newAttempts >= MAX_VERIFICATION_ATTEMPTS) {
-          return res.status(429).json(
-            errorResponse('Превышено максимальное количество попыток подтверждения', ErrorCodes.TOO_MANY_REQUESTS)
-          );
-        }
-        await prisma.emailVerification.update({
-          where: { id: lastVerification.id },
-          data: { attemptsCount: newAttempts },
-        });
+      return res.status(400).json(
+        errorResponse('Код подтверждения просрочен. Запросите новый код.', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    if (latestVerification.code !== trimmedCode) {
+      const newAttempts = (latestVerification.attemptsCount || 0) + 1;
+      const tooMany = newAttempts >= MAX_VERIFICATION_ATTEMPTS;
+
+      await prisma.emailVerification.update({
+        where: { id: latestVerification.id },
+        data: {
+          attemptsCount: newAttempts,
+          ...(tooMany ? { used: true } : {}),
+        },
+      });
+
+      if (tooMany) {
+        return res.status(429).json(
+          errorResponse('Превышено максимальное количество попыток подтверждения', ErrorCodes.TOO_MANY_REQUESTS)
+        );
       }
       return res.status(400).json(
-        errorResponse('Неверный или просроченный код подтверждения', ErrorCodes.VALIDATION_ERROR)
+        errorResponse('Неверный код подтверждения', ErrorCodes.VALIDATION_ERROR)
       );
     }
 
     await prisma.emailVerification.update({
-      where: { id: verification.id },
+      where: { id: latestVerification.id },
       data: { used: true },
     });
 
