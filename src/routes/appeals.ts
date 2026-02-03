@@ -54,7 +54,7 @@ import {
 } from '../validation/appeals.schema';
 
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
-import { uploadMulterFile } from '../storage/minio';
+import { resolveObjectUrl, uploadMulterFile } from '../storage/minio';
 import { cacheGet, cacheSet, cacheDel, cacheDelPrefix } from '../utils/cache';
 import { randomUUID } from 'node:crypto';
 
@@ -112,7 +112,7 @@ async function saveMulterFilesToAppealMessage(
     await db.appealAttachment.create({
       data: {
         messageId,
-        fileUrl: stored.url,           // если бакет приватный — можно хранить stored.key
+        fileUrl: stored.key,
         fileName: stored.fileName,
         fileType: detectAttachmentType(file.mimetype),
       },
@@ -120,8 +120,19 @@ async function saveMulterFilesToAppealMessage(
   }
 }
 
+async function mapAttachments(attachments: any[] | undefined) {
+  const list = attachments ?? [];
+  if (!list.length) return [];
+  return Promise.all(
+    list.map(async (att: any) => ({
+      ...att,
+      fileUrl: await resolveObjectUrl(att.fileUrl ?? null),
+    }))
+  );
+}
+
 /** Приведение сообщения к фронтовому виду с флагом прочтения */
-function mapMessageWithReads(
+async function mapMessageWithReads(
   message: MessageWithRelations,
   currentUserId: number
 ) {
@@ -139,7 +150,7 @@ function mapMessageWithReads(
     editedAt: message.editedAt,
     deleted: message.deleted,
     createdAt: message.createdAt,
-    attachments: message.attachments,
+    attachments: await mapAttachments(message.attachments),
     sender: message.sender,
     readBy,
     isRead: isOwn || readBy.some((r) => r.userId === currentUserId),
@@ -393,17 +404,19 @@ router.get(
       ]);
 
       const responseData = {
-        data: appeals.map((a: any) => {
-          const { messages, _count, ...rest } = a;
-          const lastMessage = messages?.[0]
-            ? mapMessageWithReads(messages[0] as MessageWithRelations, userId)
-            : null;
-          return {
-            ...rest,
-            lastMessage,
-            unreadCount: _count?.messages ?? 0,
-          };
-        }),
+        data: await Promise.all(
+          appeals.map(async (a: any) => {
+            const { messages, _count, ...rest } = a;
+            const lastMessage = messages?.[0]
+              ? await mapMessageWithReads(messages[0] as MessageWithRelations, userId)
+              : null;
+            return {
+              ...rest,
+              lastMessage,
+              unreadCount: _count?.messages ?? 0,
+            };
+          })
+        ),
         meta: { total, limit, offset },
       };
       await cacheSet(cacheKey, responseData, 60);
@@ -481,8 +494,10 @@ router.get(
 
       const mappedAppeal = {
         ...appeal,
-        messages: appeal.messages.map((m) =>
-          mapMessageWithReads(m as MessageWithRelations, userId)
+        messages: await Promise.all(
+          appeal.messages.map((m) =>
+            mapMessageWithReads(m as MessageWithRelations, userId)
+          )
         ),
       };
 
@@ -772,11 +787,11 @@ router.post(
       // 5) Загружаем вложения в MinIO
       for (const file of files) {
         try {
-          const { url, fileName } = await uploadMulterFile(file, false);
+          const { key, fileName } = await uploadMulterFile(file, false);
           await prisma.appealAttachment.create({
             data: {
               messageId: message.id,
-              fileUrl: url,
+              fileUrl: key,
               fileName,
               fileType: detectAttachmentType(file.mimetype),
             },
@@ -806,7 +821,7 @@ router.post(
       });
 
       const mappedMessage = fullMessage
-        ? mapMessageWithReads(fullMessage as MessageWithRelations, req.user!.userId)
+        ? await mapMessageWithReads(fullMessage as MessageWithRelations, req.user!.userId)
         : {
             id: message.id,
             appealId,

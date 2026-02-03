@@ -1,4 +1,5 @@
 import express from 'express';
+import multer from 'multer';
 import { ProfileStatus, ProfileType } from '@prisma/client';
 import prisma from '../prisma/client';
 import {
@@ -25,6 +26,8 @@ import { auditLog } from '../middleware/audit';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import { getProfile } from '../services/userService';
 import { notifyProfileActivated } from '../services/pushService';
+import { getPresenceForUsers, markUserOnline } from '../services/presenceService';
+import { uploadMulterFile, resolveObjectUrl } from '../storage/minio';
 
 const router = express.Router();
 const USER_LIST_SELECT = {
@@ -33,9 +36,24 @@ const USER_LIST_SELECT = {
   firstName: true,
   lastName: true,
   phone: true,
+  avatarUrl: true,
+  lastSeenAt: true,
+  profileStatus: true,
+  currentProfileType: true,
   role: { select: { id: true, name: true } },
-  employeeProfile: { select: { departmentId: true } },
+  clientProfile: { select: { avatarUrl: true, phone: true } },
+  supplierProfile: { select: { avatarUrl: true, phone: true } },
+  employeeProfile: { select: { departmentId: true, avatarUrl: true, phone: true, department: { select: { id: true, name: true } } } },
 };
+
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype?.startsWith('image/')) return cb(null, true);
+    cb(new Error('Only image uploads are allowed'));
+  },
+});
 
 /**
  * @openapi
@@ -1239,11 +1257,175 @@ router.get(
         orderBy: { id: 'asc' },
         take: 50,
       });
-      res.json(successResponse(users));
+      const usersWithAvatar = await Promise.all(
+        users.map(async (u: any) => {
+          const rawAvatar =
+            u.currentProfileType === 'CLIENT'
+              ? u.clientProfile?.avatarUrl
+              : u.currentProfileType === 'SUPPLIER'
+              ? u.supplierProfile?.avatarUrl
+              : u.currentProfileType === 'EMPLOYEE'
+              ? u.employeeProfile?.avatarUrl
+              : u.avatarUrl;
+          const avatarUrl = await resolveObjectUrl(rawAvatar ?? null);
+          const departmentName = u.employeeProfile?.department?.name ?? null;
+          const bestPhone =
+            u.phone ??
+            u.employeeProfile?.phone ??
+            u.clientProfile?.phone ??
+            u.supplierProfile?.phone ??
+            null;
+          return { ...u, avatarUrl, departmentName, phone: bestPhone };
+        })
+      );
+      const presence = await getPresenceForUsers(usersWithAvatar.map((u) => u.id));
+      const presenceMap = new Map(presence.map((p) => [p.userId, p]));
+      const enriched = usersWithAvatar.map((u) => {
+        const p = presenceMap.get(u.id);
+        return {
+          ...u,
+          isOnline: p?.isOnline ?? false,
+          lastSeenAt: (p?.lastSeenAt ?? u.lastSeenAt ?? null) as any,
+        };
+      });
+      res.json(successResponse(enriched));
     } catch (error) {
       res.status(500).json(
         errorResponse(
           'Ошибка получения пользователей',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Presence ping (онлайн)
+ */
+router.post(
+  '/me/presence/ping',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const userId = req.user!.userId;
+      await markUserOnline(userId);
+      return res.json(successResponse({ ok: true }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка обновления статуса присутствия',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Получить presence для списка пользователей
+ */
+router.get(
+  '/presence',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{}, {}, {}, { ids?: string }>, res: express.Response) => {
+    try {
+      const raw = String(req.query.ids || '').trim();
+      if (!raw) {
+        return res.status(400).json(
+          errorResponse('Нужен параметр ids', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+      const ids = raw
+        .split(',')
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v) && v > 0);
+      if (!ids.length) {
+        return res.status(400).json(
+          errorResponse('Неверные ids', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+      const presence = await getPresenceForUsers(ids);
+      return res.json(successResponse(presence));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения статуса присутствия',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
+ * Загрузить аватар для конкретного профиля (CLIENT/SUPPLIER/EMPLOYEE)
+ */
+router.post(
+  '/me/profiles/:type/avatar',
+  authenticateToken,
+  checkUserStatus,
+  avatarUpload.single('avatar'),
+  async (req: AuthRequest<{ type: string }>, res: express.Response) => {
+    try {
+      const userId = req.user!.userId;
+      const type = String(req.params.type || '').toUpperCase() as ProfileType;
+      const allowedTypes: Array<ProfileType> = ['CLIENT', 'SUPPLIER', 'EMPLOYEE'];
+      if (!allowedTypes.includes(type)) {
+        return res.status(400).json(
+          errorResponse('Недопустимый тип профиля', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json(
+          errorResponse('Файл не найден', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const stored = await uploadMulterFile(file, false, 'avatars');
+
+      if (type === 'EMPLOYEE') {
+        const profile = await prisma.employeeProfile.findUnique({ where: { userId } });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND));
+        }
+        await prisma.employeeProfile.update({
+          where: { userId },
+          data: { avatarUrl: stored.key },
+        });
+      } else if (type === 'CLIENT') {
+        const profile = await prisma.clientProfile.findUnique({ where: { userId } });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Профиль клиента не найден', ErrorCodes.NOT_FOUND));
+        }
+        await prisma.clientProfile.update({
+          where: { userId },
+          data: { avatarUrl: stored.key },
+        });
+      } else if (type === 'SUPPLIER') {
+        const profile = await prisma.supplierProfile.findUnique({ where: { userId } });
+        if (!profile) {
+          return res.status(404).json(errorResponse('Профиль поставщика не найден', ErrorCodes.NOT_FOUND));
+        }
+        await prisma.supplierProfile.update({
+          where: { userId },
+          data: { avatarUrl: stored.key },
+        });
+      }
+
+      const profile = await getProfile(userId);
+      return res.json(successResponse({ profile }));
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка загрузки аватара',
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? error : undefined
         )

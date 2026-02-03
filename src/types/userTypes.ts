@@ -8,6 +8,8 @@ export type Profile = {
     middleName: string | null;
     phone: string | null;
     avatarUrl: string | null;
+    lastSeenAt?: Date | string | null;
+    isOnline?: boolean;
     profileStatus: ProfileStatus;
     currentProfileType: ProfileType | null;
     role: {
@@ -43,6 +45,9 @@ export type DepartmentRole = {
 export type clientProfile = {
     id: number;
     phone: string | null;
+    avatarUrl?: string | null;
+    lastSeenAt?: Date | string | null;
+    isOnline?: boolean;
     status: ProfileStatus;
     address: {
     street: string;
@@ -91,6 +96,9 @@ export type clientProfile = {
 export type supplierProfile = {
     id: number;
     phone: string | null;
+    avatarUrl?: string | null;
+    lastSeenAt?: Date | string | null;
+    isOnline?: boolean;
     status: ProfileStatus;
     address: {
     street: string;
@@ -105,6 +113,9 @@ export type supplierProfile = {
 export type employeeProfile = {
     id: number;
     phone: string | null;
+    avatarUrl?: string | null;
+    lastSeenAt?: Date | string | null;
+    isOnline?: boolean;
     status: ProfileStatus;
     department: {
     id: number;

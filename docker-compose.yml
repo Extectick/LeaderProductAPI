@@ -7,7 +7,7 @@ services:
     env_file:
       - .env.production
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
       S3_ENDPOINT: http://minio:9000
       REDIS_URL: redis://redis:6379
@@ -186,7 +186,7 @@ services:
     env_file:
       - .env.production
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
     command: sh -c "npx prisma studio --port 5555 --browser none"
     ports:

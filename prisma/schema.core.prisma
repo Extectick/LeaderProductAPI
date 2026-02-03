@@ -111,6 +111,7 @@ model ClientProfile {
   addressId Int?
   address   Address? @relation(fields: [addressId], references: [id])
   phone     String?
+  avatarUrl String?
   counterpartyId String?
   counterparty   Counterparty? @relation("ClientProfileCounterparty", fields: [counterpartyId], references: [id])
 
@@ -147,6 +148,7 @@ model SupplierProfile {
   addressId Int?
   address   Address? @relation(fields: [addressId], references: [id])
   phone     String?
+  avatarUrl String?
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -160,6 +162,7 @@ model EmployeeProfile {
   department Department? @relation(fields: [departmentId], references: [id])
   departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
   phone     String?
+  avatarUrl String?
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -192,7 +195,7 @@ model User {
   lastName           String?             // Фамилия
   middleName         String?             // Отчество
   phone              String?             // Телефон пользователя
-  avatarUrl          String?             // Ссылка на аватар пользователя
+  avatarUrl          String?             // (устар.) Ссылка на аватар пользователя
   deletedAt          DateTime?           // Для soft delete
   currentProfileType ProfileType?        // Текущий активный профиль
   emailVerifications EmailVerification[]
@@ -209,6 +212,7 @@ model User {
   qrlist             QRList[]
   routes             UserRoute[]
   routePoints        RoutePoint[]
+  lastSeenAt         DateTime?
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 

@@ -1,5 +1,7 @@
 import prisma from '../prisma/client';
 import { Profile } from '../types/userTypes';
+import { getPresenceForUsers } from './presenceService';
+import { resolveObjectUrl } from '../storage/minio';
 
 export const userServicePrisma = prisma;
 
@@ -41,6 +43,14 @@ export const getProfile = async (userId: number): Promise<Profile> => {
     throw new Error('Пользователь не найден');
   }
 
+  const presence = await getPresenceForUsers([userId]);
+  const isOnline = presence[0]?.isOnline ?? false;
+  const lastSeenAt = user.lastSeenAt ?? null;
+
+  const resolvedClientAvatar = await resolveObjectUrl(user.clientProfile?.avatarUrl ?? null);
+  const resolvedSupplierAvatar = await resolveObjectUrl(user.supplierProfile?.avatarUrl ?? null);
+  const resolvedEmployeeAvatar = await resolveObjectUrl(user.employeeProfile?.avatarUrl ?? null);
+
   // Преобразуем departmentRoles к нужному формату
   const departmentRoles = (user.employeeProfile?.departmentRoles || []).map(dr => ({
     department: {
@@ -51,11 +61,14 @@ export const getProfile = async (userId: number): Promise<Profile> => {
   }));
 
   // Преобразуем профили клиента/поставщика в предсказуемую форму
-  const transformProfile = (profile: any) =>
+  const transformProfile = (profile: any, avatarUrl: string | null) =>
     profile
       ? {
           id: profile.id,
           phone: profile.phone ?? null,
+          avatarUrl,
+          lastSeenAt,
+          isOnline,
           status: profile.status,
           address: profile.address
             ? {
@@ -117,6 +130,35 @@ export const getProfile = async (userId: number): Promise<Profile> => {
         }
       : null;
 
+  const employeeProfile = user.employeeProfile
+    ? {
+        id: user.employeeProfile.id,
+        phone: user.employeeProfile.phone ?? null,
+        avatarUrl: resolvedEmployeeAvatar,
+        lastSeenAt,
+        isOnline,
+        status: user.employeeProfile.status,
+        department: user.employeeProfile.department
+          ? { id: user.employeeProfile.department.id, name: user.employeeProfile.department.name }
+          : null,
+        departmentRoles: user.employeeProfile.departmentRoles?.map((dr: any) => ({
+          id: dr.id,
+          role: dr.role,
+        })) ?? [],
+        createdAt: user.employeeProfile.createdAt,
+        updatedAt: user.employeeProfile.updatedAt,
+      }
+    : null;
+
+  const activeAvatarUrl =
+    user.currentProfileType === 'CLIENT'
+      ? resolvedClientAvatar
+      : user.currentProfileType === 'SUPPLIER'
+      ? resolvedSupplierAvatar
+      : user.currentProfileType === 'EMPLOYEE'
+      ? resolvedEmployeeAvatar
+      : null;
+
   const profile: Profile = {
       id: user.id,
       email: user.email,
@@ -124,14 +166,16 @@ export const getProfile = async (userId: number): Promise<Profile> => {
       lastName: user.lastName,
       middleName: user.middleName,
       phone: user.phone,
-      avatarUrl: user.avatarUrl,
+      avatarUrl: activeAvatarUrl,
+      lastSeenAt,
+      isOnline,
       profileStatus: user.profileStatus,
       currentProfileType: user.currentProfileType,
       role: user.role,
       departmentRoles,
-      clientProfile: transformProfile(user.clientProfile),
-      supplierProfile: transformProfile(user.supplierProfile),
-      employeeProfile: user.employeeProfile
+      clientProfile: transformProfile(user.clientProfile, resolvedClientAvatar),
+      supplierProfile: transformProfile(user.supplierProfile, resolvedSupplierAvatar),
+      employeeProfile: employeeProfile
   };
 
   return profile;
@@ -144,8 +188,7 @@ export const updateProfile = async (userId: number, data: Partial<Profile>) => {
       firstName: data.firstName,
       lastName: data.lastName,
       middleName: data.middleName,
-      phone: data.phone,
-      avatarUrl: data.avatarUrl
+      phone: data.phone
     }
   });
   return updated;

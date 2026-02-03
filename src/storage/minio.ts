@@ -8,6 +8,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { Prisma, AttachmentType } from "@prisma/client";
+import { signFileToken } from "../utils/fileTokens";
 
 /**
  * Требуемые env:
@@ -17,12 +18,16 @@ import type { Prisma, AttachmentType } from "@prisma/client";
  *  - S3_SECRET_KEY
  *  - S3_BUCKET          (leader-product-dev / leader-product-prod)
  *  - S3_PUBLIC_BASE     (опц., если есть CDN/публичный прокси; напр. https://cdn.example.com/<bucket>)
+ *  - FILES_BASE_URL     (опц., если отдаём файлы через API; напр. https://api.example.com)
+ *  - FILES_REQUIRE_TOKEN (опц., 1 = требовать токен для /files)
+ *  - FILES_TOKEN_TTL     (опц., ttl токена в секундах)
+ *  - FILE_TOKEN_SECRET   (опц., отдельный секрет для файловых токенов)
  *  - PRESIGN_PUT_TTL    (сек., по умолчанию 600)
  *  - PRESIGN_GET_TTL    (сек., по умолчанию 600)
  *  - S3_KEY_PREFIX      (опц., базовый префикс для ключей; по умолчанию "uploads")
  */
 
-const {
+ const {
   S3_ENDPOINT,
   S3_REGION = "us-east-1",
   S3_ACCESS_KEY,
@@ -30,6 +35,10 @@ const {
   S3_BUCKET,
   S3_PUBLIC_BASE,
   S3_PRESIGN_ENDPOINT,
+  FILES_BASE_URL,
+  DOMEN_URL,
+  FILES_REQUIRE_TOKEN,
+  FILES_TOKEN_TTL,
   PRESIGN_PUT_TTL = "600",
   PRESIGN_GET_TTL = "600",
   S3_KEY_PREFIX = "uploads",
@@ -88,6 +97,13 @@ function publicUrlOrNull(key: string): string | null {
   return `${base}/${encodeURI(key)}`;
 }
 
+function encodeKeyForPath(key: string) {
+  return key
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+}
+
 /** Presign PUT — клиент грузит напрямую в MinIO */
 export async function presignPut(
   key: string,
@@ -114,6 +130,45 @@ export async function presignGet(
   });
   const url = await getSignedUrl(presignClient, cmd, { expiresIn: ttlSec });
   return { bucket: S3_BUCKET!, key, url, expiresIn: ttlSec };
+}
+
+function extractKeyFromUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/^\/+/, '');
+    if (S3_BUCKET && path.startsWith(`${S3_BUCKET}/`)) {
+      return path.slice(S3_BUCKET.length + 1);
+    }
+  } catch {}
+  return null;
+}
+
+export async function resolveObjectUrl(value?: string | null): Promise<string | null> {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const key = raw.startsWith('http') ? extractKeyFromUrl(raw) : raw;
+  if (!key) return raw;
+
+  if (S3_PUBLIC_BASE) {
+    const base = S3_PUBLIC_BASE.replace(/\/+$/, '');
+    return `${base}/${encodeURI(key)}`;
+  }
+
+  const filesBase = (FILES_BASE_URL || DOMEN_URL || '').trim().replace(/\/+$/, '');
+  if (filesBase) {
+    const path = `${filesBase}/files/${encodeKeyForPath(key)}`;
+    if (FILES_REQUIRE_TOKEN === '1') {
+      const ttl = Number(FILES_TOKEN_TTL || 600);
+      const token = signFileToken(key, ttl);
+      return `${path}?token=${encodeURIComponent(token)}`;
+    }
+    return path;
+  }
+
+  const presigned = await presignGet(key);
+  return presigned.url;
 }
 
 /** Заливка буфера в MinIO */
@@ -208,7 +263,7 @@ export async function saveAppealAttachment(
   return db.appealAttachment.create({
     data: {
       messageId,
-      fileUrl: stored.url,      // если бакет приватный, можно хранить stored.key
+      fileUrl: stored.key,
       fileName: stored.fileName,
       fileType,
     },

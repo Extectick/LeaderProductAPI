@@ -49,7 +49,7 @@ const AppealAttachment = {
   required: ['fileUrl', 'fileName', 'fileType'],
   properties: {
     id: { type: 'integer', example: 101 },
-    fileUrl: { type: 'string', example: 'uploads/file-123.png' },
+    fileUrl: { type: 'string', example: 'https://api.example.com/files/uploads/file-123.png?token=...' },
     fileName: { type: 'string', example: 'screenshot.png' },
     fileType: AttachmentTypeEnum,
   },

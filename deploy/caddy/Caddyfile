@@ -1,4 +1,5 @@
 minio.extectick.keenetic.pro {
+  tls internal
   @preflight method OPTIONS
   header {
     Access-Control-Allow-Origin "*"
