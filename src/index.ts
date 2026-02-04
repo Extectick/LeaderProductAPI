@@ -91,12 +91,13 @@ app.use(
 
 // ---- Common middlewares ----
 app.use(morgan('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 app.use(kafkaRequestLogger);
 
-if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_REQUESTS === '1') {
+const allowDebugInProd = process.env.ALLOW_DEBUG_IN_PROD === '1';
+if (process.env.DEBUG_REQUESTS === '1' && (process.env.NODE_ENV !== 'production' || allowDebugInProd)) {
   app.use(requestDebugMiddleware);
   requestDebugRoutes(app);
   console.log('[debug] Request dashboard enabled at /_debug/requests (and .json).');

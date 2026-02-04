@@ -144,7 +144,9 @@ export function requestDebugMiddleware(req: Request, res: Response, next: NextFu
 
 function guard(req: Request): string | null {
   const token = process.env.DEBUG_DASH_TOKEN;
-  if (process.env.NODE_ENV === 'production') return 'Disabled in production';
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEBUG_IN_PROD !== '1') {
+    return 'Disabled in production';
+  }
   if (process.env.DEBUG_REQUESTS !== '1') return 'DEBUG_REQUESTS=1 is required';
   if (token && req.headers['x-debug-token'] !== token) return 'Missing or invalid x-debug-token';
   return null;

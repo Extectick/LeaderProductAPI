@@ -12,6 +12,7 @@ services:
       S3_ENDPOINT: http://minio:9000
       REDIS_URL: redis://redis:6379
       DEBUG_REQUESTS: "1"
+      ALLOW_DEBUG_IN_PROD: "1"
     ports:
       - "3000:3000"
     depends_on:
