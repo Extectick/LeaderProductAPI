@@ -59,6 +59,9 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 const app = express();
 const server = http.createServer(app);
 
+// Отключаем ETag, чтобы исключить 304 без тела на API-ответах
+app.set('etag', false);
+
 const port = Number(process.env.PORT) || 3000;
 
 // ---- CORS ----
