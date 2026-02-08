@@ -13,6 +13,7 @@ import {
   authorizePermissions,
   AuthRequest,
 } from '../middleware/auth';
+import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import {
   successResponse,
   errorResponse,
@@ -119,6 +120,7 @@ router.post(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['create_qr']),
   multer({ dest: 'uploads/' }).array('attachments'),
   async (
@@ -254,6 +256,7 @@ router.put(
   '/:id',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['update_qr']),
   async (
     req: AuthRequest<{ id: string }, QRUpdateResponse, QRUpdateRequest>,
@@ -447,6 +450,7 @@ router.get(
   '/analytics',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr_analytics']),
   async (
     req: AuthRequest<{}, QRAnalyticsQueryResponse, {}, QRAnalyticsQueryRequest>,
@@ -728,6 +732,7 @@ router.get(
   '/analytics/scans',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr_analytics']),
   async (
     req: AuthRequest<
@@ -858,6 +863,7 @@ router.get(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr']),
   async (
     req: AuthRequest<{}, QRGetAllResponse, {}, QRGetAllRequest>,
@@ -993,6 +999,7 @@ router.get(
   '/export',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['export_qr']),
   async (req: AuthRequest, res) => {
     try {
@@ -1114,6 +1121,7 @@ router.get(
   '/:id',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr']),
   async (
     req: AuthRequest<
@@ -1279,6 +1287,7 @@ router.get(
   '/:id/analytics',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr_analytics']),
   async (
     req: AuthRequest<{ id: string }, QRAnalyticsResponse>,
@@ -1371,6 +1380,7 @@ router.delete(
   '/:id',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['delete_qr']),
   async (
     req: AuthRequest<{ id: string }>,
@@ -1630,6 +1640,7 @@ router.get(
   '/stats',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['view_qr_stats']),
   async (req: AuthRequest, res) => {
     try {
@@ -1729,6 +1740,7 @@ router.put(
   '/:id/restore',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('qrcodes'),
   authorizePermissions(['restore_qr']),
   async (
     req: AuthRequest<{ id: string }, QRRestoreResponse>,
@@ -1794,3 +1806,4 @@ router.put(
 );
 
 export default router;
+

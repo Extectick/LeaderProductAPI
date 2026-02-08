@@ -4,6 +4,7 @@ import {
   authenticateToken,
   AuthRequest,
 } from '../middleware/auth';
+import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { rateLimit } from '../middleware/rateLimit';
 import {
@@ -148,6 +149,7 @@ router.post(
   '/points',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   rateLimit({ windowSec: 60, limit: 600 }),
   async (
     req: AuthRequest<{}, SaveTrackingPointsResponse, SaveTrackingPointsRequest>,
@@ -419,6 +421,7 @@ router.get(
   '/routes/:routeId/stops',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (req: AuthRequest<{ routeId: string }>, res) => {
     try {
       const userId = req.user?.userId;
@@ -592,6 +595,7 @@ router.get(
   '/routes/:routeId/export',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{ routeId: string }, any, {}, { format?: string }>,
     res
@@ -732,6 +736,7 @@ router.get(
   '/routes',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{}, GetUserRoutesResponse, {}, GetUserRoutesQuery>,
     res: express.Response<GetUserRoutesResponse>
@@ -881,6 +886,7 @@ router.get(
   '/routes/:routeId/points',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{ routeId: string }, GetRoutePointsResponse, {}, GetRoutePointsQuery>,
     res: express.Response<GetRoutePointsResponse>
@@ -1096,6 +1102,7 @@ router.get(
   '/routes/:routeId/summary',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{ routeId: string }>,
     res: express.Response
@@ -1268,6 +1275,7 @@ router.get(
   '/stats/daily',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{}, GetDailyTrackingStatsResponse, {}, GetDailyTrackingStatsQuery>,
     res: express.Response<GetDailyTrackingStatsResponse>
@@ -1406,6 +1414,7 @@ router.get(
   '/admin/users/:userId/routes-with-points',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{ userId: string }, GetUserRoutesWithPointsResponse, {}, GetUserRoutesWithPointsQuery>,
     res: express.Response<GetUserRoutesWithPointsResponse>
@@ -1574,6 +1583,7 @@ router.get(
   '/users/:userId/points',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('tracking'),
   async (
     req: AuthRequest<{ userId: string }, GetUserPointsResponse, {}, GetUserPointsQuery>,
     res: express.Response<GetUserPointsResponse>
@@ -1703,3 +1713,4 @@ router.get(
 );
 
 export default router;
+

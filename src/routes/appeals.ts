@@ -17,6 +17,7 @@ import {
   authorizePermissions,
   AuthRequest,
 } from '../middleware/auth';
+import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import {
   successResponse,
@@ -188,6 +189,7 @@ router.post(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['create_appeal']),
   upload.array('attachments'), // важно: именно массив "attachments"
   async (
@@ -320,6 +322,7 @@ router.get(
   '/',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['view_appeal']),
   async (req: AuthRequest<{}, AppealListResponse>, res: express.Response) => {
     try {
@@ -444,6 +447,7 @@ router.get(
   '/:id',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['view_appeal']),
   async (req: AuthRequest<{ id: string }, AppealDetailResponse>, res: express.Response) => {
     try {
@@ -524,6 +528,7 @@ router.put(
   '/:id/assign',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['assign_appeal']),
   async (
     req: AuthRequest<{ id: string }, AppealAssignResponse, unknown>,
@@ -611,6 +616,7 @@ router.put(
   '/:id/status',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['update_appeal_status']),
   async (
     req: AuthRequest<{ id: string }, AppealStatusUpdateResponse, unknown>,
@@ -689,6 +695,7 @@ router.post(
   '/:id/messages',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['add_appeal_message']),
   upload.array('attachments'),
   async (
@@ -910,6 +917,7 @@ router.post(
   '/:appealId/messages/:messageId/read',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['view_appeal']),
   async (
     req: AuthRequest<{ appealId: string; messageId: string }>,
@@ -1004,6 +1012,7 @@ router.put(
   '/:id/watchers',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['manage_appeal_watchers']),
   async (
     req: AuthRequest<{ id: string }, AppealWatchersUpdateResponse, unknown>,
@@ -1068,6 +1077,7 @@ router.put(
   '/messages/:messageId',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['edit_appeal_message']),
   async (
     req: AuthRequest<{ messageId: string }, AppealEditMessageResponse, unknown>,
@@ -1139,6 +1149,7 @@ router.delete(
   '/messages/:messageId',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['delete_appeal_message']),
   async (
     req: AuthRequest<{ messageId: string }, AppealDeleteMessageResponse>,
@@ -1200,6 +1211,7 @@ router.get(
   '/export',
   authenticateToken,
   checkUserStatus,
+  authorizeServiceAccess('appeals'),
   authorizePermissions(['export_appeals']),
   async (req: AuthRequest, res: express.Response) => {
     try {
@@ -1288,3 +1300,4 @@ router.get(
 );
 
 export default router;
+

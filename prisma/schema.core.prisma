@@ -173,6 +173,7 @@ model Department {
   name  String  @unique
   departmentRoles DepartmentRole[]
   employeeProfiles EmployeeProfile[]  // Добавлено обратное отношение
+  serviceAccesses ServiceDepartmentAccess[]
 
   // Новые связи с обращениями
   appealsFrom   Appeal[] @relation("AppealsFrom")
@@ -266,6 +267,7 @@ model Role {
   permissions   RolePermissions[] @relation("RolePermissions")
   users         User[]
   departmentRoles DepartmentRole[]
+  serviceAccesses ServiceRoleAccess[]
 
   parentRoleId  Int?              // Родительская роль для иерархии ролей
   parentRole    Role?             @relation("RoleHierarchy", fields: [parentRoleId], references: [id])
@@ -285,6 +287,57 @@ model RolePermissions {
   role         Role       @relation("RolePermissions", fields: [roleId], references: [id])
 
   @@id([roleId, permissionId])
+}
+
+model Service {
+  id              Int                      @id @default(autoincrement())
+  key             String                   @unique
+  name            String
+  route           String?
+  icon            String?
+  description     String?
+  gradientStart   String?
+  gradientEnd     String?
+  isActive        Boolean                  @default(true)
+  defaultVisible  Boolean                  @default(true)
+  defaultEnabled  Boolean                  @default(true)
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  roleAccess      ServiceRoleAccess[]
+  departmentAccess ServiceDepartmentAccess[]
+}
+
+model ServiceRoleAccess {
+  id        Int      @id @default(autoincrement())
+  serviceId Int
+  roleId    Int
+  visible   Boolean?
+  enabled   Boolean?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  role    Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, roleId])
+  @@index([roleId])
+}
+
+model ServiceDepartmentAccess {
+  id           Int      @id @default(autoincrement())
+  serviceId    Int
+  departmentId Int
+  visible      Boolean?
+  enabled      Boolean?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  service    Service    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, departmentId])
+  @@index([departmentId])
 }
 
 model RefreshToken {

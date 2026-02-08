@@ -7,6 +7,7 @@ async function main() {
     'logout',
     'manage_roles',
     'manage_permissions',
+    'manage_services',
     'assign_roles',
     'assign_permissions',
     'manage_departments',
@@ -103,6 +104,99 @@ async function main() {
   for (const p of allPerms) {
     await prisma.rolePermissions.create({
       data: { roleId: adminRole.id, permissionId: p.id },
+    });
+  }
+
+  const services = [
+    {
+      key: 'qrcodes',
+      name: 'QR генератор и аналитика',
+      route: '/services/qrcodes',
+      icon: 'qr-code-outline',
+      description: 'Создание QR-кодов, печать и аналитика по сканам.',
+      gradientStart: '#5B21B6',
+      gradientEnd: '#7C3AED',
+      defaultVisible: true,
+      defaultEnabled: true,
+      isActive: true,
+    },
+    {
+      key: 'appeals',
+      name: 'Обращения',
+      route: '/services/appeals',
+      icon: 'documents',
+      description: 'Центр общения с клиентами и партнёрами.',
+      gradientStart: '#a8d5ba',
+      gradientEnd: '#4cad50',
+      defaultVisible: true,
+      defaultEnabled: true,
+      isActive: true,
+    },
+    {
+      key: 'tracking',
+      name: 'Геомаршруты',
+      route: '/services/tracking',
+      icon: 'map-outline',
+      description: 'Маршруты, точки и контроль передвижений.',
+      gradientStart: '#ffd89b',
+      gradientEnd: '#19547b',
+      defaultVisible: true,
+      defaultEnabled: true,
+      isActive: true,
+    },
+    {
+      key: 'tasks',
+      name: 'Задачи',
+      route: '/tasks',
+      icon: 'list-outline',
+      description: 'Постановка и контроль задач команды.',
+      gradientStart: '#90caf9',
+      gradientEnd: '#2196f3',
+      defaultVisible: true,
+      defaultEnabled: false,
+      isActive: true,
+    },
+    {
+      key: 'reports',
+      name: 'Отчёты',
+      route: '/reports',
+      icon: 'stats-chart-outline',
+      description: 'Визуальные отчёты и показатели (скоро).',
+      gradientStart: '#ce93d8',
+      gradientEnd: '#9c27b0',
+      defaultVisible: true,
+      defaultEnabled: false,
+      isActive: true,
+    },
+    {
+      key: 'clients',
+      name: 'Клиенты',
+      route: '/clients',
+      icon: 'people-outline',
+      description: 'Управление клиентской базой (скоро).',
+      gradientStart: '#ef9a9a',
+      gradientEnd: '#f44336',
+      defaultVisible: true,
+      defaultEnabled: false,
+      isActive: true,
+    },
+  ];
+
+  for (const service of services) {
+    await prisma.service.upsert({
+      where: { key: service.key },
+      update: {
+        name: service.name,
+        route: service.route,
+        icon: service.icon,
+        description: service.description,
+        gradientStart: service.gradientStart,
+        gradientEnd: service.gradientEnd,
+        defaultVisible: service.defaultVisible,
+        defaultEnabled: service.defaultEnabled,
+        isActive: service.isActive,
+      },
+      create: service,
     });
   }
 }
