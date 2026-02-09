@@ -44,6 +44,30 @@ export async function markUserOnline(userId: number) {
   }
 }
 
+export async function markUserOffline(userId: number): Promise<Date> {
+  const now = new Date();
+  const redis = getRedis();
+
+  if (redis.isOpen) {
+    await redis.del(keyOnline(userId));
+    await prisma.user.update({
+      where: { id: userId },
+      data: { lastSeenAt: now },
+    });
+    await redis.set(keyLastSeen(userId), String(now.getTime()), {
+      EX: Math.ceil(LAST_SEEN_MIN_MS / 1000) * 2,
+    });
+    return now;
+  }
+
+  lastSeenFallback.set(userId, now.getTime());
+  await prisma.user.update({
+    where: { id: userId },
+    data: { lastSeenAt: now },
+  });
+  return now;
+}
+
 export async function getPresenceForUsers(userIds: number[]): Promise<PresenceInfo[]> {
   const ids = Array.from(new Set(userIds.filter((id) => Number.isFinite(id))));
   if (!ids.length) return [];

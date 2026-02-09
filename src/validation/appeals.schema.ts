@@ -77,6 +77,23 @@ export const ListQuerySchema = z.object({
   priority: z.nativeEnum(AppealPriority).optional(),
 });
 
+/** GET /appeals/:id/messages — query */
+export const MessagesQuerySchema = z.object({
+  limit: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100))
+    .default(30),
+  cursor: zOptionalNonEmptyString,
+  direction: z.enum(['before', 'after']).optional(),
+  mode: z.enum(['page', 'bootstrap']).optional(),
+  anchor: z.enum(['first_unread', 'last_unread']).optional(),
+  before: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0).max(200))
+    .optional(),
+  after: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0).max(200))
+    .optional(),
+});
+
 /** GET /appeals/:id — params */
 export const IdParamSchema = z.object({
   id: zNumberId,
@@ -109,6 +126,13 @@ export const ChangeDepartmentBodySchema = z.object({
 export const AddMessageBodySchema = z.object({
   // текст опционален (можно отправить только файлы)
   text: zOptionalNonEmptyString,
+});
+
+/* =========================================
+ *   /appeals/:id/messages/read-bulk (POST)
+ * ========================================= */
+export const ReadBulkBodySchema = z.object({
+  messageIds: z.array(zNumberId).min(1),
 });
 
 /* ======================================

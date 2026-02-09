@@ -559,6 +559,8 @@ model AppealMessage {
   sender    User     @relation(fields: [senderId], references: [id])
   attachments AppealAttachment[]
   reads     AppealMessageRead[]
+
+  @@index([appealId, createdAt, id])
 }
 
 model AppealAttachment {

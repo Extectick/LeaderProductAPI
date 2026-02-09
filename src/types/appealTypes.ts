@@ -133,6 +133,33 @@ export type AppealAddMessageResponse =
     }>
   | ErrorResponse;
 
+/**
+ * Ответ на получение сообщений обращения (пагинация)
+ */
+export type AppealMessagesResponse =
+  | SuccessResponse<{
+      data: any[];
+      meta: {
+        hasMore?: boolean;
+        nextCursor?: string | null;
+        hasMoreBefore: boolean;
+        prevCursor: string | null;
+        hasMoreAfter: boolean;
+        anchorMessageId: number | null;
+      };
+    }>
+  | ErrorResponse;
+
+/**
+ * Ответ на bulk read сообщений
+ */
+export type AppealReadBulkResponse =
+  | SuccessResponse<{
+      messageIds: number[];
+      readAt: Date;
+    }>
+  | ErrorResponse;
+
 export interface AppealWatchersUpdateRequest {
   watcherIds: number[]; // новые списки наблюдателей
 }

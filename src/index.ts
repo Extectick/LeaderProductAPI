@@ -26,6 +26,7 @@ import onecRouter from './modules/onec/onec.routes';
 import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
+import { markUserOffline, markUserOnline } from './services/presenceService';
 // Swagger
 import { swaggerSpec } from './swagger/swagger';
 
@@ -235,6 +236,31 @@ const io = new SocketIOServer(server, {
 });
 app.set('io', io);
 
+const userSocketCounts = new Map<number, number>();
+
+function normalizePresenceUserIds(value: unknown): number[] {
+  const raw = Array.isArray(value)
+    ? value
+    : (value as any)?.userIds && Array.isArray((value as any).userIds)
+    ? (value as any).userIds
+    : [];
+  return Array.from(
+    new Set(
+      raw
+        .map((item: any) => Number(item))
+        .filter((id: number) => Number.isFinite(id) && id > 0)
+    )
+  );
+}
+
+function emitPresenceChanged(userId: number, isOnline: boolean, lastSeenAt: Date | null) {
+  io.to(`presence:${userId}`).emit('presenceChanged', {
+    userId,
+    isOnline,
+    lastSeenAt: lastSeenAt ? lastSeenAt.toISOString() : null,
+  });
+}
+
 io.use((socket, next) => {
   const authToken =
     (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
@@ -251,8 +277,48 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
+  const userId = Number((socket.data as any)?.user?.userId);
+  if (Number.isFinite(userId) && userId > 0) {
+    const nextCount = (userSocketCounts.get(userId) || 0) + 1;
+    userSocketCounts.set(userId, nextCount);
+    if (nextCount === 1) {
+      void markUserOnline(userId)
+        .catch((err) => {
+          console.warn('[presence] markUserOnline failed', err?.message || err);
+        })
+        .finally(() => {
+          emitPresenceChanged(userId, true, null);
+        });
+    }
+  }
+
   socket.on('join', (room: string) => { if (room) socket.join(room); });
   socket.on('leave', (room: string) => { if (room) socket.leave(room); });
+  socket.on('presence:subscribe', (payload: unknown) => {
+    const userIds = normalizePresenceUserIds(payload);
+    userIds.forEach((id) => socket.join(`presence:${id}`));
+  });
+  socket.on('presence:unsubscribe', (payload: unknown) => {
+    const userIds = normalizePresenceUserIds(payload);
+    userIds.forEach((id) => socket.leave(`presence:${id}`));
+  });
+
+  socket.on('disconnect', () => {
+    if (!Number.isFinite(userId) || userId <= 0) return;
+    const prevCount = userSocketCounts.get(userId) || 0;
+    const nextCount = Math.max(0, prevCount - 1);
+    if (nextCount > 0) {
+      userSocketCounts.set(userId, nextCount);
+      return;
+    }
+    userSocketCounts.delete(userId);
+    void markUserOffline(userId)
+      .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
+      .catch((err) => {
+        console.warn('[presence] markUserOffline failed', err?.message || err);
+        emitPresenceChanged(userId, false, new Date());
+      });
+  });
 });
 
 // ---- Start ----
