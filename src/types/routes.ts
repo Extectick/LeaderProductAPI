@@ -63,19 +63,78 @@ export type AuthLogoutResponse = SuccessResponse<{
   message: string;
 }> | ErrorResponse;
 
+export type TelegramState = 'AUTHORIZED' | 'NEED_PHONE' | 'NEED_LINK' | 'READY';
+
+export type TelegramConflictHint = {
+  maskedEmail: string | null;
+  maskedPhone: string | null;
+};
+
+export type TelegramInitRequest = {
+  initDataRaw: string;
+};
+
+export type TelegramInitResponse = SuccessResponse<{
+  tgSessionToken: string;
+  telegramUser: {
+    id: string;
+    username: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  state: TelegramState;
+  conflictUserHint?: TelegramConflictHint | null;
+}> | ErrorResponse;
+
+export type TelegramContactRequest = {
+  tgSessionToken: string;
+  phoneE164: string;
+};
+
+export type TelegramContactResponse = SuccessResponse<{
+  state: TelegramState;
+  conflictUserHint?: TelegramConflictHint | null;
+}> | ErrorResponse;
+
+export type TelegramSignInRequest = {
+  tgSessionToken: string;
+};
+
+export type TelegramSignInResponse = SuccessResponse<{
+  accessToken: string;
+  refreshToken: string;
+  profile: Profile;
+  message: string;
+}> | ErrorResponse;
+
+export type TelegramLinkRequest = {
+  tgSessionToken: string;
+};
+
+export type TelegramLinkResponse = SuccessResponse<{
+  profile: Profile;
+}> | ErrorResponse;
+
+export type AddCredentialsRequest = {
+  email: string;
+  password: string;
+};
+
+export type AddCredentialsResponse = SuccessResponse<null> | ErrorResponse;
+
 // User types
 export type UserGetAllResponse = SuccessResponse<Array<{
-  id: string;
-  email: string;
-  name: string;
-  role: string;
+    id: string;
+    email: string;
+    name: string;
+    role: string;
 }>> | ErrorResponse;
 
 export type UserGetByIdResponse = SuccessResponse<{
-  id: string;
-  email: string;
-  name: string;
-  role: string;
+    id: string;
+    email: string;
+    name: string;
+    role: string;
 }> | ErrorResponse;
 
 // Password reset types
@@ -229,10 +288,10 @@ export type QRGetAllResponse = SuccessResponse<{
     description: string | null;
     status: string;
     createdAt: Date;
-    createdBy?: {
-      id: number;
-      email: string;
-    };
+      createdBy?: {
+        id: number;
+        email: string | null;
+      };
   }>;
   meta: {
     total: number;
@@ -259,7 +318,7 @@ export type QRGetByIdResponse = SuccessResponse<{
   createdAt: Date;
   createdBy?: {
     id: number;
-    email: string;
+    email: string | null;
     firstName?: string | null;
     lastName?: string | null;
   };

@@ -814,7 +814,7 @@ router.post(
   ) => {
     try {
       const userId = req.user!.userId;
-      const { user: userData, phone, departmentId } = req.body;
+      const { user: userData, departmentId } = req.body;
 
       if (!userData?.firstName || !userData?.lastName || !departmentId) {
         return res.status(400).json(
@@ -836,10 +836,15 @@ router.post(
         );
       }
 
+      const baseUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { phone: true },
+      });
+
       await prisma.employeeProfile.create({
         data: {
           userId,
-          phone,
+          phone: baseUser?.phone ?? null,
           departmentId,
         }
       });
@@ -1640,6 +1645,16 @@ router.patch(
   ) => {
     try {
       const userId = req.user!.userId;
+      const currentUser = await prisma.user.findUnique({
+        where: { id: Number(userId) },
+        select: { authProvider: true, phone: true },
+      });
+      if (!currentUser) {
+        return res.status(404).json(
+          errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
       const data: Record<string, any> = {};
       let employeePhone: string | null | undefined = undefined;
       const normalize = (val: unknown) => (val === null ? null : String(val).trim());
@@ -1667,6 +1682,14 @@ router.patch(
       }
       if (req.body.phone !== undefined) {
         const value = normalize(req.body.phone);
+        if (currentUser.authProvider === 'TELEGRAM' && currentUser.phone) {
+          return res.status(409).json(
+            errorResponse(
+              'Для Telegram-пользователя телефон изменяется только через Telegram',
+              ErrorCodes.CONFLICT
+            )
+          );
+        }
         data.phone = value || null;
         employeePhone = value || null;
       }

@@ -48,7 +48,7 @@ export type QRGetAllResponse = SuccessResponse<{
     createdAt: Date;
     createdBy?: {
       id: number;
-      email: string;
+      email: string | null;
     };
   }>;
   meta: {
@@ -76,7 +76,7 @@ export type QRGetByIdResponse = SuccessResponse<{
   createdAt: Date;
   createdBy?: {
     id: number;
-    email: string;
+    email: string | null;
     firstName?: string | null;
     lastName?: string | null;
   };

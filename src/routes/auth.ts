@@ -4,9 +4,20 @@ import jwt, { VerifyErrors } from 'jsonwebtoken';
 import { User, Role, Permission } from '@prisma/client';
 import prisma from '../prisma/client';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
+import { rateLimit } from '../middleware/rateLimit';
 import { sendVerificationEmail } from '../services/mailService';
 import crypto, { randomUUID } from 'crypto';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
+import {
+  getTelegramContactPhone,
+  issueTelegramSessionToken,
+  maskEmail,
+  maskPhone,
+  normalizePhoneE164,
+  parseTelegramSessionToken,
+  setTelegramContactPhone,
+  verifyTelegramInitData,
+} from '../services/telegramAuthService';
 import {
   AuthRegisterRequest,
   AuthRegisterResponse,
@@ -45,6 +56,16 @@ const MAX_VERIFICATION_ATTEMPTS = 5;
 const RESEND_CODE_INTERVAL_MS = 25 * 1000; // 25 секунд
 const VERIFICATION_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+const TELEGRAM_RATE_LIMIT = rateLimit({ windowSec: 60, limit: 60 });
+
+type TelegramState = 'AUTHORIZED' | 'NEED_PHONE' | 'NEED_LINK' | 'READY';
+
+type TelegramResolveResult = {
+  state: TelegramState;
+  userId?: number;
+  conflictUserHint?: { maskedEmail: string | null; maskedPhone: string | null };
+};
 
 // Тип для User с ролью и правами
 type UserWithRolePermissions = User & {
@@ -60,12 +81,151 @@ type UserWithRolePermissions = User & {
   name?: string;
 };
 
+type TelegramSessionInfo = {
+  telegramId: string;
+  username: string | null;
+  firstName: string | null;
+  lastName: string | null;
+};
+
+function tgLog(stage: string, payload?: Record<string, any>) {
+  if (process.env.NODE_ENV === 'production') return;
+  if (payload) console.log('[tg-auth]', stage, payload);
+  else console.log('[tg-auth]', stage);
+}
+
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
 function isValidEmail(email: string) {
   return EMAIL_REGEX.test(email);
+}
+
+function toTelegramBigInt(telegramId: string) {
+  try {
+    return BigInt(String(telegramId));
+  } catch {
+    throw new Error('Invalid telegramId');
+  }
+}
+
+async function loadUserWithRolePermissions(userId: number): Promise<UserWithRolePermissions | null> {
+  return (await prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      role: { include: { permissions: { include: { permission: true } } } },
+      clientProfile: true,
+      supplierProfile: true,
+      employeeProfile: true,
+    },
+  })) as UserWithRolePermissions | null;
+}
+
+async function resolveTelegramUserState(
+  session: TelegramSessionInfo,
+  phoneE164?: string | null
+): Promise<TelegramResolveResult> {
+  const telegramId = toTelegramBigInt(session.telegramId);
+  const userByTelegram = await prisma.user.findFirst({
+    where: { telegramId },
+    select: { id: true, phone: true, telegramUsername: true },
+  });
+
+  if (userByTelegram) {
+    tgLog('linked_user_found', { userId: userByTelegram.id, telegramId: session.telegramId });
+    const updateData: Record<string, any> = {};
+    if (session.username !== userByTelegram.telegramUsername) {
+      updateData.telegramUsername = session.username;
+    }
+    if (Object.keys(updateData).length > 0) {
+      await prisma.user.update({ where: { id: userByTelegram.id }, data: updateData });
+    }
+
+    if (!userByTelegram.phone && phoneE164) {
+      const phoneOwner = await prisma.user.findFirst({
+        where: { phone: phoneE164 },
+        select: { id: true },
+      });
+      if (!phoneOwner || phoneOwner.id === userByTelegram.id) {
+        await prisma.user.update({
+          where: { id: userByTelegram.id },
+          data: { phone: phoneE164 },
+        });
+      } else {
+        tgLog('phone_conflict_ignored_for_linked_user', {
+          telegramUserId: userByTelegram.id,
+          phoneOwnerId: phoneOwner.id,
+        });
+      }
+    }
+
+    return { state: 'READY', userId: userByTelegram.id };
+  }
+
+  if (!phoneE164) {
+    tgLog('phone_missing', { telegramId: session.telegramId });
+    return { state: 'NEED_PHONE' };
+  }
+
+  const userByPhone = await prisma.user.findFirst({
+    where: { phone: phoneE164 },
+    select: { id: true, email: true, phone: true, telegramId: true },
+  });
+
+  if (userByPhone) {
+    tgLog('need_link_by_phone', { telegramId: session.telegramId, phoneOwnerId: userByPhone.id });
+    return {
+      state: 'NEED_LINK',
+      conflictUserHint: {
+        maskedEmail: maskEmail(userByPhone.email),
+        maskedPhone: maskPhone(userByPhone.phone),
+      },
+    };
+  }
+
+  const created = await prisma.user.create({
+    data: {
+      email: null,
+      passwordHash: null,
+      isActive: true,
+      role: { connect: { name: 'user' } },
+      firstName: session.firstName ?? undefined,
+      lastName: session.lastName ?? undefined,
+      phone: phoneE164,
+      telegramId,
+      telegramUsername: session.username,
+      telegramLinkedAt: new Date(),
+      authProvider: 'TELEGRAM',
+      profileStatus: 'ACTIVE',
+      currentProfileType: null,
+    },
+    select: { id: true },
+  });
+  tgLog('created_telegram_user', { userId: created.id, telegramId: session.telegramId });
+
+  return { state: 'READY', userId: created.id };
+}
+
+async function issueAuthTokensForUser(userId: number) {
+  const user = await loadUserWithRolePermissions(userId);
+  if (!user) {
+    throw new Error('Пользователь не найден');
+  }
+  const accessToken = generateAccessToken(user);
+  const refreshToken = await createUniqueRefreshToken(user.id);
+  const profile = await getProfile(user.id);
+  return { accessToken, refreshToken, profile };
+}
+
+function parseTelegramSession(tgSessionToken: string): TelegramSessionInfo {
+  const parsed = parseTelegramSessionToken(tgSessionToken);
+  return {
+    telegramId: String(parsed.telegramId),
+    username: parsed.username ?? null,
+    firstName: parsed.firstName ?? null,
+    lastName: parsed.lastName ?? null,
+  };
 }
 
 function generateAccessToken(user: UserWithRolePermissions) {
@@ -243,6 +403,11 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
     });
     if (existingUser) {
       if (!existingUser.isActive) {
+        if (!existingUser.email) {
+          return res.status(409).json(
+            errorResponse('Аккаунт зарегистрирован через Telegram. Войдите через Telegram.', ErrorCodes.CONFLICT)
+          );
+        }
         await sendVerificationCodeEmail(existingUser.id, existingUser.email);
         return res.status(200).json(
           successResponse(null, 
@@ -265,7 +430,7 @@ router.post('/register', async (req: express.Request<{}, {}, AuthRegisterRequest
       },
     });
 
-    await sendVerificationCodeEmail(user.id, user.email);
+    await sendVerificationCodeEmail(user.id, normalizedEmail);
 
     res.status(201).json(
       successResponse(null, 'Пользователь зарегистрирован. Пожалуйста, подтвердите email.')
@@ -347,6 +512,11 @@ router.post('/resend', async (req: express.Request, res: express.Response) => {
         errorResponse('Аккаунт уже активирован', ErrorCodes.VALIDATION_ERROR)
       );
     }
+    if (!user.email) {
+      return res.status(400).json(
+        errorResponse('Для Telegram-аккаунта email не задан', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
 
     await sendVerificationCodeEmail(user.id, normalizedEmail);
     return res.json(
@@ -361,6 +531,337 @@ router.post('/resend', async (req: express.Request, res: express.Response) => {
     console.error('Ошибка повторной отправки кода:', error);
     return res.status(500).json(
       errorResponse('Ошибка отправки кода подтверждения', ErrorCodes.INTERNAL_ERROR)
+    );
+  }
+});
+
+router.post('/telegram/init', TELEGRAM_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { initDataRaw } = req.body as { initDataRaw?: string };
+    if (!initDataRaw || typeof initDataRaw !== 'string') {
+      return res.status(400).json(
+        errorResponse('Требуется initDataRaw', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const telegramUser = verifyTelegramInitData(initDataRaw);
+    const tgSessionToken = issueTelegramSessionToken(telegramUser);
+    const phoneFromBot = await getTelegramContactPhone(telegramUser.id);
+    const resolved = await resolveTelegramUserState(
+      {
+        telegramId: telegramUser.id,
+        username: telegramUser.username,
+        firstName: telegramUser.firstName,
+        lastName: telegramUser.lastName,
+      },
+      phoneFromBot
+    );
+
+    return res.json(
+      successResponse({
+        tgSessionToken,
+        telegramUser: {
+          id: telegramUser.id,
+          username: telegramUser.username,
+          firstName: telegramUser.firstName,
+          lastName: telegramUser.lastName,
+        },
+        state: resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(
+        error?.message || 'Не удалось проверить Telegram initData',
+        ErrorCodes.UNAUTHORIZED
+      )
+    );
+  }
+});
+
+router.post('/telegram/contact', TELEGRAM_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { tgSessionToken, phoneE164 } = req.body as { tgSessionToken?: string; phoneE164?: string };
+    if (!tgSessionToken || !phoneE164) {
+      return res.status(400).json(
+        errorResponse('Требуются tgSessionToken и phoneE164', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseTelegramSession(tgSessionToken);
+    const normalizedPhone = normalizePhoneE164(phoneE164);
+    if (!normalizedPhone) {
+      return res.status(400).json(
+        errorResponse('Некорректный формат телефона', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    await setTelegramContactPhone(session.telegramId, normalizedPhone);
+    const resolved = await resolveTelegramUserState(session, normalizedPhone);
+
+    return res.json(
+      successResponse({
+        state: resolved.state === 'AUTHORIZED' ? 'NEED_PHONE' : resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось сохранить контакт', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.get('/telegram/contact-status', TELEGRAM_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const tgSessionToken = String((req.query?.tgSessionToken as string) || '').trim();
+    if (!tgSessionToken) {
+      return res.status(400).json(
+        errorResponse('Требуется tgSessionToken', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseTelegramSession(tgSessionToken);
+    const phoneFromBot = await getTelegramContactPhone(session.telegramId);
+    const resolved = await resolveTelegramUserState(session, phoneFromBot);
+
+    return res.json(
+      successResponse({
+        state: resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось проверить статус контакта', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.post('/telegram/sign-in', TELEGRAM_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { tgSessionToken } = req.body as { tgSessionToken?: string };
+    if (!tgSessionToken) {
+      return res.status(400).json(
+        errorResponse('Требуется tgSessionToken', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseTelegramSession(tgSessionToken);
+    const telegramId = toTelegramBigInt(session.telegramId);
+    const linkedUser = await prisma.user.findFirst({
+      where: { telegramId },
+      select: { id: true, profileStatus: true, telegramUsername: true },
+    });
+
+    if (!linkedUser) {
+      return res.status(404).json(
+        errorResponse('Telegram аккаунт не привязан', ErrorCodes.NOT_FOUND)
+      );
+    }
+
+    if (linkedUser.profileStatus === 'BLOCKED') {
+      return res.status(403).json(
+        errorResponse('Ваш аккаунт заблокирован. Обратитесь в поддержку.', ErrorCodes.FORBIDDEN)
+      );
+    }
+
+    if (session.username !== linkedUser.telegramUsername) {
+      await prisma.user.update({
+        where: { id: linkedUser.id },
+        data: { telegramUsername: session.username },
+      });
+    }
+
+    const authPayload = await issueAuthTokensForUser(linkedUser.id);
+    return res.json(successResponse({ ...authPayload, message: 'Вход через Telegram успешен' }));
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось выполнить вход через Telegram', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.post(
+  '/telegram/link',
+  TELEGRAM_RATE_LIMIT,
+  authenticateToken,
+  async (req: AuthRequest<{}, {}, { tgSessionToken?: string }>, res: express.Response) => {
+    try {
+      const userId = req.user?.userId;
+      const tgSessionToken = String(req.body?.tgSessionToken || '').trim();
+      if (!userId) {
+        return res.status(401).json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+      if (!tgSessionToken) {
+        return res.status(400).json(
+          errorResponse('Требуется tgSessionToken', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const session = parseTelegramSession(tgSessionToken);
+      const telegramId = toTelegramBigInt(session.telegramId);
+
+      const owner = await prisma.user.findFirst({
+        where: { telegramId },
+        select: { id: true },
+      });
+      if (owner && owner.id !== Number(userId)) {
+        return res.status(409).json(
+          errorResponse('Этот Telegram аккаунт уже привязан к другому пользователю', ErrorCodes.CONFLICT)
+        );
+      }
+
+      const current = await prisma.user.findUnique({
+        where: { id: Number(userId) },
+        select: { authProvider: true },
+      });
+      if (!current) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const nextProvider = current.authProvider === 'LOCAL' ? 'HYBRID' : current.authProvider === 'TELEGRAM' ? 'HYBRID' : current.authProvider;
+
+      await prisma.user.update({
+        where: { id: Number(userId) },
+        data: {
+          telegramId,
+          telegramUsername: session.username,
+          telegramLinkedAt: new Date(),
+          authProvider: nextProvider,
+        },
+      });
+
+      const profile = await getProfile(Number(userId));
+      return res.json(successResponse({ profile }, 'Telegram аккаунт успешно привязан'));
+    } catch (error: any) {
+      return res.status(401).json(
+        errorResponse(error?.message || 'Не удалось привязать Telegram аккаунт', ErrorCodes.UNAUTHORIZED)
+      );
+    }
+  }
+);
+
+router.post(
+  '/credentials',
+  TELEGRAM_RATE_LIMIT,
+  authenticateToken,
+  async (
+    req: AuthRequest<{}, {}, { email?: string; password?: string }>,
+    res: express.Response
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res.status(401).json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const { email, password } = req.body || {};
+      if (!email || !password) {
+        return res.status(400).json(
+          errorResponse('Требуются email и пароль', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const normalizedEmail = normalizeEmail(email);
+      if (!isValidEmail(normalizedEmail)) {
+        return res.status(400).json(
+          errorResponse('Неверный формат email', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+      if (password.length < 6) {
+        return res.status(400).json(
+          errorResponse('Пароль должен быть не менее 6 символов', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const me = await prisma.user.findUnique({
+        where: { id: Number(userId) },
+        select: { id: true, email: true, telegramId: true, authProvider: true },
+      });
+      if (!me) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      if (me.email && normalizeEmail(me.email) !== normalizedEmail) {
+        return res.status(409).json(
+          errorResponse('Email уже задан. Измените его в профиле.', ErrorCodes.CONFLICT)
+        );
+      }
+
+      const conflict = await prisma.user.findFirst({
+        where: {
+          email: { equals: normalizedEmail, mode: 'insensitive' },
+          id: { not: Number(userId) },
+        },
+        select: { id: true },
+      });
+      if (conflict) {
+        return res.status(409).json(
+          errorResponse('Этот email уже используется', ErrorCodes.CONFLICT)
+        );
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+      const nextProvider = me.telegramId ? 'HYBRID' : me.authProvider;
+
+      await prisma.user.update({
+        where: { id: Number(userId) },
+        data: {
+          email: normalizedEmail,
+          passwordHash,
+          authProvider: nextProvider,
+          isActive: false,
+        },
+      });
+
+      await sendVerificationCodeEmail(Number(userId), normalizedEmail);
+      return res.json(
+        successResponse(
+          null,
+          'Учётные данные добавлены. Подтвердите email, чтобы включить вход по паролю.'
+        )
+      );
+    } catch (error: any) {
+      return res.status(500).json(
+        errorResponse(
+          error?.message || 'Не удалось добавить email и пароль',
+          ErrorCodes.INTERNAL_ERROR
+        )
+      );
+    }
+  }
+);
+
+router.post('/telegram/webhook', async (req: express.Request, res: express.Response) => {
+  try {
+    if (TG_WEBHOOK_SECRET) {
+      const header = String(req.headers['x-telegram-bot-api-secret-token'] || '');
+      if (!header || header !== TG_WEBHOOK_SECRET) {
+        return res.status(403).json(errorResponse('Forbidden', ErrorCodes.FORBIDDEN));
+      }
+    }
+
+    const update = req.body || {};
+    const message = update.message || update.edited_message || null;
+    const fromIdRaw = message?.from?.id ?? message?.contact?.user_id ?? null;
+    const phoneRaw = message?.contact?.phone_number ?? null;
+
+    if (!fromIdRaw || !phoneRaw) {
+      return res.json(successResponse({ ok: true }));
+    }
+
+    const normalized = normalizePhoneE164(String(phoneRaw));
+    if (!normalized) {
+      return res.json(successResponse({ ok: true }));
+    }
+
+    await setTelegramContactPhone(String(fromIdRaw), normalized);
+    return res.json(successResponse({ ok: true }));
+  } catch (error: any) {
+    return res.status(500).json(
+      errorResponse(error?.message || 'Webhook processing failed', ErrorCodes.INTERNAL_ERROR)
     );
   }
 });
@@ -453,6 +954,12 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
     if (!user.isActive || user.profileStatus === 'PENDING') {
       return res.status(403).json(
         errorResponse('Аккаунт не активирован. Пожалуйста, подтвердите email.', ErrorCodes.FORBIDDEN)
+      );
+    }
+
+    if (!user.passwordHash) {
+      return res.status(401).json(
+        errorResponse('Для этого аккаунта вход по паролю не настроен', ErrorCodes.UNAUTHORIZED)
       );
     }
 

@@ -161,11 +161,14 @@ export const getProfile = async (userId: number): Promise<Profile> => {
 
   const profile: Profile = {
       id: user.id,
-      email: user.email,
+      email: user.email ?? null,
       firstName: user.firstName,
       lastName: user.lastName,
       middleName: user.middleName,
       phone: user.phone,
+      telegramId: user.telegramId ? user.telegramId.toString() : null,
+      telegramUsername: user.telegramUsername ?? null,
+      authProvider: user.authProvider,
       avatarUrl: activeAvatarUrl,
       lastSeenAt,
       isOnline,

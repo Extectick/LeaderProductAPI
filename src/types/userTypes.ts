@@ -1,12 +1,15 @@
-import { ProfileStatus, ProfileType } from "@prisma/client";
+import { AuthProvider, ProfileStatus, ProfileType } from "@prisma/client";
 
 export type Profile = {
     id: number;
-    email: string;
+    email: string | null;
     firstName: string | null;
     lastName: string | null;
     middleName: string | null;
     phone: string | null;
+    telegramId?: string | null;
+    telegramUsername?: string | null;
+    authProvider?: AuthProvider;
     avatarUrl: string | null;
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;

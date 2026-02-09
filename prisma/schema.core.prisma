@@ -191,17 +191,27 @@ enum ProfileType {
   EMPLOYEE
 }
 
+enum AuthProvider {
+  LOCAL
+  TELEGRAM
+  HYBRID
+}
+
 model User {
   id                 Int                 @id @default(autoincrement())
-  email              String              @unique
-  passwordHash       String
+  email              String?             @unique
+  passwordHash       String?
   isActive           Boolean             @default(false)
   roleId             Int 
   firstName          String?             // Имя
   lastName           String?             // Фамилия
   middleName         String?             // Отчество
-  phone              String?             // Телефон пользователя
+  phone              String?             @unique // Телефон пользователя
   avatarUrl          String?             // (устар.) Ссылка на аватар пользователя
+  telegramId         BigInt?             @unique
+  telegramUsername   String?
+  telegramLinkedAt   DateTime?
+  authProvider       AuthProvider        @default(LOCAL)
   deletedAt          DateTime?           // Для soft delete
   currentProfileType ProfileType?        // Текущий активный профиль
   emailVerifications EmailVerification[]
