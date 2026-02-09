@@ -79,13 +79,54 @@ export function attachmentTypeByMime(mime?: string): AttachmentType {
 }
 
 function safeFilename(original?: string) {
-  const base = (original || "file").replace(/[^\w.\- ]+/g, "_");
-  return base.length > 150 ? base.slice(0, 150) : base;
+  const base = (original || "file").normalize("NFC");
+  const cleaned = base.replace(/[^\p{L}\p{N}.\- _]+/gu, "_");
+  const collapsed = cleaned.replace(/\s+/g, " ").trim();
+  const trimmed = collapsed.length > 150 ? collapsed.slice(0, 150) : collapsed;
+  return trimmed || "file";
+}
+
+function decodeLatin1ToUtf8(input: string) {
+  return Buffer.from(input, "latin1").toString("utf8");
+}
+
+function looksMojibake(name: string) {
+  const hasCyrillic = /[\u0400-\u04FF]/.test(name);
+  const hasReplacement = name.includes("�");
+  const hasMojibakeChars = /[ÃÂÐÑ]/.test(name);
+  return !hasCyrillic && (hasReplacement || hasMojibakeChars);
+}
+
+function normalizeOriginalName(original?: string) {
+  const raw = (original || "file").normalize("NFC");
+  if (!looksMojibake(raw)) return raw;
+  const decoded = decodeLatin1ToUtf8(raw);
+  if (/[\u0400-\u04FF]/.test(decoded)) return decoded;
+  return raw;
+}
+
+function safeAsciiFilename(original?: string) {
+  const base = (original || "file").normalize("NFC");
+  const ascii = base
+    .replace(/[^\x20-\x7E]+/g, "_")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/[;]+/g, "_");
+  const collapsed = ascii.replace(/\s+/g, " ").trim();
+  const trimmed = collapsed.length > 150 ? collapsed.slice(0, 150) : collapsed;
+  return trimmed || "file";
+}
+
+function buildContentDisposition(original?: string) {
+  const unicodeName = safeFilename(original);
+  const asciiFallback = safeAsciiFilename(unicodeName);
+  const encoded = encodeURIComponent(unicodeName);
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
 }
 
 export function buildObjectKey(originalName?: string, keyPrefix = S3_KEY_PREFIX) {
-  const ext = path.extname(originalName || "");
-  const name = safeFilename(originalName);
+  const normalized = normalizeOriginalName(originalName);
+  const ext = path.extname(normalized || "");
+  const name = safeFilename(normalized);
   const hash = crypto.randomBytes(4).toString("hex");
   const key = `${keyPrefix}/${Date.now()}_${hash}${ext || ""}`;
   return { key, fileName: name, ext };
@@ -179,9 +220,7 @@ export async function uploadBuffer(
   asAttachment = false,
   originalName?: string
 ) {
-  const contentDisposition = asAttachment
-    ? `attachment; filename="${safeFilename(originalName)}"`
-    : undefined;
+  const contentDisposition = asAttachment ? buildContentDisposition(originalName) : undefined;
 
   await s3.send(
     new PutObjectCommand({
@@ -222,8 +261,9 @@ export async function uploadMulterFile(
   asAttachment = false,
   keyPrefix = S3_KEY_PREFIX
 ) {
-  const ext = path.extname(file.originalname || "");
-  const name = safeFilename(file.originalname);
+  const normalized = normalizeOriginalName(file.originalname);
+  const ext = path.extname(normalized || "");
+  const name = safeFilename(normalized);
   const hash = crypto.createHash("sha1").update(file.buffer).digest("hex").slice(0, 8);
   const key = `${keyPrefix}/${Date.now()}_${hash}${ext || ""}`;
 
@@ -232,7 +272,7 @@ export async function uploadMulterFile(
     file.buffer,
     file.mimetype || "application/octet-stream",
     asAttachment,
-    name
+    normalized
   );
 
   return {

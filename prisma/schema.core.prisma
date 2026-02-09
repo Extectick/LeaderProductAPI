@@ -37,6 +37,11 @@ enum AttachmentType {
   FILE
 }
 
+enum AppealMessageType {
+  USER
+  SYSTEM
+}
+
 enum RouteStatus {
   ACTIVE
   COMPLETED
@@ -544,6 +549,8 @@ model AppealMessage {
   appealId  Int
   senderId  Int
   text      String?
+  type      AppealMessageType @default(USER)
+  systemEvent Json?
   editedAt  DateTime?
   deleted   Boolean  @default(false)
   createdAt DateTime @default(now())

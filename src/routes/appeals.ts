@@ -8,6 +8,7 @@ import {
   AppealStatus,
   AppealPriority,
   AttachmentType,
+  AppealMessageType,
 } from '@prisma/client';
 import prisma from '../prisma/client';
 import { z } from 'zod';
@@ -35,6 +36,8 @@ import {
   AppealWatchersUpdateResponse,
   AppealDeleteMessageResponse,
   AppealEditMessageResponse,
+  AppealClaimResponse,
+  AppealDepartmentChangeResponse,
 } from '../types/appealTypes';
 
 import { Server as SocketIOServer } from 'socket.io';
@@ -48,6 +51,7 @@ import {
   MessageIdParamSchema,
   AssignBodySchema,
   StatusBodySchema,
+  ChangeDepartmentBodySchema,
   AddMessageBodySchema,
   WatchersBodySchema,
   EditMessageBodySchema,
@@ -64,15 +68,87 @@ type HasAppealAttachment = {
   appealAttachment: Prisma.AppealAttachmentDelegate<any>;
 };
 
+const userMiniSelect = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  avatarUrl: true,
+  currentProfileType: true,
+  role: { select: { id: true, name: true } },
+  departmentRoles: {
+    select: {
+      departmentId: true,
+      role: { select: { name: true } },
+    },
+  },
+  employeeProfile: {
+    select: {
+      avatarUrl: true,
+      department: { select: { id: true, name: true } },
+    },
+  },
+  clientProfile: { select: { avatarUrl: true } },
+  supplierProfile: { select: { avatarUrl: true } },
+} as const;
+
+type UserMiniRaw = Prisma.UserGetPayload<{ select: typeof userMiniSelect }>;
+
 type MessageWithRelations = Prisma.AppealMessageGetPayload<{
   include: {
     attachments: true;
     reads: { select: { userId: true; readAt: true } };
-    sender: {
-      select: { id: true; email: true; firstName: true; lastName: true };
-    };
+    sender: { select: typeof userMiniSelect };
   };
 }>;
+
+const STATUS_LABELS: Record<AppealStatus, string> = {
+  OPEN: 'Открыто',
+  IN_PROGRESS: 'В работе',
+  RESOLVED: 'Ожидание подтверждения',
+  COMPLETED: 'Завершено',
+  DECLINED: 'Отклонено',
+};
+
+function getUserDisplayName(user: UserMiniRaw | null) {
+  if (!user) return 'Пользователь';
+  const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  return name || user.email || 'Пользователь';
+}
+
+function isAdminRole(user: UserMiniRaw | null) {
+  return user?.role?.name === 'admin';
+}
+
+function isDepartmentManager(user: UserMiniRaw | null, departmentId?: number | null) {
+  if (!user || !departmentId) return false;
+  return (user.departmentRoles || []).some(
+    (dr) => dr.departmentId === departmentId && dr.role?.name === 'department_manager'
+  );
+}
+
+async function mapUserMini(user: UserMiniRaw | null) {
+  if (!user) return null;
+  const avatarKey =
+    user.employeeProfile?.avatarUrl ??
+    user.clientProfile?.avatarUrl ??
+    user.supplierProfile?.avatarUrl ??
+    user.avatarUrl ??
+    null;
+  const avatarUrl = await resolveObjectUrl(avatarKey ?? null);
+  return {
+    id: user.id,
+    email: user.email,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    avatarUrl,
+    department: user.employeeProfile?.department ?? null,
+    isAdmin: isAdminRole(user),
+    isDepartmentManager: (user.departmentRoles || []).some(
+      (dr) => dr.role?.name === 'department_manager'
+    ),
+  };
+}
 
 const router = express.Router();
 
@@ -148,14 +224,62 @@ async function mapMessageWithReads(
     appealId: message.appealId,
     senderId: message.senderId,
     text: message.text,
+    type: message.type ?? AppealMessageType.USER,
+    systemEvent: message.systemEvent ?? null,
     editedAt: message.editedAt,
     deleted: message.deleted,
     createdAt: message.createdAt,
     attachments: await mapAttachments(message.attachments),
-    sender: message.sender,
+    sender: await mapUserMini(message.sender),
     readBy,
     isRead: isOwn || readBy.some((r) => r.userId === currentUserId),
   };
+}
+
+async function loadUserMini(userId: number) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    select: userMiniSelect,
+  });
+}
+
+async function createSystemMessage(opts: {
+  appealId: number;
+  actorId: number;
+  text: string;
+  systemEvent: Record<string, any>;
+  io: SocketIOServer;
+  toDepartmentId?: number | null;
+  recipients?: number[];
+}) {
+  const message = await prisma.appealMessage.create({
+    data: {
+      appealId: opts.appealId,
+      senderId: opts.actorId,
+      text: opts.text,
+      type: AppealMessageType.SYSTEM,
+      systemEvent: opts.systemEvent,
+    },
+  });
+
+  const fullMessage = await prisma.appealMessage.findUnique({
+    where: { id: message.id },
+    include: {
+      sender: { select: userMiniSelect },
+      attachments: true,
+      reads: { select: { userId: true, readAt: true } },
+    },
+  });
+  if (!fullMessage) return null;
+
+  const mapped = await mapMessageWithReads(fullMessage as MessageWithRelations, opts.actorId);
+  opts.io.to(`appeal:${opts.appealId}`).emit('messageAdded', mapped);
+  if (opts.toDepartmentId) {
+    opts.io.to(`department:${opts.toDepartmentId}`).emit('messageAdded', mapped);
+  }
+  const recipients = Array.from(new Set(opts.recipients || []));
+  recipients.forEach((uid) => opts.io.to(`user:${uid}`).emit('messageAdded', mapped));
+  return mapped;
 }
 
 /** Заглушка для пушей: сохраняем точку расширения */
@@ -374,7 +498,7 @@ router.get(
             toDepartment: true,
             assignees: {
               include: {
-                user: { select: { id: true, email: true, firstName: true, lastName: true } },
+                user: { select: userMiniSelect },
               },
             },
             messages: {
@@ -384,7 +508,7 @@ router.get(
                 attachments: true,
                 reads: { select: { userId: true, readAt: true } },
                 sender: {
-                  select: { id: true, email: true, firstName: true, lastName: true },
+                  select: userMiniSelect,
                 },
               },
             },
@@ -413,8 +537,14 @@ router.get(
             const lastMessage = messages?.[0]
               ? await mapMessageWithReads(messages[0] as MessageWithRelations, userId)
               : null;
+            const assignees = await Promise.all(
+              (a.assignees || []).map(async (as: any) => ({
+                user: await mapUserMini(as.user as UserMiniRaw),
+              }))
+            );
             return {
               ...rest,
+              assignees,
               lastMessage,
               unreadCount: _count?.messages ?? 0,
             };
@@ -464,14 +594,14 @@ router.get(
         include: {
           fromDepartment: true,
           toDepartment: true,
-          createdBy: true,
-          assignees: { include: { user: true } },
-          watchers: { include: { user: true } },
-          statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: true } },
+          createdBy: { select: userMiniSelect },
+          assignees: { include: { user: { select: userMiniSelect } } },
+          watchers: { include: { user: { select: userMiniSelect } } },
+          statusHistory: { orderBy: { changedAt: 'desc' }, include: { changedBy: { select: userMiniSelect } } },
           messages: {
             orderBy: { createdAt: 'asc' },
             include: {
-              sender: { select: { id: true, email: true, firstName: true, lastName: true } },
+              sender: { select: userMiniSelect },
               attachments: true,
               reads: { select: { userId: true, readAt: true } },
             },
@@ -498,6 +628,23 @@ router.get(
 
       const mappedAppeal = {
         ...appeal,
+        createdBy: await mapUserMini(appeal.createdBy as UserMiniRaw),
+        assignees: await Promise.all(
+          (appeal.assignees || []).map(async (as: any) => ({
+            user: await mapUserMini(as.user as UserMiniRaw),
+          }))
+        ),
+        watchers: await Promise.all(
+          (appeal.watchers || []).map(async (w: any) => ({
+            user: await mapUserMini(w.user as UserMiniRaw),
+          }))
+        ),
+        statusHistory: await Promise.all(
+          (appeal.statusHistory || []).map(async (h: any) => ({
+            ...h,
+            changedBy: await mapUserMini(h.changedBy as UserMiniRaw),
+          }))
+        ),
         messages: await Promise.all(
           appeal.messages.map((m) =>
             mapMessageWithReads(m as MessageWithRelations, userId)
@@ -563,36 +710,113 @@ router.put(
           .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      await prisma.appealAssignee.deleteMany({ where: { appealId } });
-      for (const uid of assigneeIds) {
-        await prisma.appealAssignee.create({ data: { appealId, userId: uid } });
+      const actor = await loadUserMini(req.user!.userId);
+      if (!actor) {
+        return res
+          .status(404)
+          .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
       }
 
-      const updatedAppeal = await prisma.appeal.update({
-        where: { id: appealId },
-        data: { status: AppealStatus.IN_PROGRESS },
-      });
+      const canAssign = isAdminRole(actor) || isDepartmentManager(actor, appeal.toDepartmentId);
+      if (!canAssign) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет прав на назначение исполнителей', ErrorCodes.FORBIDDEN));
+      }
 
-      await prisma.appealStatusHistory.create({
-        data: {
-          appealId,
-          oldStatus: appeal.status,
-          newStatus: AppealStatus.IN_PROGRESS,
-          changedById: req.user!.userId,
-        },
+      const prevAssignees = (appeal.assignees || []).map((a) => a.userId);
+      const nextAssignees = Array.from(new Set(assigneeIds || []));
+      const prevSet = new Set(prevAssignees);
+      const nextSet = new Set(nextAssignees);
+      const added = nextAssignees.filter((id) => !prevSet.has(id));
+      const removed = prevAssignees.filter((id) => !nextSet.has(id));
+
+      const nextStatus =
+        nextAssignees.length > 0
+          ? AppealStatus.IN_PROGRESS
+          : appeal.status === AppealStatus.IN_PROGRESS
+          ? AppealStatus.OPEN
+          : appeal.status;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.appealAssignee.deleteMany({ where: { appealId } });
+        if (nextAssignees.length) {
+          await tx.appealAssignee.createMany({
+            data: nextAssignees.map((uid) => ({ appealId, userId: uid })),
+            skipDuplicates: true,
+          });
+        }
+        if (nextStatus !== appeal.status) {
+          await tx.appeal.update({
+            where: { id: appealId },
+            data: { status: nextStatus },
+          });
+          await tx.appealStatusHistory.create({
+            data: {
+              appealId,
+              oldStatus: appeal.status,
+              newStatus: nextStatus,
+              changedById: req.user!.userId,
+            },
+          });
+        }
       });
 
       const io = req.app.get('io') as SocketIOServer;
-      for (const uid of assigneeIds) {
+      const watcherIds = (appeal.watchers || []).map((w) => w.userId);
+      const affectedUserIds = Array.from(
+        new Set([appeal.createdById, ...prevAssignees, ...nextAssignees, ...watcherIds])
+      );
+
+      if (added.length || removed.length) {
+        const users = await prisma.user.findMany({
+          where: { id: { in: Array.from(new Set([...added, ...removed])) } },
+          select: userMiniSelect,
+        });
+        const nameById = new Map(users.map((u) => [u.id, getUserDisplayName(u)]));
+        const addedNames = added.map((id) => nameById.get(id)).filter(Boolean).join(', ');
+        const removedNames = removed.map((id) => nameById.get(id)).filter(Boolean).join(', ');
+        const parts = [];
+        if (addedNames) parts.push(`Добавлены: ${addedNames}`);
+        if (removedNames) parts.push(`Удалены: ${removedNames}`);
+        const text = parts.length ? `Исполнители обновлены. ${parts.join('. ')}.` : 'Исполнители обновлены.';
+        await createSystemMessage({
+          appealId,
+          actorId: req.user!.userId,
+          text,
+          systemEvent: { type: 'assignees_changed', added, removed },
+          io,
+          toDepartmentId: appeal.toDepartmentId,
+          recipients: affectedUserIds,
+        });
+      }
+
+      if (nextStatus !== appeal.status) {
+        await createSystemMessage({
+          appealId,
+          actorId: req.user!.userId,
+          text: `Статус изменён: ${STATUS_LABELS[appeal.status]} → ${STATUS_LABELS[nextStatus]}.`,
+          systemEvent: { type: 'status_changed', from: appeal.status, to: nextStatus },
+          io,
+          toDepartmentId: appeal.toDepartmentId,
+          recipients: affectedUserIds,
+        });
+        io.to(`appeal:${appealId}`).emit('statusUpdated', { appealId, status: nextStatus });
+      }
+
+      for (const uid of added) {
         io.to(`user:${uid}`).emit('appealAssigned', { appealId, userId: uid });
       }
-      io.to(`appeal:${appealId}`).emit('statusUpdated', {
+      io.to(`appeal:${appealId}`).emit('assigneesUpdated', {
         appealId,
-        status: AppealStatus.IN_PROGRESS,
+        assigneeIds: nextAssignees,
       });
 
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
       return res.json(
-        successResponse({ id: appealId, status: updatedAppeal.status }, 'Исполнители назначены')
+        successResponse({ id: appealId, status: nextStatus }, 'Исполнители назначены')
       );
     } catch (error) {
       console.error('Ошибка назначения исполнителей:', error);
@@ -605,19 +829,334 @@ router.put(
 
 /**
  * @openapi
+ * /appeals/{id}/claim:
+ *   post:
+ *     tags: [Appeals]
+ *     summary: Взять обращение в работу
+ *     security: [ { bearerAuth: [] } ]
+ *     x-permissions: ["view_appeal"]
+ */
+router.post(
+  '/:id/claim',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeal']),
+  async (
+    req: AuthRequest<{ id: string }, AppealClaimResponse>,
+    res: express.Response
+  ) => {
+    try {
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const { id: appealId } = p.data;
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          assignees: { select: { userId: true } },
+          watchers: { select: { userId: true } },
+        },
+      });
+      if (!appeal) {
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+      }
+
+      const userId = req.user!.userId;
+      const employee = await prisma.employeeProfile.findUnique({ where: { userId } });
+      if (!employee?.departmentId || employee.departmentId !== appeal.toDepartmentId) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет доступа к этому отделу', ErrorCodes.FORBIDDEN));
+      }
+
+      const prevAssignees = (appeal.assignees || []).map((a) => a.userId);
+      const alreadyAssigned = prevAssignees.includes(userId);
+      const nextAssignees = alreadyAssigned ? prevAssignees : [...prevAssignees, userId];
+
+      const shouldChangeStatus = appeal.status !== AppealStatus.IN_PROGRESS;
+
+      await prisma.$transaction(async (tx) => {
+        if (!alreadyAssigned) {
+          await tx.appealAssignee.create({
+            data: { appealId, userId },
+          });
+        }
+        if (shouldChangeStatus) {
+          await tx.appeal.update({
+            where: { id: appealId },
+            data: { status: AppealStatus.IN_PROGRESS },
+          });
+          await tx.appealStatusHistory.create({
+            data: {
+              appealId,
+              oldStatus: appeal.status,
+              newStatus: AppealStatus.IN_PROGRESS,
+              changedById: userId,
+            },
+          });
+        }
+      });
+
+      const io = req.app.get('io') as SocketIOServer;
+      const recipients = Array.from(
+        new Set([appeal.createdById, ...nextAssignees, ...appeal.watchers.map((w) => w.userId)])
+      );
+
+      if (!alreadyAssigned) {
+        await createSystemMessage({
+          appealId,
+          actorId: userId,
+          text: `Исполнитель взял обращение в работу: ${getUserDisplayName(await loadUserMini(userId))}.`,
+          systemEvent: { type: 'assignees_changed', added: [userId], removed: [] },
+          io,
+          toDepartmentId: appeal.toDepartmentId,
+          recipients,
+        });
+        io.to(`user:${userId}`).emit('appealAssigned', { appealId, userId });
+        io.to(`appeal:${appealId}`).emit('assigneesUpdated', { appealId, assigneeIds: nextAssignees });
+      }
+
+      if (shouldChangeStatus) {
+        await createSystemMessage({
+          appealId,
+          actorId: userId,
+          text: `Статус изменён: ${STATUS_LABELS[appeal.status]} → ${STATUS_LABELS[AppealStatus.IN_PROGRESS]}.`,
+          systemEvent: { type: 'status_changed', from: appeal.status, to: AppealStatus.IN_PROGRESS },
+          io,
+          toDepartmentId: appeal.toDepartmentId,
+          recipients,
+        });
+        io.to(`appeal:${appealId}`).emit('statusUpdated', {
+          appealId,
+          status: AppealStatus.IN_PROGRESS,
+        });
+      }
+
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
+      return res.json(
+        successResponse(
+          { id: appealId, status: AppealStatus.IN_PROGRESS, assigneeIds: nextAssignees },
+          'Обращение взято в работу'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка self-assign:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка назначения исполнителя', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+/**
+ * @openapi
+ * /appeals/{id}/department:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Перевести обращение в другой отдел
+ *     security: [ { bearerAuth: [] } ]
+ *     x-permissions: ["assign_appeal"]
+ */
+router.put(
+  '/:id/department',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['assign_appeal']),
+  async (
+    req: AuthRequest<{ id: string }, AppealDepartmentChangeResponse, unknown>,
+    res: express.Response
+  ) => {
+    try {
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const b = ChangeDepartmentBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const { id: appealId } = p.data;
+      const { departmentId } = b.data as { departmentId: number };
+
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          assignees: { select: { userId: true } },
+          watchers: { select: { userId: true } },
+          toDepartment: true,
+        },
+      });
+      if (!appeal) {
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+      }
+
+      const actor = await loadUserMini(req.user!.userId);
+      if (!actor) {
+        return res
+          .status(404)
+          .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const canMove = isAdminRole(actor) || isDepartmentManager(actor, appeal.toDepartmentId);
+      if (!canMove) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет прав на перевод отдела', ErrorCodes.FORBIDDEN));
+      }
+
+      if (appeal.toDepartmentId === departmentId) {
+        return res.json(
+          successResponse(
+            { id: appealId, status: appeal.status, toDepartmentId: appeal.toDepartmentId },
+            'Отдел не изменён'
+          )
+        );
+      }
+
+      const targetDept = await prisma.department.findUnique({ where: { id: departmentId } });
+      if (!targetDept) {
+        return res
+          .status(404)
+          .json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const prevAssignees = (appeal.assignees || []).map((a) => a.userId);
+      const prevStatus = appeal.status;
+      const nextStatus = AppealStatus.OPEN;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.appealAssignee.deleteMany({ where: { appealId } });
+        await tx.appeal.update({
+          where: { id: appealId },
+          data: { toDepartmentId: departmentId, status: nextStatus },
+        });
+        if (prevStatus !== nextStatus) {
+          await tx.appealStatusHistory.create({
+            data: {
+              appealId,
+              oldStatus: prevStatus,
+              newStatus: nextStatus,
+              changedById: req.user!.userId,
+            },
+          });
+        }
+      });
+
+      const io = req.app.get('io') as SocketIOServer;
+      const recipients = Array.from(
+        new Set([appeal.createdById, ...prevAssignees, ...appeal.watchers.map((w) => w.userId)])
+      );
+
+      const deptChangeMessage = await createSystemMessage({
+        appealId,
+        actorId: req.user!.userId,
+        text: `Отдел изменён: ${appeal.toDepartment?.name ?? `#${appeal.toDepartmentId}`} → ${targetDept.name}.`,
+        systemEvent: {
+          type: 'department_changed',
+          fromDepartmentId: appeal.toDepartmentId,
+          toDepartmentId: departmentId,
+        },
+        io,
+        toDepartmentId: departmentId,
+        recipients,
+      });
+
+      if (deptChangeMessage) {
+        io.to(`department:${appeal.toDepartmentId}`).emit('messageAdded', deptChangeMessage);
+      }
+
+      if (prevAssignees.length) {
+        await createSystemMessage({
+          appealId,
+          actorId: req.user!.userId,
+          text: 'Исполнители сняты из-за смены отдела.',
+          systemEvent: { type: 'assignees_changed', added: [], removed: prevAssignees },
+          io,
+          toDepartmentId: departmentId,
+          recipients,
+        });
+      }
+
+      if (prevStatus !== nextStatus) {
+        await createSystemMessage({
+          appealId,
+          actorId: req.user!.userId,
+          text: `Статус изменён: ${STATUS_LABELS[prevStatus]} → ${STATUS_LABELS[nextStatus]}.`,
+          systemEvent: { type: 'status_changed', from: prevStatus, to: nextStatus },
+          io,
+          toDepartmentId: departmentId,
+          recipients,
+        });
+        io.to(`appeal:${appealId}`).emit('statusUpdated', { appealId, status: nextStatus });
+      }
+
+      io.to(`appeal:${appealId}`).emit('assigneesUpdated', { appealId, assigneeIds: [] });
+      io.to(`appeal:${appealId}`).emit('departmentChanged', {
+        appealId,
+        fromDepartmentId: appeal.toDepartmentId,
+        toDepartmentId: departmentId,
+      });
+      io.to(`department:${appeal.toDepartmentId}`).emit('departmentChanged', {
+        appealId,
+        fromDepartmentId: appeal.toDepartmentId,
+        toDepartmentId: departmentId,
+      });
+      io.to(`department:${departmentId}`).emit('departmentChanged', {
+        appealId,
+        fromDepartmentId: appeal.toDepartmentId,
+        toDepartmentId: departmentId,
+      });
+
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
+      return res.json(
+        successResponse(
+          { id: appealId, status: nextStatus, toDepartmentId: departmentId },
+          'Отдел изменён'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка смены отдела:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка смены отдела', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+/**
+ * @openapi
  * /appeals/{id}/status:
  *   put:
  *     tags: [Appeals]
  *     summary: Обновить статус обращения
  *     security: [ { bearerAuth: [] } ]
- *     x-permissions: ["update_appeal_status"]
+ *     x-permissions: ["view_appeal"]
  */
 router.put(
   '/:id/status',
   authenticateToken,
   checkUserStatus,
   authorizeServiceAccess('appeals'),
-  authorizePermissions(['update_appeal_status']),
+  authorizePermissions(['view_appeal']),
   async (
     req: AuthRequest<{ id: string }, AppealStatusUpdateResponse, unknown>,
     res: express.Response
@@ -651,7 +1190,52 @@ router.put(
           .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
       }
 
-      const updatedAppeal = await prisma.appeal.update({
+      const actor = await loadUserMini(req.user!.userId);
+      if (!actor) {
+        return res
+          .status(404)
+          .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const userId = req.user!.userId;
+      const isCreator = appeal.createdById === userId;
+      const isAssignee = appeal.assignees.some((a: any) => a.userId === userId);
+      const isAdmin = isAdminRole(actor);
+      const isManager = isDepartmentManager(actor, appeal.toDepartmentId);
+      const employee = await prisma.employeeProfile.findFirst({
+        where: { userId, departmentId: appeal.toDepartmentId },
+      });
+
+      if (!isCreator && !isAssignee && !employee && !isAdmin) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
+      }
+
+      let allowed = false;
+      if (isAdmin || isManager) {
+        allowed = true;
+      } else if (isCreator) {
+        allowed =
+          status === AppealStatus.COMPLETED ||
+          (appeal.status === AppealStatus.RESOLVED && status === AppealStatus.IN_PROGRESS);
+      } else if (isAssignee) {
+        allowed = status === AppealStatus.RESOLVED;
+      }
+
+      if (!allowed) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет прав на смену статуса', ErrorCodes.FORBIDDEN));
+      }
+
+      if (status === appeal.status) {
+        return res.json(
+          successResponse({ id: appealId, status: appeal.status }, 'Статус не изменён')
+        );
+      }
+
+      await prisma.appeal.update({
         where: { id: appealId },
         data: { status },
       });
@@ -666,10 +1250,31 @@ router.put(
       });
 
       const io = req.app.get('io') as SocketIOServer;
+      const recipients = Array.from(
+        new Set([
+          appeal.createdById,
+          ...appeal.assignees.map((a: any) => a.userId),
+          ...appeal.watchers.map((w: any) => w.userId),
+        ])
+      );
+
+      await createSystemMessage({
+        appealId,
+        actorId: req.user!.userId,
+        text: `Статус изменён: ${STATUS_LABELS[appeal.status]} → ${STATUS_LABELS[status]}.`,
+        systemEvent: { type: 'status_changed', from: appeal.status, to: status },
+        io,
+        toDepartmentId: appeal.toDepartmentId,
+        recipients,
+      });
+
       io.to(`appeal:${appealId}`).emit('statusUpdated', { appealId, status });
 
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
       return res.json(
-        successResponse({ id: appealId, status: updatedAppeal.status }, 'Статус обновлён')
+        successResponse({ id: appealId, status }, 'Статус обновлён')
       );
     } catch (error) {
       console.error('Ошибка обновления статуса:', error);
@@ -822,7 +1427,7 @@ router.post(
           attachments: true,
           reads: { select: { userId: true, readAt: true } },
           sender: {
-            select: { id: true, email: true, firstName: true, lastName: true },
+            select: userMiniSelect,
           },
         },
       });
@@ -834,6 +1439,8 @@ router.post(
             appealId,
             senderId: req.user!.userId,
             text: message.text,
+            type: AppealMessageType.USER,
+            systemEvent: null,
             createdAt: message.createdAt,
             attachments: [],
             readBy: [],

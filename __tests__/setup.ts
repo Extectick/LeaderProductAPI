@@ -121,6 +121,19 @@ beforeAll(async () => {
       data: { roleId: adminRole.id, permissionId: p.id },
     });
   }
+
+  // Базовый сервис "appeals" для authorizeServiceAccess
+  await prisma.service.upsert({
+    where: { key: 'appeals' },
+    update: { isActive: true, defaultVisible: true, defaultEnabled: true },
+    create: {
+      key: 'appeals',
+      name: 'Appeals',
+      isActive: true,
+      defaultVisible: true,
+      defaultEnabled: true,
+    },
+  });
 });
 
 afterAll(async () => {

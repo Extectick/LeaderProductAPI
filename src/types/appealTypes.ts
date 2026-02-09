@@ -4,6 +4,7 @@ import {
   AppealStatus,
   AppealPriority,
   AttachmentType,
+  AppealMessageType,
 } from '@prisma/client';
 import { SuccessResponse, ErrorResponse } from '../utils/apiResponse';
 
@@ -82,6 +83,35 @@ export type AppealStatusUpdateResponse =
   | SuccessResponse<{
       id: number;
       status: AppealStatus;
+    }>
+  | ErrorResponse;
+
+/**
+ * Запрос на перевод обращения в другой отдел
+ */
+export interface AppealDepartmentChangeRequest {
+  departmentId: number;
+}
+
+/**
+ * Ответ на перевод обращения в другой отдел
+ */
+export type AppealDepartmentChangeResponse =
+  | SuccessResponse<{
+      id: number;
+      status: AppealStatus;
+      toDepartmentId: number;
+    }>
+  | ErrorResponse;
+
+/**
+ * Ответ на self-assign
+ */
+export type AppealClaimResponse =
+  | SuccessResponse<{
+      id: number;
+      status: AppealStatus;
+      assigneeIds: number[];
     }>
   | ErrorResponse;
 

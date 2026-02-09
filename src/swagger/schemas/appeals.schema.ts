@@ -9,7 +9,7 @@
 /** Общие enum'ы для обращений */
 const AppealStatusEnum = {
   type: 'string',
-  enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+  enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'COMPLETED', 'DECLINED'],
 } as const;
 
 const AppealPriorityEnum = {
@@ -22,6 +22,20 @@ const AttachmentTypeEnum = {
   enum: ['IMAGE', 'AUDIO', 'FILE'],
 } as const;
 
+const AppealMessageTypeEnum = {
+  type: 'string',
+  enum: ['USER', 'SYSTEM'],
+} as const;
+
+const DepartmentMini = {
+  type: 'object',
+  required: ['id', 'name'],
+  properties: {
+    id: { type: 'integer', example: 7 },
+    name: { type: 'string', example: 'Support' },
+  },
+} as const;
+
 /** Базовые сущности (минимальные) */
 const UserMini = {
   type: 'object',
@@ -31,15 +45,10 @@ const UserMini = {
     email: { type: 'string', format: 'email', example: 'user@example.com' },
     firstName: { type: 'string', nullable: true, example: 'Ivan' },
     lastName: { type: 'string', nullable: true, example: 'Ivanov' },
-  },
-} as const;
-
-const DepartmentMini = {
-  type: 'object',
-  required: ['id', 'name'],
-  properties: {
-    id: { type: 'integer', example: 7 },
-    name: { type: 'string', example: 'Support' },
+    avatarUrl: { type: 'string', nullable: true, example: 'https://api.example.com/files/u/avatar.png' },
+    department: { ...DepartmentMini, nullable: true },
+    isAdmin: { type: 'boolean', example: false },
+    isDepartmentManager: { type: 'boolean', example: false },
   },
 } as const;
 
@@ -61,9 +70,22 @@ const AppealMessage = {
   properties: {
     id: { type: 'integer', example: 555 },
     text: { type: 'string', nullable: true, example: 'Описание проблемы' },
+    type: AppealMessageTypeEnum,
+    systemEvent: { type: 'object', nullable: true },
     createdAt: { type: 'string', format: 'date-time', example: '2025-08-22T10:00:00.000Z' },
     editedAt: { type: 'string', format: 'date-time', nullable: true },
     sender: UserMini,
+    readBy: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          userId: { type: 'integer', example: 42 },
+          readAt: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+    isRead: { type: 'boolean', nullable: true },
     attachments: {
       type: 'array',
       items: AppealAttachment,
@@ -139,6 +161,8 @@ const AppealListItem = {
       type: 'array',
       items: AppealAssignee,
     },
+    lastMessage: { ...AppealMessage, nullable: true },
+    unreadCount: { type: 'integer', nullable: true },
   },
 } as const;
 
@@ -299,6 +323,7 @@ const appealsSchemas = {
   AppealStatusEnum,
   AppealPriorityEnum,
   AttachmentTypeEnum,
+  AppealMessageTypeEnum,
   UserMini,
   DepartmentMini,
   AppealAttachment,

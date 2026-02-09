@@ -86,7 +86,7 @@ export const IdParamSchema = z.object({
  *   /appeals/:id/assign (PUT)
  * ============================== */
 export const AssignBodySchema = z.object({
-  assigneeIds: z.array(zNumberId).min(1, 'assigneeIds должен быть непустым массивом'),
+  assigneeIds: z.array(zNumberId),
 });
 
 /* ==============================
@@ -94,6 +94,13 @@ export const AssignBodySchema = z.object({
  * ============================== */
 export const StatusBodySchema = z.object({
   status: z.nativeEnum(AppealStatus),
+});
+
+/* ======================================
+ *   /appeals/:id/department (PUT)
+ * ====================================== */
+export const ChangeDepartmentBodySchema = z.object({
+  departmentId: zNumberId,
 });
 
 /* ========================================

@@ -17,6 +17,7 @@ import usersRouter from './routes/users';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
+import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
 import updatesRouter from './routes/updates';
 import filesRouter from './routes/files';
@@ -114,6 +115,7 @@ app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 // ---- Routes ----
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);
+app.use('/departments', departmentsRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
 app.use('/tracking', trackingRouter);
@@ -127,7 +129,7 @@ app.use(
   '/appeals',
   cacheByUrl(15, {
     include: /^\/appeals(\/\d+)?(\?.*)?$/i, // кэшируем список и детали
-    exclude: /\/appeals\/\d+\/(messages|assign|status|watchers)/i, // исключаем мутации
+    exclude: /\/appeals\/\d+\/(messages|assign|status|watchers|claim|department)/i, // исключаем мутации
     varyByAuth: true,
     cacheStatuses: [200],
   }),

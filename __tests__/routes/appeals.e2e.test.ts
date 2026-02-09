@@ -14,6 +14,7 @@ describe('Appeals routes (auth + roles + permissions)', () => {
   let clientToken: string;
   let managerUser: any;
   let managerToken: string;
+  let managerRoleId: number;
 
   beforeAll(async () => {
     const mod = await import('../../src/index'); // <<< динамический импорт
@@ -30,6 +31,10 @@ describe('Appeals routes (auth + roles + permissions)', () => {
     // руководитель отдела (назначение)
     managerUser = await createUserWithRole('manager@example.com', 'department_manager', 'EMPLOYEE');
     managerToken = signToken(managerUser.id, 'department_manager');
+
+    const managerRole = await prisma.role.findUnique({ where: { name: 'department_manager' } });
+    if (!managerRole) throw new Error('department_manager role not found');
+    managerRoleId = managerRole.id;
   });
 
   afterAll(async () => {
@@ -81,6 +86,17 @@ describe('Appeals routes (auth + roles + permissions)', () => {
   test('Назначение исполнителей — только руководитель/менеджер', async () => {
     // Сначала — employee создаёт обращение
     const dept = await prisma.department.create({ data: { name: `IT_${Date.now()}` } });
+    await prisma.departmentRole.upsert({
+      where: {
+        userId_roleId_departmentId: {
+          userId: managerUser.id,
+          roleId: managerRoleId,
+          departmentId: dept.id,
+        },
+      },
+      update: {},
+      create: { userId: managerUser.id, roleId: managerRoleId, departmentId: dept.id },
+    });
     const created = await request(app)
       .post('/appeals')
       .set('Authorization', `Bearer ${employeeToken}`)
@@ -113,8 +129,19 @@ describe('Appeals routes (auth + roles + permissions)', () => {
     expect(dbAppeal?.status).toBe(AppealStatus.IN_PROGRESS);
   });
 
-  test('Смена статуса — только при наличии update_appeal_status', async () => {
+  test('Смена статуса — по новой логике ролей', async () => {
     const dept = await prisma.department.create({ data: { name: `HR_${Date.now()}` } });
+    await prisma.departmentRole.upsert({
+      where: {
+        userId_roleId_departmentId: {
+          userId: managerUser.id,
+          roleId: managerRoleId,
+          departmentId: dept.id,
+        },
+      },
+      update: {},
+      create: { userId: managerUser.id, roleId: managerRoleId, departmentId: dept.id },
+    });
     const created = await request(app)
       .post('/appeals')
       .set('Authorization', `Bearer ${employeeToken}`)
@@ -124,23 +151,26 @@ describe('Appeals routes (auth + roles + permissions)', () => {
 
     const appealId = created.body?.data?.id;
 
-    // employee без прав update_appeal_status — должен получить запрет
-    const resForbidden = await request(app)
+    // создатель — может закрыть COMPLETED в любой момент
+    const resCreator = await request(app)
       .put(`/appeals/${appealId}/status`)
       .set('Authorization', `Bearer ${employeeToken}`)
-      .send({ status: AppealStatus.RESOLVED });
+      .send({ status: AppealStatus.COMPLETED });
+    expect(resCreator.status).toBe(200);
 
-    expect([401, 403]).toContain(resForbidden.status);
-
-    // manager — может
-    const resOk = await request(app)
+    // менеджер — может управлять статусами
+    const resManager = await request(app)
       .put(`/appeals/${appealId}/status`)
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ status: AppealStatus.RESOLVED });
+    expect(resManager.status).toBe(200);
 
-    expect(resOk.status).toBe(200);
-    const dbAppeal = await prisma.appeal.findUnique({ where: { id: appealId } });
-    expect(dbAppeal?.status).toBe(AppealStatus.RESOLVED);
+    // создатель — может вернуть RESOLVED -> IN_PROGRESS
+    const resBack = await request(app)
+      .put(`/appeals/${appealId}/status`)
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .send({ status: AppealStatus.IN_PROGRESS });
+    expect(resBack.status).toBe(200);
   });
 
   test('Детали обращения — автор/исполнитель/сотрудник отдела-получателя имеют доступ', async () => {
