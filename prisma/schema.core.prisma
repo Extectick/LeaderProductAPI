@@ -115,7 +115,6 @@ model ClientProfile {
   user      User     @relation(fields: [userId], references: [id])
   addressId Int?
   address   Address? @relation(fields: [addressId], references: [id])
-  phone     String?
   avatarUrl String?
   counterpartyId String?
   counterparty   Counterparty? @relation("ClientProfileCounterparty", fields: [counterpartyId], references: [id])
@@ -152,7 +151,6 @@ model SupplierProfile {
   user      User     @relation(fields: [userId], references: [id])
   addressId Int?
   address   Address? @relation(fields: [addressId], references: [id])
-  phone     String?
   avatarUrl String?
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
@@ -166,7 +164,6 @@ model EmployeeProfile {
   departmentId Int?
   department Department? @relation(fields: [departmentId], references: [id])
   departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
-  phone     String?
   avatarUrl String?
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
@@ -206,7 +203,8 @@ model User {
   firstName          String?             // Имя
   lastName           String?             // Фамилия
   middleName         String?             // Отчество
-  phone              String?             @unique // Телефон пользователя
+  phone              BigInt?             @unique // Телефон пользователя в формате 79612231345
+  phoneVerifiedAt    DateTime?
   avatarUrl          String?             // (устар.) Ссылка на аватар пользователя
   telegramId         BigInt?             @unique
   telegramUsername   String?
@@ -215,6 +213,7 @@ model User {
   deletedAt          DateTime?           // Для soft delete
   currentProfileType ProfileType?        // Текущий активный профиль
   emailVerifications EmailVerification[]
+  emailChangeSessions EmailChangeSession[]
   loginAttempts      LoginAttempt[]
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
@@ -243,8 +242,84 @@ model User {
   deviceTokens      DeviceToken[]
   appealMessageReads AppealMessageRead[]
   updateEvents      AppUpdateEvent[]
+  phoneVerificationSessions PhoneVerificationSession[]
+  phoneMigrationReports     UserPhoneMigrationReport[]
 
   @@index([email])
+}
+
+enum PhoneVerificationStatus {
+  PENDING
+  VERIFIED
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum EmailChangeSessionStatus {
+  PENDING
+  VERIFIED
+  EXPIRED
+  CANCELLED
+  FAILED
+}
+
+model PhoneVerificationSession {
+  id             String                  @id @default(cuid())
+  userId         Int
+  requestedPhone BigInt
+  status         PhoneVerificationStatus @default(PENDING)
+  tokenHash      String                  @unique
+  telegramUserId BigInt?
+  chatId         BigInt?
+  expiresAt      DateTime
+  verifiedAt     DateTime?
+  failureReason  String?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([expiresAt])
+  @@index([telegramUserId])
+}
+
+model UserPhoneMigrationReport {
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  sourceField     String
+  rawValue        String?
+  normalizedValue String?
+  reason          String
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([reason])
+}
+
+model EmailChangeSession {
+  id            String                   @id @default(cuid())
+  userId        Int
+  currentEmail  String?
+  requestedEmail String
+  codeHash      String
+  status        EmailChangeSessionStatus @default(PENDING)
+  attemptsCount Int                      @default(0)
+  expiresAt     DateTime
+  verifiedAt    DateTime?
+  lastSentAt    DateTime?
+  failureReason String?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([requestedEmail])
+  @@index([expiresAt])
 }
 
 model DepartmentRole {

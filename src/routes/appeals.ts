@@ -29,9 +29,11 @@ import {
 import {
   AppealCreateResponse,
   AppealListResponse,
+  AppealCountersResponse,
   AppealDetailResponse,
   AppealAssignResponse,
   AppealStatusUpdateResponse,
+  AppealDeadlineUpdateResponse,
   AppealAddMessageResponse,
   AppealMessagesResponse,
   AppealReadBulkResponse,
@@ -54,6 +56,7 @@ import {
   MessageIdParamSchema,
   AssignBodySchema,
   StatusBodySchema,
+  DeadlineBodySchema,
   ChangeDepartmentBodySchema,
   AddMessageBodySchema,
   ReadBulkBodySchema,
@@ -114,6 +117,11 @@ const STATUS_LABELS: Record<AppealStatus, string> = {
   COMPLETED: 'Завершено',
   DECLINED: 'Отклонено',
 };
+const ACTIVE_APPEAL_STATUSES: AppealStatus[] = [
+  AppealStatus.OPEN,
+  AppealStatus.IN_PROGRESS,
+  AppealStatus.RESOLVED,
+];
 
 function getUserDisplayName(user: UserMiniRaw | null) {
   if (!user) return 'Пользователь';
@@ -341,6 +349,7 @@ async function emitAppealUpdated(opts: {
     appealId: appeal.id,
     status: appeal.status,
     priority: appeal.priority,
+    deadline: appeal.deadline,
     toDepartmentId: appeal.toDepartmentId,
     updatedAt: appeal.updatedAt,
     assigneeIds,
@@ -690,6 +699,109 @@ router.get(
       return res
         .status(500)
         .json(errorResponse('Ошибка получения списка обращений', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+/**
+ * @openapi
+ * /appeals/counters:
+ *   get:
+ *     tags: [Appeals]
+ *     summary: Агрегированные счетчики обращений по scope
+ *     security: [ { bearerAuth: [] } ]
+ *     x-permissions: ["view_appeal"]
+ *     responses:
+ *       200:
+ *         description: Счетчики успешно получены
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ApiSuccess'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       $ref: '#/components/schemas/AppealCountersData'
+ */
+router.get(
+  '/counters',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeal']),
+  async (req: AuthRequest<{}, AppealCountersResponse>, res: express.Response) => {
+    try {
+      const userId = req.user!.userId;
+      const employee = await prisma.employeeProfile.findUnique({ where: { userId } });
+      const departmentId = employee?.departmentId ?? null;
+
+      const myAppealScopeWhere: Prisma.AppealWhereInput = { createdById: userId };
+      const departmentAppealScopeWhere: Prisma.AppealWhereInput = departmentId
+        ? { toDepartmentId: departmentId }
+        : { id: -1 };
+
+      const [
+        myActiveCount,
+        myUnreadMessagesCount,
+        departmentActiveCount,
+        departmentUnreadMessagesCount,
+      ] = await prisma.$transaction([
+        prisma.appeal.count({
+          where: {
+            ...myAppealScopeWhere,
+            status: { in: ACTIVE_APPEAL_STATUSES },
+          },
+        }),
+        prisma.appealMessage.count({
+          where: {
+            deleted: false,
+            senderId: { not: userId },
+            reads: { none: { userId } },
+            appeal: myAppealScopeWhere,
+          },
+        }),
+        prisma.appeal.count({
+          where: departmentId
+            ? {
+                ...departmentAppealScopeWhere,
+                status: { in: ACTIVE_APPEAL_STATUSES },
+              }
+            : { id: -1 },
+        }),
+        prisma.appealMessage.count({
+          where: departmentId
+            ? {
+                deleted: false,
+                senderId: { not: userId },
+                reads: { none: { userId } },
+                appeal: departmentAppealScopeWhere,
+              }
+            : { id: -1 },
+        }),
+      ]);
+
+      return res.json(
+        successResponse(
+          {
+            my: {
+              activeCount: myActiveCount,
+              unreadMessagesCount: myUnreadMessagesCount,
+            },
+            department: {
+              available: Boolean(departmentId),
+              activeCount: departmentId ? departmentActiveCount : 0,
+              unreadMessagesCount: departmentId ? departmentUnreadMessagesCount : 0,
+            },
+          },
+          'Счетчики обращений'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка получения счетчиков обращений:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка получения счетчиков обращений', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
@@ -1683,6 +1795,147 @@ router.put(
       return res
         .status(500)
         .json(errorResponse('Ошибка обновления статуса', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+/**
+ * @openapi
+ * /appeals/{id}/deadline:
+ *   put:
+ *     tags: [Appeals]
+ *     summary: Обновить дедлайн обращения
+ *     description: Доступно только автору обращения или администратору.
+ *     security: [ { bearerAuth: [] } ]
+ *     x-permissions: ["view_appeal"]
+ */
+router.put(
+  '/:id/deadline',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeal']),
+  async (
+    req: AuthRequest<{ id: string }, AppealDeadlineUpdateResponse, unknown>,
+    res: express.Response
+  ) => {
+    try {
+      const p = IdParamSchema.safeParse(req.params);
+      if (!p.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(p.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const b = DeadlineBodySchema.safeParse(req.body);
+      if (!b.success) {
+        return res
+          .status(400)
+          .json(errorResponse(zodErrorMessage(b.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const { id: appealId } = p.data;
+      const nextDeadline = b.data.deadline ? new Date(b.data.deadline) : null;
+
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: appealId },
+        include: {
+          assignees: { select: { userId: true } },
+          watchers: { select: { userId: true } },
+        },
+      });
+      if (!appeal) {
+        return res
+          .status(404)
+          .json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+      }
+
+      const actor = await loadUserMini(req.user!.userId);
+      if (!actor) {
+        return res
+          .status(404)
+          .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const userId = req.user!.userId;
+      const isCreator = appeal.createdById === userId;
+      const isAdmin = isAdminRole(actor);
+      if (!isCreator && !isAdmin) {
+        return res
+          .status(403)
+          .json(errorResponse('Нет прав на изменение дедлайна', ErrorCodes.FORBIDDEN));
+      }
+
+      const prevDeadline = appeal.deadline ?? null;
+      const prevTime = prevDeadline ? prevDeadline.getTime() : null;
+      const nextTime = nextDeadline ? nextDeadline.getTime() : null;
+      if (prevTime === nextTime) {
+        return res.json(
+          successResponse(
+            { id: appealId, deadline: prevDeadline },
+            'Дедлайн не изменён'
+          )
+        );
+      }
+
+      await prisma.appeal.update({
+        where: { id: appealId },
+        data: { deadline: nextDeadline },
+      });
+
+      const io = req.app.get('io') as SocketIOServer;
+      const recipients = Array.from(
+        new Set([
+          appeal.createdById,
+          ...appeal.assignees.map((a: any) => a.userId),
+          ...appeal.watchers.map((w: any) => w.userId),
+        ])
+      );
+      const fromLabel = prevDeadline
+        ? prevDeadline.toLocaleString('ru-RU', { hour12: false })
+        : 'без дедлайна';
+      const toLabel = nextDeadline
+        ? nextDeadline.toLocaleString('ru-RU', { hour12: false })
+        : 'без дедлайна';
+
+      await createSystemMessage({
+        appealId,
+        actorId: userId,
+        text: `Дедлайн изменён: ${fromLabel} → ${toLabel}.`,
+        systemEvent: {
+          type: 'deadline_changed',
+          from: prevDeadline ? prevDeadline.toISOString() : null,
+          to: nextDeadline ? nextDeadline.toISOString() : null,
+        },
+        io,
+        toDepartmentId: appeal.toDepartmentId,
+        recipients,
+      });
+
+      io.to(`appeal:${appealId}`).emit('deadlineUpdated', {
+        appealId,
+        deadline: nextDeadline,
+      });
+      await emitAppealUpdated({
+        io,
+        appealId,
+        toDepartmentId: appeal.toDepartmentId,
+        userIds: recipients,
+      });
+
+      await cacheDel(`appeal:${appealId}`);
+      await cacheDelPrefix('appeals:list:');
+
+      return res.json(
+        successResponse(
+          { id: appealId, deadline: nextDeadline },
+          'Дедлайн обновлён'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка обновления дедлайна:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка обновления дедлайна', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );

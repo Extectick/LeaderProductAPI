@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 
-type AuthEmailPurpose = 'verification' | 'passwordReset';
+type AuthEmailPurpose = 'verification' | 'passwordReset' | 'emailChange';
 
 const smtpPort = Number(process.env.SMTP_PORT) || 587;
 const smtpSecure =
@@ -24,12 +24,21 @@ export async function sendVerificationEmail(
   purpose: AuthEmailPurpose = 'verification'
 ) {
   const isReset = purpose === 'passwordReset';
-  const subject = isReset ? 'Password Reset Code' : 'Email Verification Code';
+  const isEmailChange = purpose === 'emailChange';
+  const subject = isReset
+    ? 'Password Reset Code'
+    : isEmailChange
+    ? 'Email Change Verification Code'
+    : 'Email Verification Code';
   const text = isReset
     ? `Your password reset code is: ${code}`
+    : isEmailChange
+    ? `Your email change verification code is: ${code}`
     : `Your verification code is: ${code}`;
   const html = isReset
     ? `<p>Your password reset code is: <b>${code}</b></p>`
+    : isEmailChange
+    ? `<p>Your email change verification code is: <b>${code}</b></p>`
     : `<p>Your verification code is: <b>${code}</b></p>`;
 
   const mailOptions = {
@@ -41,7 +50,8 @@ export async function sendVerificationEmail(
   };
   try {
     await transporter.sendMail(mailOptions);
-    console.log(`${isReset ? 'Password reset' : 'Verification'} email sent to ${to}`);
+    const type = isReset ? 'Password reset' : isEmailChange ? 'Email change' : 'Verification';
+    console.log(`${type} email sent to ${to}`);
   } catch (error) {
     console.error('Error sending verification email:', error);
   }

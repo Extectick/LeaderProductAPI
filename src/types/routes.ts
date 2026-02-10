@@ -115,6 +115,15 @@ export type TelegramLinkResponse = SuccessResponse<{
   profile: Profile;
 }> | ErrorResponse;
 
+export type AuthMethodsResponse = SuccessResponse<{
+  methods: Array<{
+    key: 'password' | 'telegram';
+    label: string;
+    enabled: boolean;
+    flow: 'credentials' | 'telegram';
+  }>;
+}> | ErrorResponse;
+
 export type AddCredentialsRequest = {
   email: string;
   password: string;
@@ -193,7 +202,6 @@ export type CreateClientProfileRequest = {
     lastName?: string;
     middleName?: string;
   };
-  phone?: string;
   address?: {
     street: string;
     city: string;
@@ -215,7 +223,6 @@ export type CreateSupplierProfileRequest = {
     lastName?: string;
     middleName?: string;
   };
-  phone?: string;
   address?: {
     street: string;
     city: string;
@@ -231,9 +238,46 @@ export type CreateEmployeeProfileRequest = {
     lastName: string;
     middleName?: string;
   };
-  phone?: string;
   departmentId: number;
 };
+
+export type StartPhoneVerificationRequest = {
+  phone: string;
+};
+
+export type StartPhoneVerificationResponse = SuccessResponse<{
+  sessionId: string;
+  deepLinkUrl: string;
+  qrPayload: string;
+  expiresAt: Date;
+  pollIntervalSec: number;
+  requestedPhone: string | null;
+}> | ErrorResponse;
+
+export type StartEmailChangeRequest = {
+  email: string;
+};
+
+export type EmailChangeSessionData = {
+  id: string;
+  status: 'PENDING' | 'VERIFIED' | 'EXPIRED' | 'CANCELLED' | 'FAILED';
+  currentEmail: string | null;
+  requestedEmail: string;
+  attemptsCount: number;
+  expiresAt: Date;
+  verifiedAt: Date | null;
+  lastSentAt: Date | null;
+  failureReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type StartEmailChangeResponse = SuccessResponse<{
+  sessionId: string;
+  requestedEmail: string;
+  expiresAt: Date;
+  resendCooldownSec: number;
+}> | ErrorResponse;
 
 export type CreateProfileResponse = SuccessResponse<{
   profile: Profile

@@ -45,6 +45,18 @@ export type AppealListResponse = SuccessResponse<{
   };
 }> | ErrorResponse;
 
+export type AppealCountersResponse = SuccessResponse<{
+  my: {
+    activeCount: number;
+    unreadMessagesCount: number;
+  };
+  department: {
+    available: boolean;
+    activeCount: number;
+    unreadMessagesCount: number;
+  };
+}> | ErrorResponse;
+
 /**
  * Ответ на получение подробностей обращения
  */
@@ -83,6 +95,23 @@ export type AppealStatusUpdateResponse =
   | SuccessResponse<{
       id: number;
       status: AppealStatus;
+    }>
+  | ErrorResponse;
+
+/**
+ * Запрос на изменение дедлайна
+ */
+export interface AppealDeadlineUpdateRequest {
+  deadline?: string | null;
+}
+
+/**
+ * Ответ на изменение дедлайна
+ */
+export type AppealDeadlineUpdateResponse =
+  | SuccessResponse<{
+      id: number;
+      deadline: Date | null;
     }>
   | ErrorResponse;
 

@@ -2,6 +2,7 @@ import prisma from '../prisma/client';
 import { Profile } from '../types/userTypes';
 import { getPresenceForUsers } from './presenceService';
 import { resolveObjectUrl } from '../storage/minio';
+import { toApiPhoneString } from '../utils/phone';
 
 export const userServicePrisma = prisma;
 
@@ -65,7 +66,6 @@ export const getProfile = async (userId: number): Promise<Profile> => {
     profile
       ? {
           id: profile.id,
-          phone: profile.phone ?? null,
           avatarUrl,
           lastSeenAt,
           isOnline,
@@ -133,7 +133,6 @@ export const getProfile = async (userId: number): Promise<Profile> => {
   const employeeProfile = user.employeeProfile
     ? {
         id: user.employeeProfile.id,
-        phone: user.employeeProfile.phone ?? null,
         avatarUrl: resolvedEmployeeAvatar,
         lastSeenAt,
         isOnline,
@@ -165,10 +164,16 @@ export const getProfile = async (userId: number): Promise<Profile> => {
       firstName: user.firstName,
       lastName: user.lastName,
       middleName: user.middleName,
-      phone: user.phone,
+      phone: toApiPhoneString(user.phone),
+      phoneVerifiedAt: user.phoneVerifiedAt ?? null,
       telegramId: user.telegramId ? user.telegramId.toString() : null,
       telegramUsername: user.telegramUsername ?? null,
       authProvider: user.authProvider,
+      authMethods: {
+        telegramLinked: Boolean(user.telegramId),
+        passwordLoginEnabled: Boolean(user.email && user.passwordHash && user.isActive),
+        passwordLoginPendingVerification: Boolean(user.email && user.passwordHash && !user.isActive),
+      },
       avatarUrl: activeAvatarUrl,
       lastSeenAt,
       isOnline,
@@ -191,7 +196,7 @@ export const updateProfile = async (userId: number, data: Partial<Profile>) => {
       firstName: data.firstName,
       lastName: data.lastName,
       middleName: data.middleName,
-      phone: data.phone
+      phone: data.phone ? BigInt(data.phone) : null
     }
   });
   return updated;

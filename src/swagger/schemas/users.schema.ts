@@ -19,6 +19,8 @@ const UserPublic = {
     firstName: { type: 'string', nullable: true, example: 'Ivan' },
     lastName: { type: 'string', nullable: true, example: 'Ivanov' },
     middleName: { type: 'string', nullable: true, example: 'Ivanovich' },
+    phone: { type: 'string', nullable: true, example: '79612231345' },
+    phoneVerifiedAt: { type: 'string', format: 'date-time', nullable: true },
     role: { type: 'string', nullable: true, example: 'admin' },
     currentProfileType: { ...ProfileTypeEnum, nullable: true },
   },
@@ -38,7 +40,6 @@ const Address = {
 const ClientProfile = {
   type: 'object',
   properties: {
-    phone: { type: 'string', nullable: true, example: '+79990001122' },
     address: { ...Address, nullable: true },
   },
 } as const;
@@ -46,7 +47,6 @@ const ClientProfile = {
 const SupplierProfile = {
   type: 'object',
   properties: {
-    phone: { type: 'string', nullable: true, example: '+79995556677' },
     address: { ...Address, nullable: true },
   },
 } as const;
@@ -54,7 +54,6 @@ const SupplierProfile = {
 const EmployeeProfile = {
   type: 'object',
   properties: {
-    phone: { type: 'string', nullable: true, example: '+79998887766' },
     department: { $ref: '#/components/schemas/DepartmentMini' }, // переиспользуем из appeals.schema.ts
   },
 } as const;
@@ -79,11 +78,12 @@ const UserProfile = {
       email: 'user@example.com',
       firstName: 'Ivan',
       lastName: 'Ivanov',
+      phone: '79612231345',
       currentProfileType: 'EMPLOYEE',
       role: 'admin',
     },
     type: 'EMPLOYEE',
-    employee: { phone: '+79998887766', department: { id: 7, name: 'Support' } },
+    employee: { department: { id: 7, name: 'Support' } },
   },
 } as const;
 

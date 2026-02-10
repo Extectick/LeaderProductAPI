@@ -113,6 +113,25 @@ export const StatusBodySchema = z.object({
   status: z.nativeEnum(AppealStatus),
 });
 
+/* =======================================
+ *   /appeals/:id/deadline (PUT)
+ * ======================================= */
+export const DeadlineBodySchema = z.object({
+  deadline: z.preprocess((v) => {
+    if (v === null) return null;
+    if (typeof v !== 'string') return undefined;
+    const t = v.trim();
+    return t.length ? t : null;
+  }, z
+    .string()
+    .nullable()
+    .optional()
+    .refine((val) => (val ? !Number.isNaN(Date.parse(val)) : true), {
+      message: 'Некорректная дата',
+    })
+  ),
+});
+
 /* ======================================
  *   /appeals/:id/department (PUT)
  * ====================================== */

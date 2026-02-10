@@ -2,6 +2,7 @@ import { OrderStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import prisma from '../../prisma/client';
 import { ErrorCodes } from '../../utils/apiResponse';
+import { toApiPhoneString } from '../../utils/phone';
 import type {
   IncludeInactiveQuery,
   ListProductsQuery,
@@ -61,6 +62,7 @@ const getClientProfileOrThrow = async (userId: number) => {
   const profile = await prisma.clientProfile.findUnique({
     where: { userId },
     include: {
+      user: { select: { phone: true } },
       address: true,
       counterparty: { select: { id: true, guid: true, name: true, isActive: true } },
       activeAgreement: {
@@ -678,7 +680,7 @@ const mapClientContext = (profile: Awaited<ReturnType<typeof getClientProfileOrT
   return {
     profile: {
       userId: profile.userId,
-      phone: profile.phone ?? null,
+      phone: toApiPhoneString(profile.user?.phone),
       address: profile.address
         ? {
             street: profile.address.street,

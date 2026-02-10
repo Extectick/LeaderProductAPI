@@ -36,6 +36,11 @@ const decimalToNumber = (value: Prisma.Decimal | number | string | null | undefi
 };
 
 const now = () => new Date();
+const toSingleString = (value: unknown): string | undefined => {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return undefined;
+};
 
 const mapItemStatus = (status: BatchResult['status']): SyncItemStatus =>
   status === 'ok' ? SyncItemStatus.OK : SyncItemStatus.ERROR;
@@ -1180,7 +1185,10 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
 };
 
 export const handleOrderAck = async (req: Request, res: Response) => {
-  const orderGuid = req.params.guid;
+  const orderGuid = toSingleString(req.params.guid);
+  if (!orderGuid) {
+    return res.status(400).json({ error: 'Invalid order guid' });
+  }
   const baseMeta = { orderGuid };
   let runId: string | undefined;
 
@@ -1364,13 +1372,12 @@ export const handleSyncRunsList = async (req: Request, res: Response) => {
         finishedAt: true,
         notes: true,
         meta: true,
-        _count: { select: { items: true } },
       },
     });
 
     const payload = runs.map((run) => ({
       ...run,
-      itemsCount: run._count.items,
+      itemsCount: run.totalCount,
     }));
 
     return res.json({ success: true, count: payload.length, runs: payload });
@@ -1381,7 +1388,10 @@ export const handleSyncRunsList = async (req: Request, res: Response) => {
 };
 
 export const handleSyncRunDetail = async (req: Request, res: Response) => {
-  const runId = req.params.runId;
+  const runId = toSingleString(req.params.runId);
+  if (!runId) {
+    return res.status(400).json({ error: 'Invalid run id' });
+  }
   const includeItemsRaw = String(req.query.includeItems ?? '').toLowerCase();
   const includeItems =
     includeItemsRaw === '1' || includeItemsRaw === 'true' || includeItemsRaw === 'yes';
@@ -1406,7 +1416,6 @@ export const handleSyncRunDetail = async (req: Request, res: Response) => {
         finishedAt: true,
         notes: true,
         meta: true,
-        _count: { select: { items: true } },
         items: includeItems
           ? {
               take: itemsLimit,
@@ -1429,7 +1438,7 @@ export const handleSyncRunDetail = async (req: Request, res: Response) => {
 
     const payload = {
       ...run,
-      itemsCount: run._count.items,
+      itemsCount: run.totalCount,
     };
 
     return res.json({ success: true, run: payload });

@@ -1,6 +1,7 @@
-import crypto from 'crypto';
+import { parse as parseTelegramInitData, validate as validateTelegramInitData } from '@tma.js/init-data-node';
 import jwt from 'jsonwebtoken';
 import { getRedis } from '../lib/redis';
+import { normalizePhoneToDigits11 } from '../utils/phone';
 
 const TG_SESSION_TTL_SEC = 10 * 60;
 const TG_CONTACT_TTL_SEC = 10 * 60;
@@ -41,15 +42,7 @@ function safeString(value: unknown): string | null {
 }
 
 export function normalizePhoneE164(phoneRaw: string): string | null {
-  const digits = String(phoneRaw || '').replace(/\D/g, '');
-  if (!digits) return null;
-  let normalized = digits;
-  if (normalized.length === 10) normalized = `7${normalized}`;
-  if (normalized.length === 11 && normalized.startsWith('8')) {
-    normalized = `7${normalized.slice(1)}`;
-  }
-  if (normalized.length !== 11 || !normalized.startsWith('7')) return null;
-  return `+${normalized}`;
+  return normalizePhoneToDigits11(phoneRaw);
 }
 
 export function maskEmail(email: string | null | undefined) {
@@ -73,38 +66,30 @@ export function verifyTelegramInitData(initDataRaw: string): TelegramUserInfo {
     throw new Error('Telegram bot token is not configured');
   }
 
-  const params = new URLSearchParams(initDataRaw || '');
-  const hash = params.get('hash');
-  if (!hash) throw new Error('Telegram initData hash is missing');
+  const raw = String(initDataRaw || '').trim();
+  if (!raw) throw new Error('Telegram initData is missing');
 
-  const authDateRaw = params.get('auth_date');
-  const authDate = Number(authDateRaw || 0);
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(authDate) || authDate <= 0 || nowSec - authDate > TG_MAX_INITDATA_AGE_SEC) {
-    throw new Error('Telegram initData is expired');
-  }
-
-  params.delete('hash');
-  const dataCheckString = Array.from(params.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}=${value}`)
-    .join('\n');
-
-  const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
-  const expectedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
-  if (expectedHash !== hash) {
+  try {
+    validateTelegramInitData(raw, botToken, { expiresIn: TG_MAX_INITDATA_AGE_SEC });
+  } catch (error: any) {
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('expired')) {
+      throw new Error('Telegram initData is expired');
+    }
+    if (message.includes('sign') || message.includes('hash')) {
+      throw new Error('Telegram initData hash mismatch');
+    }
     throw new Error('Telegram initData hash mismatch');
   }
 
-  const userRaw = params.get('user');
-  if (!userRaw) throw new Error('Telegram user is missing in initData');
-
   let parsedUser: any;
   try {
-    parsedUser = JSON.parse(userRaw);
+    const parsed = parseTelegramInitData(raw) as any;
+    parsedUser = parsed?.user || null;
   } catch {
     throw new Error('Telegram user payload is invalid');
   }
+  if (!parsedUser) throw new Error('Telegram user is missing in initData');
 
   const telegramId = parsedUser?.id;
   if (telegramId === undefined || telegramId === null) {

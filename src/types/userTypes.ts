@@ -1,5 +1,11 @@
 import { AuthProvider, ProfileStatus, ProfileType } from "@prisma/client";
 
+export type AuthMethods = {
+    telegramLinked: boolean;
+    passwordLoginEnabled: boolean;
+    passwordLoginPendingVerification: boolean;
+}
+
 export type Profile = {
     id: number;
     email: string | null;
@@ -7,9 +13,11 @@ export type Profile = {
     lastName: string | null;
     middleName: string | null;
     phone: string | null;
+    phoneVerifiedAt?: Date | string | null;
     telegramId?: string | null;
     telegramUsername?: string | null;
     authProvider?: AuthProvider;
+    authMethods: AuthMethods;
     avatarUrl: string | null;
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;
@@ -47,7 +55,6 @@ export type DepartmentRole = {
 
 export type clientProfile = {
     id: number;
-    phone: string | null;
     avatarUrl?: string | null;
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;
@@ -98,7 +105,6 @@ export type clientProfile = {
 }
 export type supplierProfile = {
     id: number;
-    phone: string | null;
     avatarUrl?: string | null;
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;
@@ -115,7 +121,6 @@ export type supplierProfile = {
 }
 export type employeeProfile = {
     id: number;
-    phone: string | null;
     avatarUrl?: string | null;
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;

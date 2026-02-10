@@ -19,6 +19,16 @@ import {
   verifyTelegramInitData,
 } from '../services/telegramAuthService';
 import {
+  bindTelegramToPhoneVerificationByStartToken,
+  verifyPhoneByTelegramContact,
+} from '../services/phoneVerificationService';
+import { getAuthMethodDescriptors } from '../services/authMethodRegistry';
+import {
+  registerTelegramUpdateHandler,
+  sendPhoneContactRequestMessage,
+  sendTelegramInfoMessage,
+} from '../services/telegramBotService';
+import {
   AuthRegisterRequest,
   AuthRegisterResponse,
   AuthLoginRequest,
@@ -31,6 +41,7 @@ import {
   AuthLogoutResponse
 } from '../types/routes';
 import { getProfile } from '../services/userService';
+import { normalizePhoneToBigInt, toApiPhoneString } from '../utils/phone';
 
 const router = express.Router();
 
@@ -124,9 +135,10 @@ async function loadUserWithRolePermissions(userId: number): Promise<UserWithRole
 
 async function resolveTelegramUserState(
   session: TelegramSessionInfo,
-  phoneE164?: string | null
+  phoneDigits11?: string | null
 ): Promise<TelegramResolveResult> {
   const telegramId = toTelegramBigInt(session.telegramId);
+  const normalizedPhone = phoneDigits11 ? normalizePhoneToBigInt(phoneDigits11) : null;
   const userByTelegram = await prisma.user.findFirst({
     where: { telegramId },
     select: { id: true, phone: true, telegramUsername: true },
@@ -142,15 +154,15 @@ async function resolveTelegramUserState(
       await prisma.user.update({ where: { id: userByTelegram.id }, data: updateData });
     }
 
-    if (!userByTelegram.phone && phoneE164) {
+    if (!userByTelegram.phone && normalizedPhone) {
       const phoneOwner = await prisma.user.findFirst({
-        where: { phone: phoneE164 },
+        where: { phone: normalizedPhone },
         select: { id: true },
       });
       if (!phoneOwner || phoneOwner.id === userByTelegram.id) {
         await prisma.user.update({
           where: { id: userByTelegram.id },
-          data: { phone: phoneE164 },
+          data: { phone: normalizedPhone, phoneVerifiedAt: new Date() },
         });
       } else {
         tgLog('phone_conflict_ignored_for_linked_user', {
@@ -163,13 +175,13 @@ async function resolveTelegramUserState(
     return { state: 'READY', userId: userByTelegram.id };
   }
 
-  if (!phoneE164) {
+  if (!normalizedPhone) {
     tgLog('phone_missing', { telegramId: session.telegramId });
     return { state: 'NEED_PHONE' };
   }
 
   const userByPhone = await prisma.user.findFirst({
-    where: { phone: phoneE164 },
+    where: { phone: normalizedPhone },
     select: { id: true, email: true, phone: true, telegramId: true },
   });
 
@@ -179,7 +191,7 @@ async function resolveTelegramUserState(
       state: 'NEED_LINK',
       conflictUserHint: {
         maskedEmail: maskEmail(userByPhone.email),
-        maskedPhone: maskPhone(userByPhone.phone),
+        maskedPhone: maskPhone(toApiPhoneString(userByPhone.phone)),
       },
     };
   }
@@ -192,7 +204,8 @@ async function resolveTelegramUserState(
       role: { connect: { name: 'user' } },
       firstName: session.firstName ?? undefined,
       lastName: session.lastName ?? undefined,
-      phone: phoneE164,
+      phone: normalizedPhone,
+      phoneVerifiedAt: new Date(),
       telegramId,
       telegramUsername: session.username,
       telegramLinkedAt: new Date(),
@@ -535,6 +548,10 @@ router.post('/resend', async (req: express.Request, res: express.Response) => {
   }
 });
 
+router.get('/methods', async (_req: express.Request, res: express.Response) => {
+  return res.json(successResponse({ methods: getAuthMethodDescriptors() }));
+});
+
 router.post('/telegram/init', TELEGRAM_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
   try {
     const { initDataRaw } = req.body as { initDataRaw?: string };
@@ -834,6 +851,116 @@ router.post(
   }
 );
 
+async function processTelegramPhoneVerificationUpdate(update: any) {
+  const message = update?.message || update?.edited_message || null;
+  const fromIdRaw = message?.from?.id ?? message?.contact?.user_id ?? null;
+  const chatIdRaw = message?.chat?.id ?? null;
+  const username = message?.from?.username ? String(message.from.username) : null;
+  const textRaw = String(message?.text || '').trim();
+
+  if (fromIdRaw && textRaw.startsWith('/start')) {
+    const payload = textRaw.split(/\s+/, 2)[1] || '';
+    const token = payload.startsWith('verify_phone_') ? payload.slice('verify_phone_'.length) : '';
+    if (token) {
+      tgLog('phone_verify_start_received', { fromIdRaw: String(fromIdRaw), hasChatId: chatIdRaw !== null && chatIdRaw !== undefined });
+      const session = await bindTelegramToPhoneVerificationByStartToken({
+        token,
+        telegramUserId: String(fromIdRaw),
+        chatId: chatIdRaw !== null && chatIdRaw !== undefined ? String(chatIdRaw) : null,
+        username,
+      });
+      tgLog('phone_verify_start_bound', {
+        sessionId: session?.id ?? null,
+        sessionStatus: session?.status ?? null,
+      });
+
+      if (chatIdRaw !== null && chatIdRaw !== undefined) {
+        const chatId = String(chatIdRaw);
+        if (!session) {
+          await sendTelegramInfoMessage({
+            chatId,
+            text: 'Ссылка подтверждения недействительна. Запустите подтверждение номера заново в приложении.',
+            removeKeyboard: true,
+          }).catch((e) => tgLog('bot_send_failed', { stage: 'start_invalid', error: String(e?.message || e) }));
+        } else if (session.status === 'PENDING') {
+          await sendPhoneContactRequestMessage({
+            chatId,
+            requestedPhone: toApiPhoneString(session.requestedPhone),
+          }).catch((e) => tgLog('bot_send_failed', { stage: 'start_pending', error: String(e?.message || e) }));
+        } else if (session.status === 'EXPIRED') {
+          await sendTelegramInfoMessage({
+            chatId,
+            text: 'Сессия подтверждения истекла. Запустите подтверждение заново в приложении.',
+            removeKeyboard: true,
+          }).catch((e) => tgLog('bot_send_failed', { stage: 'start_expired', error: String(e?.message || e) }));
+        } else {
+          await sendTelegramInfoMessage({
+            chatId,
+            text: 'Эта сессия подтверждения уже завершена.',
+            removeKeyboard: true,
+          }).catch((e) => tgLog('bot_send_failed', { stage: 'start_already_done', error: String(e?.message || e) }));
+        }
+      }
+    }
+  }
+
+  const phoneRaw = message?.contact?.phone_number ?? null;
+  if (!fromIdRaw || !phoneRaw) {
+    return;
+  }
+
+  const normalized = normalizePhoneE164(String(phoneRaw));
+  if (!normalized) return;
+
+  await setTelegramContactPhone(String(fromIdRaw), normalized);
+  const verification = await verifyPhoneByTelegramContact({
+    telegramUserId: String(fromIdRaw),
+    phoneRaw: String(phoneRaw),
+    username,
+  });
+
+  if (chatIdRaw !== null && chatIdRaw !== undefined) {
+    const chatId = String(chatIdRaw);
+    if (verification.ok) {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Номер телефона подтверждён. Можно вернуться в приложение.',
+        removeKeyboard: true,
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'verified', error: String(e?.message || e) }));
+    } else if (verification.reason === 'PHONE_MISMATCH') {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Отправлен другой номер. Нажмите кнопку и отправьте контакт с нужным номером.',
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'phone_mismatch', error: String(e?.message || e) }));
+    } else if (verification.reason === 'SESSION_NOT_FOUND' || verification.reason === 'SESSION_EXPIRED') {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Сессия подтверждения не найдена или истекла. Запустите подтверждение заново в приложении.',
+        removeKeyboard: true,
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'session_not_found_or_expired', error: String(e?.message || e) }));
+    } else if (verification.reason === 'PHONE_ALREADY_USED') {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Этот номер уже используется другим пользователем.',
+        removeKeyboard: true,
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'phone_already_used', error: String(e?.message || e) }));
+    } else if (verification.reason === 'TELEGRAM_ALREADY_USED') {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Этот Telegram-аккаунт уже привязан к другому пользователю.',
+        removeKeyboard: true,
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'telegram_already_used', error: String(e?.message || e) }));
+    } else {
+      await sendTelegramInfoMessage({
+        chatId,
+        text: 'Не удалось подтвердить номер. Попробуйте снова из приложения.',
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'unknown_verification_error', error: String(e?.message || e) }));
+    }
+  }
+}
+
+registerTelegramUpdateHandler(processTelegramPhoneVerificationUpdate);
+
 router.post('/telegram/webhook', async (req: express.Request, res: express.Response) => {
   try {
     if (TG_WEBHOOK_SECRET) {
@@ -843,21 +970,7 @@ router.post('/telegram/webhook', async (req: express.Request, res: express.Respo
       }
     }
 
-    const update = req.body || {};
-    const message = update.message || update.edited_message || null;
-    const fromIdRaw = message?.from?.id ?? message?.contact?.user_id ?? null;
-    const phoneRaw = message?.contact?.phone_number ?? null;
-
-    if (!fromIdRaw || !phoneRaw) {
-      return res.json(successResponse({ ok: true }));
-    }
-
-    const normalized = normalizePhoneE164(String(phoneRaw));
-    if (!normalized) {
-      return res.json(successResponse({ ok: true }));
-    }
-
-    await setTelegramContactPhone(String(fromIdRaw), normalized);
+    await processTelegramPhoneVerificationUpdate(req.body || {});
     return res.json(successResponse({ ok: true }));
   } catch (error: any) {
     return res.status(500).json(

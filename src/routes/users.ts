@@ -28,6 +28,19 @@ import { getProfile } from '../services/userService';
 import { notifyProfileActivated } from '../services/pushService';
 import { getPresenceForUsers, markUserOnline } from '../services/presenceService';
 import { uploadMulterFile, resolveObjectUrl } from '../storage/minio';
+import { normalizePhoneToBigInt, sanitizePhoneForSearch, toApiPhoneString } from '../utils/phone';
+import {
+  cancelPhoneVerificationSession,
+  getPhoneVerificationSessionState,
+  startPhoneVerificationSession,
+} from '../services/phoneVerificationService';
+import {
+  cancelEmailChangeSession,
+  getEmailChangeSessionState,
+  resendEmailChangeCode,
+  startEmailChangeSession,
+  verifyEmailChangeSession,
+} from '../services/emailChangeService';
 
 const router = express.Router();
 const USER_LIST_SELECT = {
@@ -41,9 +54,9 @@ const USER_LIST_SELECT = {
   profileStatus: true,
   currentProfileType: true,
   role: { select: { id: true, name: true } },
-  clientProfile: { select: { avatarUrl: true, phone: true } },
-  supplierProfile: { select: { avatarUrl: true, phone: true } },
-  employeeProfile: { select: { departmentId: true, avatarUrl: true, phone: true, department: { select: { id: true, name: true } } } },
+  clientProfile: { select: { avatarUrl: true } },
+  supplierProfile: { select: { avatarUrl: true } },
+  employeeProfile: { select: { departmentId: true, avatarUrl: true, department: { select: { id: true, name: true } } } },
 };
 
 const avatarUpload = multer({
@@ -341,7 +354,6 @@ router.get(
  *                   lastName: { type: string }
  *                   middleName: { type: string }
  *                 required: [firstName]
- *               phone: { type: string }
  *               address:
  *                 $ref: '#/components/schemas/Address'
  *     responses:
@@ -375,7 +387,6 @@ router.post(
       const userId = req.user!.userId;
       const {
         user: userData,
-        phone,
         address,
         counterpartyGuid,
         activeAgreementGuid,
@@ -591,7 +602,6 @@ router.post(
       await prisma.clientProfile.create({
         data: {
           userId,
-          phone,
           ...(addressId && { addressId }),
           counterpartyId: resolvedCounterpartyId ?? null,
           activeAgreementId: resolvedAgreementId,
@@ -652,7 +662,6 @@ router.post(
  *                   lastName: { type: string }
  *                   middleName: { type: string }
  *                 required: [firstName]
- *               phone: { type: string }
  *               address:
  *                 $ref: '#/components/schemas/Address'
  *     responses:
@@ -684,7 +693,7 @@ router.post(
   ) => {
     try {
       const userId = req.user!.userId;
-      const { user: userData, phone, address } = req.body;
+      const { user: userData, address } = req.body;
 
       if (!userData?.firstName) {
         return res.status(400).json(
@@ -726,7 +735,6 @@ router.post(
       await prisma.supplierProfile.create({
         data: {
           userId,
-          phone,
           ...(addressId && { addressId })
         }
       });
@@ -781,7 +789,6 @@ router.post(
  *                   lastName: { type: string }
  *                   middleName: { type: string }
  *                 required: [firstName, lastName]
- *               phone: { type: string }
  *               departmentId: { type: number }
  *             required: [user, departmentId]
  *     responses:
@@ -836,15 +843,9 @@ router.post(
         );
       }
 
-      const baseUser = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { phone: true },
-      });
-
       await prisma.employeeProfile.create({
         data: {
           userId,
-          phone: baseUser?.phone ?? null,
           departmentId,
         }
       });
@@ -1247,15 +1248,20 @@ router.get(
   async (req: AuthRequest<{}, {}, {}, { search?: string }>, res: express.Response) => {
     try {
       const search = (req.query.search || '').trim();
+      const searchPhone = normalizePhoneToBigInt(sanitizePhoneForSearch(search));
+      const searchOr: any[] = [
+        { email: { contains: search, mode: 'insensitive' } },
+        { firstName: { contains: search, mode: 'insensitive' } },
+        { lastName: { contains: search, mode: 'insensitive' } },
+      ];
+      if (searchPhone) {
+        searchOr.push({ phone: searchPhone });
+      }
+
       const users = await prisma.user.findMany({
         where: search
           ? {
-              OR: [
-                { email: { contains: search, mode: 'insensitive' } },
-                { firstName: { contains: search, mode: 'insensitive' } },
-                { lastName: { contains: search, mode: 'insensitive' } },
-                { phone: { contains: search } },
-              ],
+              OR: searchOr,
             }
           : {},
         select: USER_LIST_SELECT,
@@ -1274,13 +1280,7 @@ router.get(
               : u.avatarUrl;
           const avatarUrl = await resolveObjectUrl(rawAvatar ?? null);
           const departmentName = u.employeeProfile?.department?.name ?? null;
-          const bestPhone =
-            u.phone ??
-            u.employeeProfile?.phone ??
-            u.clientProfile?.phone ??
-            u.supplierProfile?.phone ??
-            null;
-          return { ...u, avatarUrl, departmentName, phone: bestPhone };
+          return { ...u, avatarUrl, departmentName, phone: toApiPhoneString(u.phone) };
         })
       );
       const presence = await getPresenceForUsers(usersWithAvatar.map((u) => u.id));
@@ -1613,7 +1613,6 @@ router.patch(
  *               firstName: { type: string, nullable: true }
  *               lastName: { type: string, nullable: true }
  *               middleName: { type: string, nullable: true }
- *               email: { type: string }
  *               phone: { type: string, nullable: true }
  *     responses:
  *       200:
@@ -1632,7 +1631,7 @@ router.patch(
  *                           $ref: '#/components/schemas/UserProfile'
  *       400: { description: Неверные данные }
  *       401: { description: Не авторизован }
- *       409: { description: Email уже используется }
+ *       409: { description: Email изменяется через отдельный flow подтверждения }
  */
 router.patch(
   '/profile',
@@ -1656,7 +1655,6 @@ router.patch(
       }
 
       const data: Record<string, any> = {};
-      let employeePhone: string | null | undefined = undefined;
       const normalize = (val: unknown) => (val === null ? null : String(val).trim());
 
       if (req.body.firstName !== undefined) {
@@ -1672,37 +1670,35 @@ router.patch(
         data.middleName = value || null;
       }
       if (req.body.email !== undefined) {
-        const value = normalize(req.body.email);
-        if (!value) {
-          return res.status(400).json(
-            errorResponse('Email обязателен', ErrorCodes.VALIDATION_ERROR)
-          );
-        }
-        data.email = value;
+        return res.status(409).json(
+          errorResponse(
+            'Email обновляется только через подтверждение кода',
+            ErrorCodes.CONFLICT
+          )
+        );
       }
       if (req.body.phone !== undefined) {
         const value = normalize(req.body.phone);
-        if (currentUser.authProvider === 'TELEGRAM' && currentUser.phone) {
+        if (!value) {
+          data.phone = null;
+          data.phoneVerifiedAt = null;
+        } else {
+          if (!normalizePhoneToBigInt(value)) {
+            return res.status(400).json(
+              errorResponse('Некорректный формат телефона', ErrorCodes.VALIDATION_ERROR)
+            );
+          }
           return res.status(409).json(
             errorResponse(
-              'Для Telegram-пользователя телефон изменяется только через Telegram',
+              'Телефон обновляется только через подтверждение в Telegram',
               ErrorCodes.CONFLICT
             )
           );
         }
-        data.phone = value || null;
-        employeePhone = value || null;
       }
 
       if (Object.keys(data).length) {
         await prisma.user.update({ where: { id: Number(userId) }, data });
-      }
-
-      if (employeePhone !== undefined) {
-        await prisma.employeeProfile.updateMany({
-          where: { userId: Number(userId) },
-          data: { phone: employeePhone },
-        });
       }
 
       const profile = await getProfile(Number(userId));
@@ -1719,6 +1715,264 @@ router.patch(
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? error : undefined
         )
+      );
+    }
+  }
+);
+
+router.post(
+  '/me/email/change/start',
+  authenticateToken,
+  checkUserStatus,
+  auditLog('Пользователь запросил смену email с подтверждением'),
+  async (req: AuthRequest<{}, {}, { email?: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const email = String(req.body?.email || '').trim();
+      if (!email) {
+        return res.status(400).json(errorResponse('Email обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const data = await startEmailChangeSession({ userId, emailRaw: email });
+      return res.json(successResponse(data, 'Код подтверждения отправлен на новый email'));
+    } catch (error: any) {
+      const message = String(error?.message || 'Не удалось запустить смену email');
+      if (message === 'EMAIL_CHANGE_INVALID_EMAIL') {
+        return res.status(400).json(errorResponse('Некорректный формат email', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (message === 'EMAIL_CHANGE_SAME_AS_CURRENT') {
+        return res.status(409).json(errorResponse('Указан текущий email', ErrorCodes.CONFLICT));
+      }
+      if (message === 'EMAIL_CHANGE_CONFLICT') {
+        return res.status(409).json(errorResponse('Этот email уже используется', ErrorCodes.CONFLICT));
+      }
+      if (message === 'EMAIL_CHANGE_USER_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      return res.status(500).json(errorResponse(message, ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/me/email/change/:sessionId',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{ sessionId: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const session = await getEmailChangeSessionState({ userId, sessionId });
+      if (!session) {
+        return res.status(404).json(errorResponse('Сессия не найдена', ErrorCodes.NOT_FOUND));
+      }
+      return res.json(successResponse({ session }));
+    } catch (error: any) {
+      return res.status(500).json(
+        errorResponse(error?.message || 'Не удалось получить статус смены email', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+router.post(
+  '/me/email/change/:sessionId/resend',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{ sessionId: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const data = await resendEmailChangeCode({ userId, sessionId });
+      return res.json(successResponse(data, 'Код подтверждения отправлен повторно'));
+    } catch (error: any) {
+      const message = String(error?.message || 'Не удалось отправить код повторно');
+      if (message === 'EMAIL_CHANGE_SESSION_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Сессия не найдена', ErrorCodes.NOT_FOUND));
+      }
+      if (message === 'EMAIL_CHANGE_SESSION_NOT_ACTIVE') {
+        return res.status(409).json(errorResponse('Сессия уже завершена', ErrorCodes.CONFLICT));
+      }
+      if (message === 'EMAIL_CHANGE_SESSION_EXPIRED') {
+        return res.status(409).json(errorResponse('Сессия подтверждения истекла', ErrorCodes.CONFLICT));
+      }
+      if (message.startsWith('EMAIL_CHANGE_RESEND_TOO_EARLY:')) {
+        const retryAfterSec = Number(message.split(':')[1] || 0);
+        if (retryAfterSec > 0) {
+          res.setHeader('Retry-After', String(retryAfterSec));
+        }
+        return res.status(429).json(
+          errorResponse(`Повторная отправка будет доступна через ${Math.max(1, retryAfterSec)} сек.`, ErrorCodes.TOO_MANY_REQUESTS)
+        );
+      }
+      return res.status(500).json(errorResponse(message, ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.post(
+  '/me/email/change/:sessionId/verify',
+  authenticateToken,
+  checkUserStatus,
+  auditLog('Пользователь подтвердил смену email кодом'),
+  async (req: AuthRequest<{ sessionId: string }, {}, { code?: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      const code = String(req.body?.code || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!code) {
+        return res.status(400).json(errorResponse('Код подтверждения обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const result = await verifyEmailChangeSession({ userId, sessionId, codeRaw: code });
+      const profile = await getProfile(userId);
+      return res.json(successResponse({ ...result, profile }, 'Email успешно подтвержден и обновлен'));
+    } catch (error: any) {
+      const message = String(error?.message || 'Не удалось подтвердить смену email');
+      if (message === 'EMAIL_CHANGE_INVALID_CODE') {
+        return res.status(400).json(errorResponse('Неверный код подтверждения', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (message === 'EMAIL_CHANGE_TOO_MANY_ATTEMPTS') {
+        return res.status(429).json(
+          errorResponse('Превышено максимальное количество попыток подтверждения', ErrorCodes.TOO_MANY_REQUESTS)
+        );
+      }
+      if (message === 'EMAIL_CHANGE_SESSION_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Сессия не найдена', ErrorCodes.NOT_FOUND));
+      }
+      if (message === 'EMAIL_CHANGE_SESSION_NOT_ACTIVE') {
+        return res.status(409).json(errorResponse('Сессия уже завершена', ErrorCodes.CONFLICT));
+      }
+      if (message === 'EMAIL_CHANGE_SESSION_EXPIRED') {
+        return res.status(409).json(errorResponse('Сессия подтверждения истекла', ErrorCodes.CONFLICT));
+      }
+      if (message === 'EMAIL_CHANGE_CONFLICT') {
+        return res.status(409).json(errorResponse('Этот email уже используется', ErrorCodes.CONFLICT));
+      }
+      return res.status(500).json(errorResponse(message, ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.post(
+  '/me/email/change/:sessionId/cancel',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{ sessionId: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const cancelled = await cancelEmailChangeSession({ userId, sessionId });
+      return res.json(successResponse({ cancelled }));
+    } catch (error: any) {
+      return res.status(500).json(
+        errorResponse(error?.message || 'Не удалось отменить смену email', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+router.post(
+  '/me/phone/verification/start',
+  authenticateToken,
+  checkUserStatus,
+  auditLog('Пользователь запросил верификацию телефона через Telegram'),
+  async (req: AuthRequest<{}, {}, { phone?: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const phone = String(req.body?.phone || '').trim();
+      if (!phone) {
+        return res.status(400).json(errorResponse('Телефон обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const session = await startPhoneVerificationSession({ userId, phoneRaw: phone });
+      return res.json(successResponse(session, 'Сессия верификации создана'));
+    } catch (error: any) {
+      const message = String(error?.message || 'Не удалось создать сессию верификации');
+      if (/TELEGRAM_PHONE_VERIFICATION_NOT_CONFIGURED/i.test(message)) {
+        return res.status(503).json(
+          errorResponse(
+            'Telegram верификация временно недоступна. Проверьте настройки TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME на сервере.',
+            ErrorCodes.INTERNAL_ERROR
+          )
+        );
+      }
+      if (/TELEGRAM_DEEP_LINK_UNAVAILABLE/i.test(message)) {
+        return res.status(503).json(
+          errorResponse(
+            'Ссылка Telegram недоступна, проверьте конфигурацию бота.',
+            ErrorCodes.INTERNAL_ERROR
+          )
+        );
+      }
+      if (/используется другим пользователем/i.test(message)) {
+        return res.status(409).json(errorResponse(message, ErrorCodes.CONFLICT));
+      }
+      if (/некорректный формат телефона/i.test(message)) {
+        return res.status(400).json(errorResponse(message, ErrorCodes.VALIDATION_ERROR));
+      }
+      return res.status(500).json(errorResponse(message, ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/me/phone/verification/:sessionId',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{ sessionId: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const session = await getPhoneVerificationSessionState({ userId, sessionId });
+      if (!session) {
+        return res.status(404).json(errorResponse('Сессия не найдена', ErrorCodes.NOT_FOUND));
+      }
+      return res.json(successResponse({ session }));
+    } catch (error: any) {
+      return res.status(500).json(
+        errorResponse(error?.message || 'Не удалось получить статус верификации', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+router.post(
+  '/me/phone/verification/:sessionId/cancel',
+  authenticateToken,
+  checkUserStatus,
+  async (req: AuthRequest<{ sessionId: string }>, res: express.Response) => {
+    try {
+      const userId = Number(req.user!.userId);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json(errorResponse('sessionId обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const cancelled = await cancelPhoneVerificationSession({ userId, sessionId });
+      return res.json(successResponse({ cancelled }));
+    } catch (error: any) {
+      return res.status(500).json(
+        errorResponse(error?.message || 'Не удалось отменить верификацию', ErrorCodes.INTERNAL_ERROR)
       );
     }
   }
@@ -1746,7 +2000,18 @@ router.patch(
       if (req.body.lastName !== undefined) data.lastName = req.body.lastName;
       if (req.body.middleName !== undefined) data.middleName = req.body.middleName;
       if (req.body.email !== undefined) data.email = req.body.email;
-      if (req.body.phone !== undefined) data.phone = req.body.phone;
+      if (req.body.phone !== undefined) {
+        const rawPhone = req.body.phone === null ? '' : String(req.body.phone).trim();
+        if (!rawPhone) {
+          data.phone = null;
+        } else {
+          const normalizedPhone = normalizePhoneToBigInt(rawPhone);
+          if (!normalizedPhone) {
+            return res.status(400).json(errorResponse('Некорректный формат телефона', ErrorCodes.VALIDATION_ERROR));
+          }
+          data.phone = normalizedPhone;
+        }
+      }
       if (req.body.profileStatus !== undefined) data.profileStatus = req.body.profileStatus;
 
       if (Object.keys(data).length) {
@@ -2149,7 +2414,12 @@ router.get(
         orderBy: { id: 'asc' },
       });
 
-      return res.json(successResponse(users));
+      const serialized = users.map((user) => ({
+        ...user,
+        phone: toApiPhoneString(user.phone),
+      }));
+
+      return res.json(successResponse(serialized));
     } catch (error) {
       console.error('Ошибка получения пользователей отдела', error);
       return res.status(500).json(
@@ -2164,7 +2434,7 @@ router.get(
 );
 
 /**
- * Админ: обновить профиль пользователя (статус/телефон/адрес/отдел)
+ * Админ: обновить профиль пользователя (статус/адрес/отдел)
  */
 router.patch(
   '/:userId/profiles/:type',
@@ -2196,7 +2466,7 @@ router.patch(
         return res.status(400).json(errorResponse('Некорректный тип профиля', ErrorCodes.VALIDATION_ERROR));
       }
 
-      const { status, phone, departmentId, address } = req.body || {};
+      const { status, departmentId, address } = req.body || {};
       if (status !== undefined && !Object.values(ProfileStatus).includes(status)) {
         return res.status(400).json(errorResponse('Некорректный статус профиля', ErrorCodes.VALIDATION_ERROR));
       }
@@ -2223,7 +2493,6 @@ router.patch(
 
         const data: any = {};
         if (status !== undefined) data.status = status;
-        if (phone !== undefined) data.phone = phone;
         if (departmentId !== undefined) {
           if (departmentId === null) {
             data.departmentId = null;
@@ -2254,7 +2523,6 @@ router.patch(
 
         const data: any = {};
         if (status !== undefined) data.status = status;
-        if (phone !== undefined) data.phone = phone;
         if (address !== undefined) {
           if (address === null) {
             data.address = { disconnect: true };
@@ -2285,7 +2553,6 @@ router.patch(
 
         const data: any = {};
         if (status !== undefined) data.status = status;
-        if (phone !== undefined) data.phone = phone;
         if (address !== undefined) {
           if (address === null) {
             data.address = { disconnect: true };

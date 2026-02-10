@@ -20,6 +20,7 @@ import {
   ErrorCodes,
 } from '../utils/apiResponse';
 import { cacheGet, cacheSet, cacheDelPrefix } from '../utils/cache';
+import { randomBytes } from 'node:crypto';
 
 import {
   QRCreateRequest,
@@ -36,7 +37,6 @@ import {
   QRAnalyticsQueryResponse
 } from 'types/qrTypes';
 import { checkUserStatus } from '../middleware/checkUserStatus';
-import { customAlphabet } from 'nanoid';
 import geoip from 'geoip-lite';
 import {
   assertQrType,
@@ -49,10 +49,15 @@ const validator = require('validator');
 const UAParser = require('ua-parser-js');
 
 const router = express.Router();
-const generateShortId = customAlphabet(
-  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
-  8
-);
+const SHORT_ID_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+const generateShortId = () => {
+  const bytes = randomBytes(8);
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += SHORT_ID_ALPHABET[bytes[i] % SHORT_ID_ALPHABET.length];
+  }
+  return out;
+};
 
 /**
  * Определение типа вложения на основе MIME.

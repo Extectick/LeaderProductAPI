@@ -27,6 +27,7 @@ import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 import { markUserOffline, markUserOnline } from './services/presenceService';
+import { initializeTelegramUpdates, isTelegramBotConfigured, stopTelegramUpdates } from './services/telegramBotService';
 // Swagger
 import { swaggerSpec } from './swagger/swagger';
 
@@ -334,17 +335,40 @@ if (ENV !== 'test') {
     // 2) Запускаем проверки сервисов (Redis уже подключен — только ping)
     await startupChecks();
 
-    // 3) Стартуем HTTP-сервер
+    // 3) Стартуем HTTP-сервер (не блокируем старт внешними интеграциями)
     server.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);
       console.log(`Docs:   http://localhost:${port}/docs`);
     });
+
+    // 4) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
+    if (isTelegramBotConfigured()) {
+      void (async () => {
+        try {
+          const transport = await initializeTelegramUpdates();
+          if (transport.ok) {
+            console.log('[startup] Telegram updates: OK', {
+              mode: transport.mode,
+              url: transport.currentUrl,
+              pendingUpdates: transport.pendingUpdates,
+            });
+          } else {
+            console.warn('[startup] Telegram updates: NOT READY', transport);
+          }
+        } catch (e: any) {
+          console.warn('[startup] Telegram updates setup failed:', e?.message || e);
+        }
+      })();
+    } else {
+      console.warn('[startup] Telegram bot is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_USERNAME)');
+    }
   })();
 }
 
 // ---- Graceful shutdown ----
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
+  await stopTelegramUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
   await disconnectKafka().catch(() => {});
@@ -352,6 +376,7 @@ process.on('SIGINT', async () => {
 });
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
+  await stopTelegramUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
   await disconnectKafka().catch(() => {});

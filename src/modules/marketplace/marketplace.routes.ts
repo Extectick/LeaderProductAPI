@@ -64,7 +64,7 @@ const handleError = (res: express.Response, err: unknown, fallbackMessage: strin
  *               data:
  *                 profile:
  *                   userId: 1
- *                   phone: "+79990000000"
+ *                   phone: "79990000000"
  *                 context:
  *                   counterparty:
  *                     guid: COUNTERPARTY_GUID

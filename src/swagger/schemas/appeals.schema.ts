@@ -313,6 +313,31 @@ const AppealDeleteMessageData = {
   },
 } as const;
 
+/** GET /appeals/counters — data */
+const AppealCountersData = {
+  type: 'object',
+  required: ['my', 'department'],
+  properties: {
+    my: {
+      type: 'object',
+      required: ['activeCount', 'unreadMessagesCount'],
+      properties: {
+        activeCount: { type: 'integer', example: 4 },
+        unreadMessagesCount: { type: 'integer', example: 9 },
+      },
+    },
+    department: {
+      type: 'object',
+      required: ['available', 'activeCount', 'unreadMessagesCount'],
+      properties: {
+        available: { type: 'boolean', example: true },
+        activeCount: { type: 'integer', example: 12 },
+        unreadMessagesCount: { type: 'integer', example: 21 },
+      },
+    },
+  },
+} as const;
+
 /**
  * Экспортируем как набор компонентов для swagger.components.schemas
  * Пример использования:
@@ -343,6 +368,7 @@ const appealsSchemas = {
   AppealWatchersUpdateData,
   AppealEditMessageData,
   AppealDeleteMessageData,
+  AppealCountersData,
 } as const;
 
 export default appealsSchemas;
