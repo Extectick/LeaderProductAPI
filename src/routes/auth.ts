@@ -919,6 +919,11 @@ async function processTelegramPhoneVerificationUpdate(update: any) {
     username,
   });
 
+  if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND') {
+    tgLog('contact_without_session', { telegramUserId: String(fromIdRaw) });
+    return;
+  }
+
   if (chatIdRaw !== null && chatIdRaw !== undefined) {
     const chatId = String(chatIdRaw);
     if (verification.ok) {
