@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    image: leader-api:latest
+    image: ghcr.io/extectick/leaderproductapi:${IMAGE_TAG:-latest}
     container_name: leader_api
     restart: unless-stopped
     env_file:
@@ -179,7 +179,7 @@ services:
       - postgres
 
   studio:
-    image: leader-api:latest
+    image: ghcr.io/extectick/leaderproductapi:${IMAGE_TAG:-latest}
     container_name: leader_prisma_studio
     depends_on:
       - api
@@ -194,7 +194,7 @@ services:
       - "5555:5555"
 
   seed:
-    image: leader-api:latest
+    image: ghcr.io/extectick/leaderproductapi:${IMAGE_TAG:-latest}
     container_name: leader_prisma_seed
     profiles: ["seed"]
     restart: "no"

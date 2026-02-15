@@ -223,14 +223,32 @@ export async function sendTelegramInfoMessage(params: {
   chatId: string | number | bigint;
   text: string;
   removeKeyboard?: boolean;
+  parseMode?: 'HTML' | 'Markdown' | 'MarkdownV2';
+  disableLinkPreview?: boolean;
 }) {
   const bot = getBot();
   if (!bot) return false;
 
-  const options = params.removeKeyboard
-    ? { reply_markup: Markup.removeKeyboard().reply_markup }
-    : undefined;
+  const options: Record<string, any> = {};
 
-  await bot.telegram.sendMessage(String(params.chatId), params.text, options);
+  if (params.removeKeyboard) {
+    options.reply_markup = Markup.removeKeyboard().reply_markup;
+  }
+
+  if (params.parseMode) {
+    options.parse_mode = params.parseMode;
+  }
+
+  if (params.disableLinkPreview) {
+    // New Bot API field + backward-compatible fallback
+    options.link_preview_options = { is_disabled: true };
+    options.disable_web_page_preview = true;
+  }
+
+  await bot.telegram.sendMessage(
+    String(params.chatId),
+    params.text,
+    Object.keys(options).length ? options : undefined
+  );
   return true;
 }

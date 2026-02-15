@@ -22,8 +22,10 @@ import trackingRouter from './routes/tracking';
 import updatesRouter from './routes/updates';
 import filesRouter from './routes/files';
 import servicesRouter from './routes/services';
+import notificationsRouter from './routes/notifications';
 import onecRouter from './modules/onec/onec.routes';
 import marketplaceRouter from './modules/marketplace/marketplace.routes';
+import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 import { markUserOffline, markUserOnline } from './services/presenceService';
@@ -124,6 +126,7 @@ app.use('/tracking', trackingRouter);
 app.use('/services', servicesRouter);
 app.use('/updates', updatesRouter);
 app.use('/files', filesRouter);
+app.use('/notifications', notificationsRouter);
 app.use('/api/1c', onecRouter);
 app.use('/api/marketplace', marketplaceRouter);
 
@@ -238,6 +241,11 @@ const io = new SocketIOServer(server, {
 app.set('io', io);
 
 const userSocketCounts = new Map<number, number>();
+const userPresenceRefreshTimers = new Map<number, ReturnType<typeof setInterval>>();
+const PRESENCE_REFRESH_MS = Math.max(
+  15_000,
+  Number(process.env.PRESENCE_REFRESH_MS || 30_000)
+);
 
 function normalizePresenceUserIds(value: unknown): number[] {
   const raw = Array.isArray(value)
@@ -260,6 +268,23 @@ function emitPresenceChanged(userId: number, isOnline: boolean, lastSeenAt: Date
     isOnline,
     lastSeenAt: lastSeenAt ? lastSeenAt.toISOString() : null,
   });
+}
+
+function startPresenceRefresh(userId: number) {
+  if (userPresenceRefreshTimers.has(userId)) return;
+  const timer = setInterval(() => {
+    void markUserOnline(userId).catch((err) => {
+      console.warn('[presence] refresh markUserOnline failed', err?.message || err);
+    });
+  }, PRESENCE_REFRESH_MS);
+  userPresenceRefreshTimers.set(userId, timer);
+}
+
+function stopPresenceRefresh(userId: number) {
+  const timer = userPresenceRefreshTimers.get(userId);
+  if (!timer) return;
+  clearInterval(timer);
+  userPresenceRefreshTimers.delete(userId);
 }
 
 io.use((socket, next) => {
@@ -290,6 +315,7 @@ io.on('connection', (socket) => {
         .finally(() => {
           emitPresenceChanged(userId, true, null);
         });
+      startPresenceRefresh(userId);
     }
   }
 
@@ -313,6 +339,7 @@ io.on('connection', (socket) => {
       return;
     }
     userSocketCounts.delete(userId);
+    stopPresenceRefresh(userId);
     void markUserOffline(userId)
       .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
       .catch((err) => {
@@ -341,7 +368,10 @@ if (ENV !== 'test') {
       console.log(`Docs:   http://localhost:${port}/docs`);
     });
 
-    // 4) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
+    // 4) Запускаем планировщик фоновых задач (напоминания о непрочитанных, закрытии)
+    startScheduledJobs();
+
+    // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
     if (isTelegramBotConfigured()) {
       void (async () => {
         try {
@@ -368,6 +398,7 @@ if (ENV !== 'test') {
 // ---- Graceful shutdown ----
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
+  stopScheduledJobs();
   await stopTelegramUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
@@ -376,6 +407,7 @@ process.on('SIGINT', async () => {
 });
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
+  stopScheduledJobs();
   await stopTelegramUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});

@@ -69,7 +69,18 @@ import {
 import { resolveObjectUrl, uploadMulterFile } from '../storage/minio';
 import { cacheGet, cacheSet, cacheDel, cacheDelPrefix } from '../utils/cache';
 import { randomUUID } from 'node:crypto';
-import { sendPushToUser } from '../services/pushService';
+import { dispatchNotification } from '../services/notificationService';
+import {
+  scheduleUnreadReminder,
+  scheduleClosureReminder,
+  cancelAppealJobs,
+} from '../services/scheduledJobsService';
+import {
+  tplNewAppeal,
+  tplStatusChanged,
+  tplDeadlineChanged,
+  tplNewMessage,
+} from '../services/notificationTemplates';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
 type HasAppealAttachment = {
@@ -412,25 +423,35 @@ async function createSystemMessage(opts: {
   return mapped;
 }
 
-async function sendPushToUsers(
-  userIds: number[],
-  title: string,
-  body: string,
-  data?: Record<string, any>
-) {
-  const uniq = Array.from(new Set(userIds));
-  if (!uniq.length) return;
-  await Promise.allSettled(
-    uniq.map((userId) =>
-      sendPushToUser(userId, {
-        title,
-        body,
-        data,
-        sound: 'default',
-        channelId: 'appeal-message',
-      })
-    )
-  );
+async function rescheduleUnreadReminderIfNeeded(appealId: number): Promise<void> {
+  await cancelAppealJobs(appealId);
+
+  const appeal = await prisma.appeal.findUnique({
+    where: { id: appealId },
+    select: { status: true },
+  });
+  if (!appeal) return;
+  if (appeal.status !== AppealStatus.OPEN && appeal.status !== AppealStatus.IN_PROGRESS) return;
+
+  const latestUserMessage = await prisma.appealMessage.findFirst({
+    where: {
+      appealId,
+      deleted: false,
+      type: AppealMessageType.USER,
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: {
+      id: true,
+      reads: {
+        select: { id: true },
+        take: 1,
+      },
+    },
+  });
+  if (!latestUserMessage) return;
+  if (latestUserMessage.reads.length > 0) return;
+
+  await scheduleUnreadReminder(appealId);
 }
 
 
@@ -545,6 +566,66 @@ router.post(
         priority: createdAppeal.priority,
         title: createdAppeal.title,
       });
+
+      // 6.1) Telegram-уведомление + планировщик
+      void (async () => {
+        try {
+          const [deptRoleMembers, employeeDeptMembers] = await Promise.all([
+            prisma.departmentRole.findMany({
+              where: { departmentId: createdAppeal.toDepartmentId },
+              select: { userId: true },
+            }),
+            prisma.employeeProfile.findMany({
+              where: { departmentId: createdAppeal.toDepartmentId },
+              select: { userId: true },
+            }),
+          ]);
+          const deptUserIds = Array.from(
+            new Set([
+              ...deptRoleMembers.map((m) => m.userId),
+              ...employeeDeptMembers.map((m) => m.userId),
+            ])
+          );
+
+          const fromDept = createdAppeal.fromDepartmentId
+            ? await prisma.department.findUnique({
+                where: { id: createdAppeal.fromDepartmentId },
+                select: { name: true },
+              })
+            : null;
+
+          const creator = await prisma.user.findUnique({
+            where: { id: createdAppeal.createdById },
+            select: { firstName: true, lastName: true, email: true },
+          });
+          const creatorName = [creator?.firstName, creator?.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || creator?.email || 'Пользователь';
+
+          await dispatchNotification({
+            type: 'NEW_APPEAL',
+            appealId: createdAppeal.id,
+            appealNumber: createdAppeal.number,
+            title: `Новое обращение #${createdAppeal.number}`,
+            body: createdAppeal.title || 'Новое обращение',
+            telegramText: tplNewAppeal({
+              appealId:     createdAppeal.id,
+              number:       createdAppeal.number,
+              title:        createdAppeal.title,
+              fromDeptName: fromDept?.name ?? null,
+              creatorName,
+            }),
+            channels: ['telegram'],
+            recipientUserIds: deptUserIds,
+            excludeSenderUserId: createdAppeal.createdById,
+          });
+
+          await scheduleUnreadReminder(createdAppeal.id);
+        } catch (err: any) {
+          console.error('[notifications] new appeal error:', err?.message);
+        }
+      })();
 
       // 7) Ответ
       return res.status(201).json(
@@ -1784,6 +1865,53 @@ router.put(
         userIds: recipients,
       });
 
+      // Push/Telegram-уведомления + управление планировщиком
+      void (async () => {
+        try {
+          const changedByName = [actor?.firstName, actor?.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || actor?.email || 'Пользователь';
+
+          await dispatchNotification({
+            type: 'STATUS_CHANGED',
+            appealId,
+            appealNumber: appeal.number,
+            title: `Обращение #${appeal.number}`,
+            body: `Статус изменён на: ${STATUS_LABELS[status] ?? status}`,
+            telegramText: tplStatusChanged({
+              appealId,
+              number: appeal.number,
+              oldStatus: appeal.status,
+              newStatus: status,
+              changedByName,
+            }),
+            channels: ['push', 'telegram'],
+            recipientUserIds: recipients,
+            excludeSenderUserId: req.user!.userId,
+            pushData: {
+              type: 'APPEAL_STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              status,
+            },
+          });
+
+          // Управление задачами планировщика
+          if (['RESOLVED', 'COMPLETED'].includes(status)) {
+            await cancelAppealJobs(appealId);
+            await scheduleClosureReminder(appealId);
+          } else if (['DECLINED'].includes(status)) {
+            await cancelAppealJobs(appealId);
+          } else {
+            await cancelAppealJobs(appealId);
+            await scheduleUnreadReminder(appealId);
+          }
+        } catch (err: any) {
+          console.error('[notifications] status change error:', err?.message);
+        }
+      })();
+
       await cacheDel(`appeal:${appealId}`);
       await cacheDelPrefix('appeals:list:');
 
@@ -1921,6 +2049,43 @@ router.put(
         toDepartmentId: appeal.toDepartmentId,
         userIds: recipients,
       });
+
+      // Push/Telegram-уведомление
+      void (async () => {
+        try {
+          const changedByName = [actor?.firstName, actor?.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || actor?.email || 'Пользователь';
+
+          await dispatchNotification({
+            type: 'DEADLINE_CHANGED',
+            appealId,
+            appealNumber: appeal.number,
+            title: `Обращение #${appeal.number}`,
+            body: nextDeadline
+              ? `Дедлайн до ${nextDeadline.toLocaleDateString('ru-RU')}`
+              : 'Дедлайн удалён',
+            telegramText: tplDeadlineChanged({
+              appealId,
+              number:        appeal.number,
+              deadline:      nextDeadline,
+              changedByName,
+            }),
+            channels: ['push', 'telegram'],
+            recipientUserIds: recipients,
+            excludeSenderUserId: req.user!.userId,
+            pushData: {
+              type: 'APPEAL_DEADLINE_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              deadline: nextDeadline ? nextDeadline.toISOString() : null,
+            },
+          });
+        } catch (err: any) {
+          console.error('[notifications] deadline change error:', err?.message);
+        }
+      })();
 
       await cacheDel(`appeal:${appealId}`);
       await cacheDelPrefix('appeals:list:');
@@ -2157,19 +2322,6 @@ router.post(
           lastMessage: mappedMessageWithAppeal,
         });
 
-        // 7.1) Отправляем пуши адресатам (без отправителя)
-        const viewerUserIds = new Set<number>();
-        try {
-          const roomApi = (io as any).in?.(`appeal:${appealId}`);
-          const sockets: any[] = roomApi?.fetchSockets ? await roomApi.fetchSockets() : [];
-          sockets.forEach((s) => {
-            const uid = Number(s?.data?.user?.userId);
-            if (Number.isFinite(uid) && uid > 0) viewerUserIds.add(uid);
-          });
-        } catch (err: any) {
-          console.warn('[push] failed to inspect appeal room sockets', err?.message || err);
-        }
-
         const senderName = mappedMessageWithAppeal.sender
           ? [
               mappedMessageWithAppeal.sender.firstName,
@@ -2182,24 +2334,40 @@ router.post(
         const snippet = mappedMessageWithAppeal.text
           ? String(mappedMessageWithAppeal.text).trim().slice(0, 120)
           : '[Вложение]';
-        const pushRecipients = Array.from(recipients).filter(
-          (uid) => uid !== req.user!.userId && !viewerUserIds.has(uid)
-        );
-        if (pushRecipients.length) {
-          await sendPushToUsers(
-            pushRecipients,
-            `Обращение #${appeal.number}`,
-            `${senderName}: ${snippet}`,
-            {
-              type: 'APPEAL_MESSAGE',
+      // Push/Telegram-уведомление участникам + перепланировка UNREAD_REMINDER
+      void (async () => {
+        try {
+          const notificationRecipients = Array.from(recipients).filter(
+            (uid) => uid !== req.user!.userId
+          );
+          if (notificationRecipients.length) {
+            await dispatchNotification({
+              type: 'NEW_MESSAGE',
               appealId,
               appealNumber: appeal.number,
-              messageId: mappedMessageWithAppeal.id,
-              senderName,
-              senderAvatarUrl: mappedMessageWithAppeal.sender?.avatarUrl ?? null,
-            }
-          );
+              title: `Обращение #${appeal.number}`,
+              body: `${senderName}: ${snippet}`,
+              telegramText: tplNewMessage({ appealId, number: appeal.number, senderName, snippet }),
+              channels: ['push', 'telegram'],
+              recipientUserIds: notificationRecipients,
+              excludeSenderUserId: req.user!.userId,
+              pushData: {
+                type: 'APPEAL_MESSAGE',
+                appealId,
+                appealNumber: appeal.number,
+                messageId: mappedMessageWithAppeal.id,
+                senderName,
+                senderAvatarUrl: mappedMessageWithAppeal.sender?.avatarUrl ?? null,
+              },
+            });
+          }
+          // Сбросить и перепланировать напоминание о непрочитанных
+          await cancelAppealJobs(appealId);
+          await scheduleUnreadReminder(appealId);
+        } catch (err: any) {
+          console.error('[notifications] new message error:', err?.message);
         }
+      })();
 
       // 8) Отправляем ответ
       return res
@@ -2288,7 +2456,6 @@ router.post(
           },
           select: { id: true, createdAt: true },
         });
-        const acceptedIds = readableMessages.map((m) => m.id);
         let finalReadIds: number[] = [];
 
         if (readableMessages.length) {
@@ -2332,6 +2499,13 @@ router.post(
             messageIds: finalReadIds,
             userId,
             readAt: now,
+          });
+        }
+
+        // Перепланировать UNREAD_REMINDER в зависимости от остатка непрочитанных
+        if (finalReadIds.length) {
+          void rescheduleUnreadReminderIfNeeded(appealId).catch((err: any) => {
+            console.error('[notifications] rescheduleUnreadReminderIfNeeded error:', err?.message);
           });
         }
 
@@ -2447,6 +2621,12 @@ router.post(
         userId,
         readAt: now,
       });
+
+      if (finalReadIds.length) {
+        void rescheduleUnreadReminderIfNeeded(appealId).catch((err: any) => {
+          console.error('[notifications] rescheduleUnreadReminderIfNeeded error:', err?.message);
+        });
+      }
 
       return res.json(
         successResponse(
@@ -2767,4 +2947,3 @@ router.get(
 );
 
 export default router;
-

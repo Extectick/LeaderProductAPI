@@ -244,6 +244,8 @@ model User {
   updateEvents      AppUpdateEvent[]
   phoneVerificationSessions PhoneVerificationSession[]
   phoneMigrationReports     UserPhoneMigrationReport[]
+  notificationSettings UserNotificationSettings?
+  appealMutes          AppealMute[]
 
   @@index([email])
 }
@@ -593,6 +595,7 @@ model Appeal {
   watchers         AppealWatcher[]
   messages         AppealMessage[]
   statusHistory    AppealStatusHistory[]
+  mutes            AppealMute[]
 }
 
 model AppealAssignee {
@@ -677,6 +680,44 @@ model DeviceToken {
   token     String   @unique
   platform  String?
   createdAt DateTime @default(now())
+}
+
+model UserNotificationSettings {
+  id     Int  @id @default(autoincrement())
+  userId Int  @unique
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Глобальные переключатели (экран профиля)
+  inAppNotificationsEnabled    Boolean @default(true)
+  telegramNotificationsEnabled Boolean @default(true)
+
+  // Гранулярные каналы
+  pushNewMessage          Boolean @default(true)
+  pushStatusChanged       Boolean @default(true)
+  pushDeadlineChanged     Boolean @default(true)
+  telegramNewAppeal       Boolean @default(true)
+  telegramStatusChanged   Boolean @default(true)
+  telegramDeadlineChanged Boolean @default(true)
+  telegramUnreadReminder  Boolean @default(true)
+  telegramClosureReminder Boolean @default(true)
+  telegramNewMessage      Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model AppealMute {
+  id       Int    @id @default(autoincrement())
+  userId   Int
+  appealId Int
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appeal   Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, appealId])
+  @@index([appealId])
 }
 
 

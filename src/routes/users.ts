@@ -1316,7 +1316,8 @@ router.post(
   async (req: AuthRequest, res: express.Response) => {
     try {
       const userId = req.user!.userId;
-      await markUserOnline(userId);
+      // heartbeat обновляет lastSeen, но не должен держать online=true без живого socket
+      await markUserOnline(userId, { touchOnline: false });
       return res.json(successResponse({ ok: true }));
     } catch (error) {
       return res.status(500).json(

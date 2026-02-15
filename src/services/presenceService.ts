@@ -15,12 +15,18 @@ export type PresenceInfo = {
   lastSeenAt: Date | null;
 };
 
-export async function markUserOnline(userId: number) {
+export async function markUserOnline(
+  userId: number,
+  opts?: { touchOnline?: boolean }
+) {
   const now = Date.now();
+  const touchOnline = opts?.touchOnline ?? true;
   const redis = getRedis();
 
   if (redis.isOpen) {
-    await redis.set(keyOnline(userId), String(now), { EX: PRESENCE_TTL_SEC });
+    if (touchOnline) {
+      await redis.set(keyOnline(userId), String(now), { EX: PRESENCE_TTL_SEC });
+    }
 
     const lastSeenRaw = await redis.get(keyLastSeen(userId));
     const lastSeen = lastSeenRaw ? Number(lastSeenRaw) : 0;

@@ -2,3 +2,8 @@ node_modules/
 dist
 node_modules
 backups
+
+# env files (secrets)
+.env
+.env.*
+!.env.example
