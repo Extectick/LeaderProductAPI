@@ -5,7 +5,7 @@ services:
     container_name: leader_api
     restart: unless-stopped
     env_file:
-      - .env.production
+      - .env
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
@@ -185,7 +185,7 @@ services:
       - api
       - postgres
     env_file:
-      - .env.production
+      - .env
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
@@ -202,7 +202,7 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - .env.production
+      - .env
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://postgres:Ovogup73_@postgres:5432/LeaderAPI?schema=public
