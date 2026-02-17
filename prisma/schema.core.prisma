@@ -191,6 +191,7 @@ enum ProfileType {
 enum AuthProvider {
   LOCAL
   TELEGRAM
+  MAX
   HYBRID
 }
 
@@ -209,6 +210,9 @@ model User {
   telegramId         BigInt?             @unique
   telegramUsername   String?
   telegramLinkedAt   DateTime?
+  maxId              BigInt?             @unique
+  maxUsername        String?
+  maxLinkedAt        DateTime?
   authProvider       AuthProvider        @default(LOCAL)
   deletedAt          DateTime?           // Для soft delete
   currentProfileType ProfileType?        // Текущий активный профиль
@@ -258,6 +262,11 @@ enum PhoneVerificationStatus {
   CANCELLED
 }
 
+enum PhoneVerificationProvider {
+  TELEGRAM
+  MAX
+}
+
 enum EmailChangeSessionStatus {
   PENDING
   VERIFIED
@@ -271,9 +280,12 @@ model PhoneVerificationSession {
   userId         Int
   requestedPhone BigInt
   status         PhoneVerificationStatus @default(PENDING)
+  provider       PhoneVerificationProvider @default(TELEGRAM)
   tokenHash      String                  @unique
   telegramUserId BigInt?
   chatId         BigInt?
+  maxUserId      BigInt?
+  maxChatId      BigInt?
   expiresAt      DateTime
   verifiedAt     DateTime?
   failureReason  String?
@@ -285,6 +297,8 @@ model PhoneVerificationSession {
   @@index([userId, status])
   @@index([expiresAt])
   @@index([telegramUserId])
+  @@index([maxUserId])
+  @@index([maxChatId])
 }
 
 model UserPhoneMigrationReport {
@@ -690,6 +704,7 @@ model UserNotificationSettings {
   // Глобальные переключатели (экран профиля)
   inAppNotificationsEnabled    Boolean @default(true)
   telegramNotificationsEnabled Boolean @default(true)
+  maxNotificationsEnabled      Boolean @default(true)
 
   // Гранулярные каналы
   pushNewMessage          Boolean @default(true)
@@ -701,6 +716,12 @@ model UserNotificationSettings {
   telegramUnreadReminder  Boolean @default(true)
   telegramClosureReminder Boolean @default(true)
   telegramNewMessage      Boolean @default(true)
+  maxNewAppeal            Boolean @default(true)
+  maxStatusChanged        Boolean @default(true)
+  maxDeadlineChanged      Boolean @default(true)
+  maxUnreadReminder       Boolean @default(true)
+  maxClosureReminder      Boolean @default(true)
+  maxNewMessage           Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

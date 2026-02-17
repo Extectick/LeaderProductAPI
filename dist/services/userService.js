@@ -1,15 +1,35 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.userService = exports.updateProfile = exports.getProfile = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+exports.userService = exports.updateProfile = exports.getProfile = exports.userServicePrisma = void 0;
+const client_1 = __importDefault(require("../prisma/client"));
+const presenceService_1 = require("./presenceService");
+const minio_1 = require("../storage/minio");
+const phone_1 = require("../utils/phone");
+exports.userServicePrisma = client_1.default;
 const getProfile = async (userId) => {
-    const user = await prisma.user.findUnique({
+    const user = await exports.userServicePrisma.user.findUnique({
         where: { id: userId },
         include: {
             role: true,
-            clientProfile: true,
-            supplierProfile: true,
+            clientProfile: {
+                include: {
+                    address: true,
+                    counterparty: { select: { guid: true, name: true, isActive: true } },
+                    activeAgreement: { select: { guid: true, name: true, currency: true, isActive: true } },
+                    activeContract: { select: { guid: true, number: true, isActive: true } },
+                    activeWarehouse: { select: { guid: true, name: true, isActive: true, isDefault: true, isPickup: true } },
+                    activePriceType: { select: { guid: true, name: true, isActive: true } },
+                    activeDeliveryAddress: { select: { guid: true, fullAddress: true, isActive: true, isDefault: true } },
+                }
+            },
+            supplierProfile: {
+                include: {
+                    address: true,
+                }
+            },
             employeeProfile: {
                 include: {
                     department: true,
@@ -25,6 +45,12 @@ const getProfile = async (userId) => {
     if (!user) {
         throw new Error('Пользователь не найден');
     }
+    const presence = await (0, presenceService_1.getPresenceForUsers)([userId]);
+    const isOnline = presence[0]?.isOnline ?? false;
+    const lastSeenAt = user.lastSeenAt ?? null;
+    const resolvedClientAvatar = await (0, minio_1.resolveObjectUrl)(user.clientProfile?.avatarUrl ?? null);
+    const resolvedSupplierAvatar = await (0, minio_1.resolveObjectUrl)(user.supplierProfile?.avatarUrl ?? null);
+    const resolvedEmployeeAvatar = await (0, minio_1.resolveObjectUrl)(user.employeeProfile?.avatarUrl ?? null);
     // Преобразуем departmentRoles к нужному формату
     const departmentRoles = (user.employeeProfile?.departmentRoles || []).map(dr => ({
         department: {
@@ -33,46 +59,142 @@ const getProfile = async (userId) => {
         },
         role: dr.role
     }));
-    // Преобразуем профили клиента/поставщика
-    const transformProfile = (profile) => profile ? {
-        ...profile,
-        address: profile.addressId ? {
-            street: '',
-            city: '',
-            country: '',
-            state: null,
-            postalCode: null
-        } : null
-    } : null;
-    return {
+    // Преобразуем профили клиента/поставщика в предсказуемую форму
+    const transformProfile = (profile, avatarUrl) => profile
+        ? {
+            id: profile.id,
+            avatarUrl,
+            lastSeenAt,
+            isOnline,
+            status: profile.status,
+            address: profile.address
+                ? {
+                    street: profile.address.street,
+                    city: profile.address.city,
+                    state: profile.address.state,
+                    postalCode: profile.address.postalCode,
+                    country: profile.address.country,
+                }
+                : null,
+            counterparty: profile.counterparty
+                ? {
+                    guid: profile.counterparty.guid,
+                    name: profile.counterparty.name,
+                    isActive: profile.counterparty.isActive,
+                }
+                : null,
+            activeAgreement: profile.activeAgreement
+                ? {
+                    guid: profile.activeAgreement.guid,
+                    name: profile.activeAgreement.name,
+                    currency: profile.activeAgreement.currency ?? null,
+                    isActive: profile.activeAgreement.isActive,
+                }
+                : null,
+            activeContract: profile.activeContract
+                ? {
+                    guid: profile.activeContract.guid,
+                    number: profile.activeContract.number,
+                    isActive: profile.activeContract.isActive,
+                }
+                : null,
+            activeWarehouse: profile.activeWarehouse
+                ? {
+                    guid: profile.activeWarehouse.guid,
+                    name: profile.activeWarehouse.name,
+                    isActive: profile.activeWarehouse.isActive,
+                    isDefault: profile.activeWarehouse.isDefault,
+                    isPickup: profile.activeWarehouse.isPickup,
+                }
+                : null,
+            activePriceType: profile.activePriceType
+                ? {
+                    guid: profile.activePriceType.guid,
+                    name: profile.activePriceType.name,
+                    isActive: profile.activePriceType.isActive,
+                }
+                : null,
+            activeDeliveryAddress: profile.activeDeliveryAddress
+                ? {
+                    guid: profile.activeDeliveryAddress.guid,
+                    fullAddress: profile.activeDeliveryAddress.fullAddress,
+                    isActive: profile.activeDeliveryAddress.isActive,
+                    isDefault: profile.activeDeliveryAddress.isDefault,
+                }
+                : null,
+            createdAt: profile.createdAt,
+            updatedAt: profile.updatedAt,
+        }
+        : null;
+    const employeeProfile = user.employeeProfile
+        ? {
+            id: user.employeeProfile.id,
+            avatarUrl: resolvedEmployeeAvatar,
+            lastSeenAt,
+            isOnline,
+            status: user.employeeProfile.status,
+            department: user.employeeProfile.department
+                ? { id: user.employeeProfile.department.id, name: user.employeeProfile.department.name }
+                : null,
+            departmentRoles: user.employeeProfile.departmentRoles?.map((dr) => ({
+                id: dr.id,
+                role: dr.role,
+            })) ?? [],
+            createdAt: user.employeeProfile.createdAt,
+            updatedAt: user.employeeProfile.updatedAt,
+        }
+        : null;
+    const activeAvatarUrl = user.currentProfileType === 'CLIENT'
+        ? resolvedClientAvatar
+        : user.currentProfileType === 'SUPPLIER'
+            ? resolvedSupplierAvatar
+            : user.currentProfileType === 'EMPLOYEE'
+                ? resolvedEmployeeAvatar
+                : null;
+    const profile = {
         id: user.id,
-        email: user.email,
+        email: user.email ?? null,
         firstName: user.firstName,
         lastName: user.lastName,
         middleName: user.middleName,
-        phone: user.phone,
-        avatarUrl: user.avatarUrl,
+        phone: (0, phone_1.toApiPhoneString)(user.phone),
+        phoneVerifiedAt: user.phoneVerifiedAt ?? null,
+        telegramId: user.telegramId ? user.telegramId.toString() : null,
+        telegramUsername: user.telegramUsername ?? null,
+        maxId: user.maxId ? user.maxId.toString() : null,
+        maxUsername: user.maxUsername ?? null,
+        authProvider: user.authProvider,
+        authMethods: {
+            telegramLinked: Boolean(user.telegramId),
+            maxLinked: Boolean(user.maxId),
+            passwordLoginEnabled: Boolean(user.email && user.passwordHash && user.isActive),
+            passwordLoginPendingVerification: Boolean(user.email && user.passwordHash && !user.isActive),
+        },
+        avatarUrl: activeAvatarUrl,
+        lastSeenAt,
+        isOnline,
         profileStatus: user.profileStatus,
         currentProfileType: user.currentProfileType,
         role: user.role,
         departmentRoles,
-        clientProfile: transformProfile(user.clientProfile),
-        supplierProfile: transformProfile(user.supplierProfile),
-        employeeProfile: user.employeeProfile
+        clientProfile: transformProfile(user.clientProfile, resolvedClientAvatar),
+        supplierProfile: transformProfile(user.supplierProfile, resolvedSupplierAvatar),
+        employeeProfile: employeeProfile
     };
+    return profile;
 };
 exports.getProfile = getProfile;
 const updateProfile = async (userId, data) => {
-    return prisma.user.update({
+    const updated = await exports.userServicePrisma.user.update({
         where: { id: userId },
         data: {
             firstName: data.firstName,
             lastName: data.lastName,
             middleName: data.middleName,
-            phone: data.phone,
-            avatarUrl: data.avatarUrl
+            phone: data.phone ? BigInt(data.phone) : null
         }
     });
+    return updated;
 };
 exports.updateProfile = updateProfile;
 exports.userService = {

@@ -2,6 +2,7 @@ import { AuthProvider, ProfileStatus, ProfileType } from "@prisma/client";
 
 export type AuthMethods = {
     telegramLinked: boolean;
+    maxLinked: boolean;
     passwordLoginEnabled: boolean;
     passwordLoginPendingVerification: boolean;
 }
@@ -16,6 +17,8 @@ export type Profile = {
     phoneVerifiedAt?: Date | string | null;
     telegramId?: string | null;
     telegramUsername?: string | null;
+    maxId?: string | null;
+    maxUsername?: string | null;
     authProvider?: AuthProvider;
     authMethods: AuthMethods;
     avatarUrl: string | null;

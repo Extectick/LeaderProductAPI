@@ -1,8 +1,8 @@
 export type AuthMethodDescriptor = {
-  key: 'password' | 'telegram';
+  key: 'password' | 'telegram' | 'max';
   label: string;
   enabled: boolean;
-  flow: 'credentials' | 'telegram';
+  flow: 'credentials' | 'telegram' | 'max';
 };
 
 type AuthMethodProvider = {
@@ -27,6 +27,16 @@ const AUTH_METHOD_PROVIDERS: AuthMethodProvider[] = [
       Boolean(
         String(process.env.TELEGRAM_BOT_TOKEN || '').trim() &&
           String(process.env.TELEGRAM_BOT_USERNAME || '').trim()
+      ),
+  },
+  {
+    key: 'max',
+    label: 'MAX',
+    flow: 'max',
+    isEnabled: () =>
+      Boolean(
+        String(process.env.MAX_BOT_TOKEN || '').trim() &&
+          String(process.env.MAX_BOT_USERNAME || '').trim()
       ),
   },
 ];

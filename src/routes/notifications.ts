@@ -13,6 +13,7 @@ const router = express.Router();
 const UpdateSettingsSchema = z.object({
   inAppNotificationsEnabled:    z.boolean().optional(),
   telegramNotificationsEnabled: z.boolean().optional(),
+  maxNotificationsEnabled:      z.boolean().optional(),
   pushNewMessage:               z.boolean().optional(),
   pushStatusChanged:            z.boolean().optional(),
   pushDeadlineChanged:          z.boolean().optional(),
@@ -22,12 +23,19 @@ const UpdateSettingsSchema = z.object({
   telegramUnreadReminder:       z.boolean().optional(),
   telegramClosureReminder:      z.boolean().optional(),
   telegramNewMessage:           z.boolean().optional(),
+  maxNewAppeal:                 z.boolean().optional(),
+  maxStatusChanged:             z.boolean().optional(),
+  maxDeadlineChanged:           z.boolean().optional(),
+  maxUnreadReminder:            z.boolean().optional(),
+  maxClosureReminder:           z.boolean().optional(),
+  maxNewMessage:                z.boolean().optional(),
 });
 
 // Дефолтные настройки (если строки нет в БД)
 const DEFAULT_SETTINGS = {
   inAppNotificationsEnabled:    true,
   telegramNotificationsEnabled: true,
+  maxNotificationsEnabled:      true,
   pushNewMessage:               true,
   pushStatusChanged:            true,
   pushDeadlineChanged:          true,
@@ -37,6 +45,12 @@ const DEFAULT_SETTINGS = {
   telegramUnreadReminder:       true,
   telegramClosureReminder:      true,
   telegramNewMessage:           true,
+  maxNewAppeal:                 true,
+  maxStatusChanged:             true,
+  maxDeadlineChanged:           true,
+  maxUnreadReminder:            true,
+  maxClosureReminder:           true,
+  maxNewMessage:                true,
 };
 
 // ---- GET /notifications/settings ----

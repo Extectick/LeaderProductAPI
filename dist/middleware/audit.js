@@ -1,9 +1,11 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.auditLog = auditLog;
 exports.authorizeDepartmentManager = authorizeDepartmentManager;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+const client_1 = __importDefault(require("../prisma/client"));
 // Middleware для логирования действий пользователя
 function auditLog(action, targetType, targetId) {
     return async (req, res, next) => {
@@ -24,7 +26,7 @@ function auditLog(action, targetType, targetId) {
                 ];
                 return validActions.includes(upperAction) ? upperAction : 'OTHER';
             })();
-            await prisma.auditLog.create({
+            await client_1.default.auditLog.create({
                 data: {
                     userId,
                     action: actionEnum,
@@ -55,7 +57,7 @@ async function authorizeDepartmentManager(req, res, next) {
         return res.status(400).json({ message: 'User ID and Department ID are required' });
     }
     try {
-        const isManager = await prisma.departmentRole.findFirst({
+        const isManager = await client_1.default.departmentRole.findFirst({
             where: {
                 userId,
                 departmentId,

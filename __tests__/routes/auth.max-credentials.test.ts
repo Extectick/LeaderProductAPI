@@ -7,14 +7,14 @@ function uniq(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function issueTelegramSessionToken(telegramId: string, username: string | null = null) {
+function issueMaxSessionToken(maxId: string, username: string | null = null) {
   const secret =
-    process.env.TG_SESSION_SECRET ||
+    process.env.MAX_SESSION_SECRET ||
     process.env.ACCESS_TOKEN_SECRET ||
-    'tg-session-secret';
+    'max-session-secret';
   return jwt.sign(
     {
-      telegramId,
+      maxId,
       username,
       firstName: 'Test',
       lastName: 'User',
@@ -24,7 +24,7 @@ function issueTelegramSessionToken(telegramId: string, username: string | null =
   );
 }
 
-describe('Auth: Telegram + credentials flow', () => {
+describe('Auth: MAX + credentials flow', () => {
   let userRoleId: number;
   const createdUserIds = new Set<number>();
 
@@ -37,6 +37,8 @@ describe('Auth: Telegram + credentials flow', () => {
     const ids = Array.from(createdUserIds);
     if (!ids.length) return;
 
+    await prisma.phoneVerificationSession.deleteMany({ where: { userId: { in: ids } } });
+    await prisma.emailChangeSession.deleteMany({ where: { userId: { in: ids } } });
     await prisma.deviceToken.deleteMany({ where: { userId: { in: ids } } });
     await prisma.appealMessageRead.deleteMany({ where: { userId: { in: ids } } });
     await prisma.appealMessage.deleteMany({ where: { senderId: { in: ids } } });
@@ -55,6 +57,7 @@ describe('Auth: Telegram + credentials flow', () => {
     await prisma.employeeProfile.deleteMany({ where: { userId: { in: ids } } });
     await prisma.clientProfile.deleteMany({ where: { userId: { in: ids } } });
     await prisma.supplierProfile.deleteMany({ where: { userId: { in: ids } } });
+    await prisma.userNotificationSettings.deleteMany({ where: { userId: { in: ids } } });
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
 
     createdUserIds.clear();
@@ -73,29 +76,29 @@ describe('Auth: Telegram + credentials flow', () => {
     await cleanupUsers();
   });
 
-  it('Telegram -> credentials -> verify -> password login works and profile exposes authMethods', async () => {
-    const telegramId = `${9000000000 + Math.floor(Math.random() * 1000000)}`;
-    const telegramUser = await prisma.user.create({
+  it('MAX -> credentials -> verify -> password login works and profile exposes authMethods', async () => {
+    const maxId = `${9300000000 + Math.floor(Math.random() * 1000000)}`;
+    const maxUser = await prisma.user.create({
       data: {
         roleId: userRoleId,
-        firstName: 'Telegram',
+        firstName: 'Max',
         lastName: 'Flow',
-        phone: BigInt('79990001122'),
-        telegramId: BigInt(telegramId),
-        telegramUsername: 'tg_flow_user',
-        telegramLinkedAt: new Date(),
-        authProvider: 'TELEGRAM',
+        phone: BigInt('79990004455'),
+        maxId: BigInt(maxId),
+        maxUsername: 'max_flow_user',
+        maxLinkedAt: new Date(),
+        authProvider: 'MAX',
         isActive: true,
         profileStatus: 'ACTIVE',
       },
       select: { id: true },
     });
-    trackUser(telegramUser.id);
+    trackUser(maxUser.id);
 
-    const tgSessionToken = issueTelegramSessionToken(telegramId, 'tg_flow_user');
+    const maxSessionToken = issueMaxSessionToken(maxId, 'max_flow_user');
     const signInRes = await request(app)
-      .post('/auth/telegram/sign-in')
-      .send({ tgSessionToken });
+      .post('/auth/max/sign-in')
+      .send({ maxSessionToken });
 
     expect(signInRes.status).toBe(200);
     expect(signInRes.body?.ok).toBe(true);
@@ -107,12 +110,12 @@ describe('Auth: Telegram + credentials flow', () => {
       .set('Authorization', `Bearer ${accessToken}`);
     expect(profileBefore.status).toBe(200);
     expect(profileBefore.body?.data?.profile?.authMethods).toMatchObject({
-      telegramLinked: true,
+      maxLinked: true,
       passwordLoginEnabled: false,
       passwordLoginPendingVerification: false,
     });
 
-    const email = `${uniq('tg_flow')}@example.com`;
+    const email = `${uniq('max_flow')}@example.com`;
     const password = 'Pa$$word123';
 
     const credentialsRes = await request(app)
@@ -123,7 +126,7 @@ describe('Auth: Telegram + credentials flow', () => {
     expect(credentialsRes.body?.ok).toBe(true);
 
     const userAfterCredentials = await prisma.user.findUnique({
-      where: { id: telegramUser.id },
+      where: { id: maxUser.id },
       select: { email: true, passwordHash: true, isActive: true, authProvider: true },
     });
     expect(userAfterCredentials?.email).toBe(email);
@@ -136,13 +139,13 @@ describe('Auth: Telegram + credentials flow', () => {
       .set('Authorization', `Bearer ${accessToken}`);
     expect(profilePending.status).toBe(200);
     expect(profilePending.body?.data?.profile?.authMethods).toMatchObject({
-      telegramLinked: true,
+      maxLinked: true,
       passwordLoginEnabled: false,
       passwordLoginPendingVerification: true,
     });
 
     const latestVerification = await prisma.emailVerification.findFirst({
-      where: { userId: telegramUser.id, used: false },
+      where: { userId: maxUser.id, used: false },
       orderBy: { createdAt: 'desc' },
       select: { code: true },
     });
@@ -161,7 +164,7 @@ describe('Auth: Telegram + credentials flow', () => {
       .set('Authorization', `Bearer ${verifiedAccessToken}`);
     expect(profileReady.status).toBe(200);
     expect(profileReady.body?.data?.profile?.authMethods).toMatchObject({
-      telegramLinked: true,
+      maxLinked: true,
       passwordLoginEnabled: true,
       passwordLoginPendingVerification: false,
     });
@@ -190,25 +193,25 @@ describe('Auth: Telegram + credentials flow', () => {
     });
     trackUser(localUser.id);
 
-    const telegramId = `${9100000000 + Math.floor(Math.random() * 1000000)}`;
-    const telegramUser = await prisma.user.create({
+    const maxId = `${9400000000 + Math.floor(Math.random() * 1000000)}`;
+    const maxUser = await prisma.user.create({
       data: {
         roleId: userRoleId,
-        phone: BigInt('79990002233'),
-        telegramId: BigInt(telegramId),
-        telegramUsername: 'tg_conflict_user',
-        telegramLinkedAt: new Date(),
-        authProvider: 'TELEGRAM',
+        phone: BigInt('79990005566'),
+        maxId: BigInt(maxId),
+        maxUsername: 'max_conflict_user',
+        maxLinkedAt: new Date(),
+        authProvider: 'MAX',
         isActive: true,
         profileStatus: 'ACTIVE',
       },
       select: { id: true },
     });
-    trackUser(telegramUser.id);
+    trackUser(maxUser.id);
 
     const signInRes = await request(app)
-      .post('/auth/telegram/sign-in')
-      .send({ tgSessionToken: issueTelegramSessionToken(telegramId, 'tg_conflict_user') });
+      .post('/auth/max/sign-in')
+      .send({ maxSessionToken: issueMaxSessionToken(maxId, 'max_conflict_user') });
     expect(signInRes.status).toBe(200);
     const accessToken = signInRes.body?.data?.accessToken as string;
 
@@ -222,8 +225,8 @@ describe('Auth: Telegram + credentials flow', () => {
     expect(String(credentialsRes.body?.message || '')).toMatch(/email/i);
   });
 
-  it('auto-links Telegram by matching phone and returns READY', async () => {
-    const existingPhone = '+79990003344';
+  it('auto-links MAX by matching phone and returns READY', async () => {
+    const existingPhone = '+79990006677';
     const existingEmail = `${uniq('phone_owner')}@example.com`;
     const existingUser = await prisma.user.create({
       data: {
@@ -233,17 +236,17 @@ describe('Auth: Telegram + credentials flow', () => {
         isActive: true,
         authProvider: 'LOCAL',
         profileStatus: 'ACTIVE',
-        phone: BigInt('79990003344'),
+        phone: BigInt('79990006677'),
       },
       select: { id: true },
     });
     trackUser(existingUser.id);
 
-    const notLinkedTelegramId = `${9200000000 + Math.floor(Math.random() * 1000000)}`;
+    const notLinkedMaxId = `${9500000000 + Math.floor(Math.random() * 1000000)}`;
     const contactRes = await request(app)
-      .post('/auth/telegram/contact')
+      .post('/auth/max/contact')
       .send({
-        tgSessionToken: issueTelegramSessionToken(notLinkedTelegramId, 'tg_need_link_user'),
+        maxSessionToken: issueMaxSessionToken(notLinkedMaxId, 'max_need_link_user'),
         phoneE164: existingPhone,
       });
 
@@ -252,19 +255,19 @@ describe('Auth: Telegram + credentials flow', () => {
     expect(contactRes.body?.data?.state).toBe('READY');
     expect(contactRes.body?.data?.conflictUserHint).toBeNull();
 
-    const telegramOwner = await prisma.user.findFirst({
-      where: { telegramId: BigInt(notLinkedTelegramId) },
-      select: { id: true, telegramLinkedAt: true, authProvider: true },
+    const maxOwner = await prisma.user.findFirst({
+      where: { maxId: BigInt(notLinkedMaxId) },
+      select: { id: true, maxLinkedAt: true, authProvider: true },
     });
-    expect(telegramOwner?.id).toBe(existingUser.id);
-    expect(telegramOwner?.telegramLinkedAt).toBeTruthy();
-    expect(telegramOwner?.authProvider).toBe('HYBRID');
+    expect(maxOwner?.id).toBe(existingUser.id);
+    expect(maxOwner?.maxLinkedAt).toBeTruthy();
+    expect(maxOwner?.authProvider).toBe('HYBRID');
   });
 
-  it('keeps NEED_LINK fallback when phone owner already has another Telegram ID', async () => {
-    const existingPhone = '+79990003345';
+  it('keeps NEED_LINK fallback when phone owner already has another MAX ID', async () => {
+    const existingPhone = '+79990006678';
     const existingEmail = `${uniq('phone_owner_conflict')}@example.com`;
-    const existingTelegramId = BigInt('777700000001');
+    const existingMaxId = BigInt('888800000001');
     const existingUser = await prisma.user.create({
       data: {
         email: existingEmail,
@@ -273,20 +276,20 @@ describe('Auth: Telegram + credentials flow', () => {
         isActive: true,
         authProvider: 'HYBRID',
         profileStatus: 'ACTIVE',
-        phone: BigInt('79990003345'),
-        telegramId: existingTelegramId,
-        telegramUsername: 'already_linked_tg',
-        telegramLinkedAt: new Date(),
+        phone: BigInt('79990006678'),
+        maxId: existingMaxId,
+        maxUsername: 'already_linked_max',
+        maxLinkedAt: new Date(),
       },
       select: { id: true },
     });
     trackUser(existingUser.id);
 
-    const incomingTelegramId = `${9200001000 + Math.floor(Math.random() * 1000000)}`;
+    const incomingMaxId = `${9500001000 + Math.floor(Math.random() * 1000000)}`;
     const contactRes = await request(app)
-      .post('/auth/telegram/contact')
+      .post('/auth/max/contact')
       .send({
-        tgSessionToken: issueTelegramSessionToken(incomingTelegramId, 'tg_need_link_conflict'),
+        maxSessionToken: issueMaxSessionToken(incomingMaxId, 'max_need_link_conflict'),
         phoneE164: existingPhone,
       });
 
@@ -297,12 +300,12 @@ describe('Auth: Telegram + credentials flow', () => {
 
     const unchangedOwner = await prisma.user.findUnique({
       where: { id: existingUser.id },
-      select: { telegramId: true },
+      select: { maxId: true },
     });
-    expect(unchangedOwner?.telegramId?.toString()).toBe(existingTelegramId.toString());
+    expect(unchangedOwner?.maxId?.toString()).toBe(existingMaxId.toString());
 
     const unexpectedOwner = await prisma.user.findFirst({
-      where: { telegramId: BigInt(incomingTelegramId) },
+      where: { maxId: BigInt(incomingMaxId) },
       select: { id: true },
     });
     expect(unexpectedOwner).toBeNull();

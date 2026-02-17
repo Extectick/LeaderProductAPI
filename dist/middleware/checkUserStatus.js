@@ -1,15 +1,19 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkUserStatus = void 0;
+exports.checkUserStatus = exports.checkStatusPrisma = void 0;
 const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+const client_2 = __importDefault(require("../prisma/client"));
+exports.checkStatusPrisma = client_2.default;
 const checkUserStatus = async (req, res, next) => {
     const userId = req.user?.userId;
     if (!userId) {
         return res.status(401).json({ message: 'Пользователь не авторизован' });
     }
     try {
-        const user = await prisma.user.findUnique({
+        const user = await exports.checkStatusPrisma.user.findUnique({
             where: { id: userId },
             select: { profileStatus: true },
         });

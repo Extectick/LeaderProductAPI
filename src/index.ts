@@ -30,6 +30,7 @@ import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 import { markUserOffline, markUserOnline } from './services/presenceService';
 import { initializeTelegramUpdates, isTelegramBotConfigured, stopTelegramUpdates } from './services/telegramBotService';
+import { initializeMaxUpdates, isMaxBotConfigured, stopMaxUpdates } from './services/maxBotService';
 // Swagger
 import { swaggerSpec } from './swagger/swagger';
 
@@ -392,6 +393,28 @@ if (ENV !== 'test') {
     } else {
       console.warn('[startup] Telegram bot is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_USERNAME)');
     }
+
+    // 6) Настраиваем получение MAX updates (webhook/polling)
+    if (isMaxBotConfigured()) {
+      void (async () => {
+        try {
+          const transport = await initializeMaxUpdates();
+          if (transport.ok) {
+            console.log('[startup] MAX updates: OK', {
+              mode: transport.mode,
+              url: transport.currentUrl,
+              pendingUpdates: transport.pendingUpdates,
+            });
+          } else {
+            console.warn('[startup] MAX updates: NOT READY', transport);
+          }
+        } catch (e: any) {
+          console.warn('[startup] MAX updates setup failed:', e?.message || e);
+        }
+      })();
+    } else {
+      console.warn('[startup] MAX bot is not configured (MAX_BOT_TOKEN / MAX_BOT_USERNAME)');
+    }
   })();
 }
 
@@ -400,6 +423,7 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
   await stopTelegramUpdates().catch(() => {});
+  await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
   await disconnectKafka().catch(() => {});
@@ -409,6 +433,7 @@ process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
   await stopTelegramUpdates().catch(() => {});
+  await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
   await disconnectRedis().catch(() => {});
   await disconnectKafka().catch(() => {});

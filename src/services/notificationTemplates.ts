@@ -3,20 +3,30 @@ const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || '').re
 const TELEGRAM_MINI_APP_SHORT_NAME = String(process.env.TELEGRAM_MINI_APP_SHORT_NAME || '')
   .replace(/^\/+|\/+$/g, '')
   .trim();
+const MAX_BOT_USERNAME = String(process.env.MAX_BOT_USERNAME || '').replace(/^@+/, '').trim();
 
-function miniAppLink(appealId: number): string {
-  if (!TELEGRAM_BOT_USERNAME || !Number.isFinite(appealId) || appealId <= 0) return '';
+export type NotificationTemplateChannel = 'telegram' | 'max';
+
+function miniAppLink(channel: NotificationTemplateChannel, appealId: number): string {
+  if (!Number.isFinite(appealId) || appealId <= 0) return '';
   const startParam = encodeURIComponent(`appeal_${appealId}`);
+
+  if (channel === 'max') {
+    if (!MAX_BOT_USERNAME) return '';
+    return `https://max.ru/${MAX_BOT_USERNAME}?startapp=${startParam}`;
+  }
+
+  if (!TELEGRAM_BOT_USERNAME) return '';
   if (TELEGRAM_MINI_APP_SHORT_NAME) {
     return `https://t.me/${TELEGRAM_BOT_USERNAME}/${TELEGRAM_MINI_APP_SHORT_NAME}?startapp=${startParam}`;
   }
   return `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=${startParam}`;
 }
 
-function appealLink(appealId: number, number: number): string {
-  const tgMiniApp = miniAppLink(appealId);
-  if (tgMiniApp) {
-    return `<a href="${tgMiniApp}">обращение #${number}</a>`;
+function appealLink(channel: NotificationTemplateChannel, appealId: number, number: number): string {
+  const appLink = miniAppLink(channel, appealId);
+  if (appLink) {
+    return `<a href="${appLink}">обращение #${number}</a>`;
   }
   if (FRONTEND_URL) {
     return `<a href="${FRONTEND_URL}/services/appeals/${appealId}">обращение #${number}</a>`;
@@ -25,11 +35,11 @@ function appealLink(appealId: number, number: number): string {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  OPEN:        'Открыто',
+  OPEN: 'Открыто',
   IN_PROGRESS: 'В работе',
-  COMPLETED:   'Выполнено',
-  DECLINED:    'Отклонено',
-  RESOLVED:    'Решено',
+  COMPLETED: 'Выполнено',
+  DECLINED: 'Отклонено',
+  RESOLVED: 'Решено',
 };
 
 export function tplNewAppeal(opts: {
@@ -38,11 +48,13 @@ export function tplNewAppeal(opts: {
   title: string | null | undefined;
   fromDeptName: string | null | undefined;
   creatorName: string;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   const subject = opts.title ? ` «${opts.title}»` : '';
   const from = opts.fromDeptName ? ` из отдела <b>${opts.fromDeptName}</b>` : '';
   return (
-    `📋 <b>Новое ${appealLink(opts.appealId, opts.number)}${subject}</b>\n` +
+    `📋 <b>Новое ${appealLink(channel, opts.appealId, opts.number)}${subject}</b>\n` +
     `От: <b>${opts.creatorName}</b>${from}`
   );
 }
@@ -53,11 +65,13 @@ export function tplStatusChanged(opts: {
   oldStatus: string;
   newStatus: string;
   changedByName: string;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   const oldLabel = STATUS_LABELS[opts.oldStatus] ?? opts.oldStatus;
   const newLabel = STATUS_LABELS[opts.newStatus] ?? opts.newStatus;
   return (
-    `🔄 Статус ${appealLink(opts.appealId, opts.number)} изменён\n` +
+    `🔄 Статус ${appealLink(channel, opts.appealId, opts.number)} изменён\n` +
     `<b>${oldLabel}</b> → <b>${newLabel}</b>\n` +
     `Изменил: ${opts.changedByName}`
   );
@@ -68,12 +82,14 @@ export function tplDeadlineChanged(opts: {
   number: number;
   deadline: Date | null | undefined;
   changedByName: string;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   const dl = opts.deadline
     ? `до <b>${opts.deadline.toLocaleDateString('ru-RU')}</b>`
     : '<b>удалён</b>';
   return (
-    `⏰ Дедлайн ${appealLink(opts.appealId, opts.number)} изменён ${dl}\n` +
+    `⏰ Дедлайн ${appealLink(channel, opts.appealId, opts.number)} изменён ${dl}\n` +
     `Изменил: ${opts.changedByName}`
   );
 }
@@ -83,12 +99,14 @@ export function tplNewMessage(opts: {
   number: number;
   senderName: string;
   snippet: string;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   const snip = opts.snippet.length > 100
     ? opts.snippet.slice(0, 100) + '…'
     : opts.snippet;
   return (
-    `💬 Новое сообщение в ${appealLink(opts.appealId, opts.number)}\n` +
+    `💬 Новое сообщение в ${appealLink(channel, opts.appealId, opts.number)}\n` +
     `<b>${opts.senderName}:</b> ${snip}`
   );
 }
@@ -97,9 +115,11 @@ export function tplUnreadReminder(opts: {
   appealId: number;
   number: number;
   hoursUnread: number;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   return (
-    `⚠️ ${appealLink(opts.appealId, opts.number)} содержит непрочитанные сообщения\n` +
+    `⚠️ ${appealLink(channel, opts.appealId, opts.number)} содержит непрочитанные сообщения\n` +
     `Никто не отвечал более <b>${opts.hoursUnread} ч</b>. Пожалуйста, проверьте.`
   );
 }
@@ -108,9 +128,11 @@ export function tplClosureReminder(opts: {
   appealId: number;
   number: number;
   hoursWaiting: number;
+  channel?: NotificationTemplateChannel;
 }): string {
+  const channel = opts.channel || 'telegram';
   return (
-    `✅ ${appealLink(opts.appealId, opts.number)} ожидает вашего закрытия\n` +
+    `✅ ${appealLink(channel, opts.appealId, opts.number)} ожидает вашего закрытия\n` +
     `Исполнитель завершил работу <b>${opts.hoursWaiting} ч</b> назад.\n` +
     `Подтвердите или отклоните обращение.`
   );

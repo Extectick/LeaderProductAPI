@@ -17,6 +17,29 @@ function getBotUsername() {
   return String(process.env.TELEGRAM_BOT_USERNAME || '').trim();
 }
 
+function getMiniAppShortName() {
+  return String(process.env.TELEGRAM_MINI_APP_SHORT_NAME || '').trim();
+}
+
+function getCompanyName() {
+  return String(process.env.BOT_COMPANY_NAME || 'Лидер Продукт').trim();
+}
+
+function getWelcomeLogoUrl() {
+  return String(process.env.BOT_WELCOME_LOGO_URL || '').trim();
+}
+
+function buildTelegramMiniAppLink(startParam = 'home') {
+  const botUsername = getBotUsername().replace(/^@+/, '');
+  if (!botUsername) return '';
+  const shortName = getMiniAppShortName().replace(/^\/+|\/+$/g, '');
+  const encodedStart = encodeURIComponent(startParam);
+  if (shortName) {
+    return `https://t.me/${botUsername}/${shortName}?startapp=${encodedStart}`;
+  }
+  return `https://t.me/${botUsername}?startapp=${encodedStart}`;
+}
+
 function normalizeBaseUrl(raw: string): string {
   return raw.replace(/^"+|"+$/g, '').replace(/\/+$/g, '').trim();
 }
@@ -249,6 +272,56 @@ export async function sendTelegramInfoMessage(params: {
     String(params.chatId),
     params.text,
     Object.keys(options).length ? options : undefined
+  );
+  return true;
+}
+
+export async function sendTelegramWelcomeMessage(params: {
+  chatId: string | number | bigint;
+  startParam?: string;
+}) {
+  const bot = getBot();
+  if (!bot) return false;
+
+  const chatId = String(params.chatId);
+  const appLink = buildTelegramMiniAppLink(params.startParam || 'home');
+  const logoUrl = getWelcomeLogoUrl();
+  const company = getCompanyName();
+  const text =
+    `👋 <b>Добро пожаловать в ${company}</b>\n` +
+    `Откройте приложение по кнопке ниже.`;
+
+  const keyboard = appLink
+    ? Markup.inlineKeyboard([
+        [Markup.button.url('Приложение', appLink)],
+      ]).reply_markup
+    : undefined;
+
+  if (logoUrl) {
+    try {
+      await bot.telegram.sendPhoto(
+        chatId,
+        logoUrl,
+        {
+          caption: text,
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+        }
+      );
+      return true;
+    } catch (e: any) {
+      console.warn('[tg-bot] welcome photo send failed:', e?.message || e);
+    }
+  }
+
+  await bot.telegram.sendMessage(
+    chatId,
+    text,
+    {
+      parse_mode: 'HTML',
+      reply_markup: keyboard,
+      link_preview_options: { is_disabled: true },
+    }
   );
   return true;
 }

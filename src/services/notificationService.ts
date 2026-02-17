@@ -1,13 +1,14 @@
 import prisma from '../prisma/client';
 import { sendPushToUser } from './pushService';
 import { sendTelegramInfoMessage } from './telegramBotService';
+import { sendMaxInfoMessage } from './maxBotService';
 import { getPresenceForUsers } from './presenceService';
 
-// Локальные типы настроек (совпадают с Prisma-моделью UserNotificationSettings)
 type NotificationSettingsRow = {
   userId: number;
   inAppNotificationsEnabled: boolean;
   telegramNotificationsEnabled: boolean;
+  maxNotificationsEnabled: boolean;
   pushNewMessage: boolean;
   pushStatusChanged: boolean;
   pushDeadlineChanged: boolean;
@@ -17,6 +18,12 @@ type NotificationSettingsRow = {
   telegramUnreadReminder: boolean;
   telegramClosureReminder: boolean;
   telegramNewMessage: boolean;
+  maxNewAppeal: boolean;
+  maxStatusChanged: boolean;
+  maxDeadlineChanged: boolean;
+  maxUnreadReminder: boolean;
+  maxClosureReminder: boolean;
+  maxNewMessage: boolean;
 };
 
 type MuteRow = { userId: number };
@@ -29,34 +36,23 @@ export type AppealNotificationType =
   | 'UNREAD_REMINDER'
   | 'CLOSURE_REMINDER';
 
-export type NotificationChannel = 'push' | 'telegram';
+export type NotificationChannel = 'push' | 'telegram' | 'max';
 
 export type NotificationPayload = {
   type: AppealNotificationType;
   appealId: number;
   appealNumber: number;
-  /** Заголовок push-уведомления */
   title: string;
-  /** Тело push-уведомления */
   body: string;
-  /** HTML-текст для Telegram-бота */
-  telegramText: string;
-  /** Дополнительные данные для push (data payload) */
+  telegramText?: string;
+  maxText?: string;
   pushData?: Record<string, any>;
-  /** Каналы доставки */
   channels: NotificationChannel[];
-  /** Список userId получателей */
   recipientUserIds: number[];
-  /** userId отправителя (не получает уведомление о себе) */
   excludeSenderUserId?: number;
-  /** Учитывать AppealMute (по умолчанию true) */
   respectMute?: boolean;
 };
 
-/**
- * Центральный диспетчер уведомлений.
- * Учитывает UserNotificationSettings, AppealMute, online-статус пользователей.
- */
 export async function dispatchNotification(payload: NotificationPayload): Promise<void> {
   const {
     type,
@@ -65,6 +61,7 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
     title,
     body,
     telegramText,
+    maxText,
     pushData,
     channels,
     recipientUserIds,
@@ -79,7 +76,6 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
   );
   if (!uniqIds.length) return;
 
-  // 1. Загрузить настройки и муты за один запрос
   const [settingsRows, muteRows] = await Promise.all([
     (prisma as any).userNotificationSettings.findMany({
       where: { userId: { in: uniqIds } },
@@ -97,13 +93,12 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
   );
   const mutedSet = new Set<number>(muteRows.map((m: MuteRow) => m.userId));
 
-  // 2. Разделить получателей по каналам
   const pushCandidates: number[] = [];
   const telegramCandidates: number[] = [];
+  const maxCandidates: number[] = [];
 
   for (const userId of uniqIds) {
     if (mutedSet.has(userId)) continue;
-
     const s = settingsMap.get(userId);
 
     if (channels.includes('push')) {
@@ -117,26 +112,39 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
       const typeOn = s ? resolveTypeTelegram(type, s) : true;
       if (globalOn && typeOn) telegramCandidates.push(userId);
     }
+
+    if (channels.includes('max')) {
+      const globalOn = s ? s.maxNotificationsEnabled : true;
+      const typeOn = s ? resolveTypeMax(type, s) : true;
+      if (globalOn && typeOn) maxCandidates.push(userId);
+    }
   }
 
-  // 3. Получить online-статус кандидатов и применить channel-правила:
-  // - push: только offline
-  // - telegram: для части типов suppress для online (в приложении используем in-app/sockets)
-  const onlineSet = await getOnlineUsersSet(Array.from(new Set([...pushCandidates, ...telegramCandidates])));
+  const onlineSet = await getOnlineUsersSet(
+    Array.from(new Set([...pushCandidates, ...telegramCandidates, ...maxCandidates]))
+  );
   const finalPushIds = pushCandidates.filter((id) => !onlineSet.has(id));
-  const suppressTelegramForOnline = shouldSuppressTelegramForOnline(type);
-  const finalTelegramIds = suppressTelegramForOnline
+  const finalTelegramIds = shouldSuppressForOnline('telegram', type)
     ? telegramCandidates.filter((id) => !onlineSet.has(id))
     : telegramCandidates;
-  if (suppressTelegramForOnline && telegramCandidates.length && !finalTelegramIds.length) {
+  const finalMaxIds = shouldSuppressForOnline('max', type)
+    ? maxCandidates.filter((id) => !onlineSet.has(id))
+    : maxCandidates;
+
+  if (shouldSuppressForOnline('telegram', type) && telegramCandidates.length && !finalTelegramIds.length) {
     console.log(
       `[notifications] telegram skipped for type=${type}, all recipients are online (appealId=${appealId})`
     );
   }
 
-  // 4. Загрузить telegramId для кандидатов Telegram
+  if (shouldSuppressForOnline('max', type) && maxCandidates.length && !finalMaxIds.length) {
+    console.log(
+      `[notifications] max skipped for type=${type}, all recipients are online (appealId=${appealId})`
+    );
+  }
+
   let telegramUsers: { id: number; telegramId: bigint | null }[] = [];
-  if (finalTelegramIds.length) {
+  if (finalTelegramIds.length && telegramText) {
     telegramUsers = await prisma.user.findMany({
       where: { id: { in: finalTelegramIds } },
       select: { id: true, telegramId: true },
@@ -148,7 +156,19 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
     }
   }
 
-  // 5. Отправить push
+  let maxUsers: { id: number; maxId: bigint | null }[] = [];
+  if (finalMaxIds.length && maxText) {
+    maxUsers = await prisma.user.findMany({
+      where: { id: { in: finalMaxIds } },
+      select: { id: true, maxId: true },
+    });
+    if (!maxUsers.some((u) => u.maxId != null)) {
+      console.log(
+        `[notifications] max skipped for type=${type}, recipients have no maxId (appealId=${appealId})`
+      );
+    }
+  }
+
   await Promise.allSettled(
     finalPushIds.map((userId) =>
       sendPushToUser(userId, {
@@ -161,27 +181,46 @@ export async function dispatchNotification(payload: NotificationPayload): Promis
     )
   );
 
-  // 6. Отправить Telegram
-  const telegramResults = await Promise.allSettled(
-    telegramUsers
-      .filter((u) => u.telegramId != null)
-      .map((u) =>
-        sendTelegramInfoMessage({
-          chatId: u.telegramId!,
-          text: telegramText,
-          parseMode: 'HTML',
-          disableLinkPreview: true,
-        })
-      )
-  );
-  telegramResults.forEach((result) => {
-    if (result.status === 'rejected') {
-      console.warn('[notifications] telegram send failed:', result.reason?.message || result.reason);
-    }
-  });
-}
+  if (telegramText) {
+    const telegramResults = await Promise.allSettled(
+      telegramUsers
+        .filter((u) => u.telegramId != null)
+        .map((u) =>
+          sendTelegramInfoMessage({
+            chatId: u.telegramId!,
+            text: telegramText,
+            parseMode: 'HTML',
+            disableLinkPreview: true,
+          })
+        )
+    );
+    telegramResults.forEach((result) => {
+      if (result.status === 'rejected') {
+        console.warn('[notifications] telegram send failed:', result.reason?.message || result.reason);
+      }
+    });
+  }
 
-// ---- Helpers ----
+  if (maxText) {
+    const maxResults = await Promise.allSettled(
+      maxUsers
+        .filter((u) => u.maxId != null)
+        .map((u) =>
+          sendMaxInfoMessage({
+            chatId: u.maxId!,
+            text: maxText,
+            parseMode: 'HTML',
+            disableLinkPreview: true,
+          })
+        )
+    );
+    maxResults.forEach((result) => {
+      if (result.status === 'rejected') {
+        console.warn('[notifications] max send failed:', result.reason?.message || result.reason);
+      }
+    });
+  }
+}
 
 async function getOnlineUsersSet(userIds: number[]): Promise<Set<number>> {
   if (!userIds.length) return new Set<number>();
@@ -194,16 +233,26 @@ function resolveTypePush(
   s: { pushNewMessage: boolean; pushStatusChanged: boolean; pushDeadlineChanged: boolean }
 ): boolean {
   switch (type) {
-    case 'NEW_MESSAGE':     return s.pushNewMessage;
-    case 'STATUS_CHANGED':  return s.pushStatusChanged;
+    case 'NEW_MESSAGE': return s.pushNewMessage;
+    case 'STATUS_CHANGED': return s.pushStatusChanged;
     case 'DEADLINE_CHANGED': return s.pushDeadlineChanged;
-    default:                return true;
+    default: return true;
   }
 }
 
-function shouldSuppressTelegramForOnline(type: AppealNotificationType): boolean {
-  // Основной переключатель: список типов через запятую.
-  // Пример: NEW_MESSAGE,STATUS_CHANGED,DEADLINE_CHANGED
+function shouldSuppressForOnline(channel: 'telegram' | 'max', type: AppealNotificationType): boolean {
+  if (channel === 'max') {
+    const maxRaw = String(process.env.MAX_SUPPRESS_ONLINE_TYPES || '').trim();
+    if (!maxRaw) return false;
+    const set = new Set(
+      maxRaw
+        .split(',')
+        .map((v) => v.trim().toUpperCase())
+        .filter(Boolean)
+    );
+    return set.has(type);
+  }
+
   const raw = String(process.env.TELEGRAM_SUPPRESS_ONLINE_TYPES || '').trim();
   if (raw) {
     const set = new Set(
@@ -215,8 +264,6 @@ function shouldSuppressTelegramForOnline(type: AppealNotificationType): boolean 
     return set.has(type);
   }
 
-  // Legacy-совместимость: если включён старый флаг для NEW_MESSAGE,
-  // сохраняем прежнее поведение + suppress для status/deadline по умолчанию.
   const legacyNewMessageOn =
     String(process.env.TELEGRAM_SUPPRESS_ONLINE_NEW_MESSAGE || '1') !== '0';
 
@@ -237,12 +284,34 @@ function resolveTypeTelegram(
   }
 ): boolean {
   switch (type) {
-    case 'NEW_APPEAL':           return s.telegramNewAppeal;
-    case 'STATUS_CHANGED':       return s.telegramStatusChanged;
-    case 'DEADLINE_CHANGED':     return s.telegramDeadlineChanged;
-    case 'UNREAD_REMINDER':      return s.telegramUnreadReminder;
-    case 'CLOSURE_REMINDER':     return s.telegramClosureReminder;
-    case 'NEW_MESSAGE':          return s.telegramNewMessage;
-    default:                     return true;
+    case 'NEW_APPEAL': return s.telegramNewAppeal;
+    case 'STATUS_CHANGED': return s.telegramStatusChanged;
+    case 'DEADLINE_CHANGED': return s.telegramDeadlineChanged;
+    case 'UNREAD_REMINDER': return s.telegramUnreadReminder;
+    case 'CLOSURE_REMINDER': return s.telegramClosureReminder;
+    case 'NEW_MESSAGE': return s.telegramNewMessage;
+    default: return true;
+  }
+}
+
+function resolveTypeMax(
+  type: AppealNotificationType,
+  s: {
+    maxNewAppeal: boolean;
+    maxStatusChanged: boolean;
+    maxDeadlineChanged: boolean;
+    maxUnreadReminder: boolean;
+    maxClosureReminder: boolean;
+    maxNewMessage: boolean;
+  }
+): boolean {
+  switch (type) {
+    case 'NEW_APPEAL': return s.maxNewAppeal;
+    case 'STATUS_CHANGED': return s.maxStatusChanged;
+    case 'DEADLINE_CHANGED': return s.maxDeadlineChanged;
+    case 'UNREAD_REMINDER': return s.maxUnreadReminder;
+    case 'CLOSURE_REMINDER': return s.maxClosureReminder;
+    case 'NEW_MESSAGE': return s.maxNewMessage;
+    default: return true;
   }
 }

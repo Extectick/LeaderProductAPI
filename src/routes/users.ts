@@ -1892,16 +1892,18 @@ router.post(
   '/me/phone/verification/start',
   authenticateToken,
   checkUserStatus,
-  auditLog('Пользователь запросил верификацию телефона через Telegram'),
-  async (req: AuthRequest<{}, {}, { phone?: string }>, res: express.Response) => {
+  auditLog('Пользователь запросил верификацию телефона через мессенджер'),
+  async (req: AuthRequest<{}, {}, { phone?: string; provider?: 'TELEGRAM' | 'MAX' }>, res: express.Response) => {
     try {
       const userId = Number(req.user!.userId);
       const phone = String(req.body?.phone || '').trim();
+      const providerRaw = String(req.body?.provider || 'TELEGRAM').trim().toUpperCase();
+      const provider = providerRaw === 'MAX' ? 'MAX' : 'TELEGRAM';
       if (!phone) {
         return res.status(400).json(errorResponse('Телефон обязателен', ErrorCodes.VALIDATION_ERROR));
       }
 
-      const session = await startPhoneVerificationSession({ userId, phoneRaw: phone });
+      const session = await startPhoneVerificationSession({ userId, phoneRaw: phone, provider });
       return res.json(successResponse(session, 'Сессия верификации создана'));
     } catch (error: any) {
       const message = String(error?.message || 'Не удалось создать сессию верификации');
@@ -1913,10 +1915,26 @@ router.post(
           )
         );
       }
+      if (/MAX_PHONE_VERIFICATION_NOT_CONFIGURED/i.test(message)) {
+        return res.status(503).json(
+          errorResponse(
+            'MAX верификация временно недоступна. Проверьте настройки MAX_BOT_TOKEN и MAX_BOT_USERNAME на сервере.',
+            ErrorCodes.INTERNAL_ERROR
+          )
+        );
+      }
       if (/TELEGRAM_DEEP_LINK_UNAVAILABLE/i.test(message)) {
         return res.status(503).json(
           errorResponse(
             'Ссылка Telegram недоступна, проверьте конфигурацию бота.',
+            ErrorCodes.INTERNAL_ERROR
+          )
+        );
+      }
+      if (/MAX_DEEP_LINK_UNAVAILABLE/i.test(message)) {
+        return res.status(503).json(
+          errorResponse(
+            'Ссылка MAX недоступна, проверьте конфигурацию бота.',
             ErrorCodes.INTERNAL_ERROR
           )
         );

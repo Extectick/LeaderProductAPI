@@ -115,12 +115,60 @@ export type TelegramLinkResponse = SuccessResponse<{
   profile: Profile;
 }> | ErrorResponse;
 
+export type MaxState = TelegramState;
+export type MaxConflictHint = TelegramConflictHint;
+
+export type MaxInitRequest = {
+  initDataRaw: string;
+};
+
+export type MaxInitResponse = SuccessResponse<{
+  maxSessionToken: string;
+  maxUser: {
+    id: string;
+    username: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  state: MaxState;
+  conflictUserHint?: MaxConflictHint | null;
+}> | ErrorResponse;
+
+export type MaxContactRequest = {
+  maxSessionToken: string;
+  phoneE164: string;
+};
+
+export type MaxContactResponse = SuccessResponse<{
+  state: MaxState;
+  conflictUserHint?: MaxConflictHint | null;
+}> | ErrorResponse;
+
+export type MaxSignInRequest = {
+  maxSessionToken: string;
+};
+
+export type MaxSignInResponse = SuccessResponse<{
+  accessToken: string;
+  refreshToken: string;
+  profile: Profile;
+  message: string;
+}> | ErrorResponse;
+
+export type MaxLinkRequest = {
+  maxSessionToken: string;
+};
+
+export type MaxLinkResponse = SuccessResponse<{
+  profile: Profile;
+}> | ErrorResponse;
+
 export type AuthMethodsResponse = SuccessResponse<{
   methods: Array<{
-    key: 'password' | 'telegram';
+    key: 'password' | 'telegram' | 'max';
     label: string;
     enabled: boolean;
-    flow: 'credentials' | 'telegram';
+    flow: 'credentials' | 'telegram' | 'max';
   }>;
 }> | ErrorResponse;
 
@@ -243,6 +291,7 @@ export type CreateEmployeeProfileRequest = {
 
 export type StartPhoneVerificationRequest = {
   phone: string;
+  provider?: 'TELEGRAM' | 'MAX';
 };
 
 export type StartPhoneVerificationResponse = SuccessResponse<{
@@ -252,6 +301,7 @@ export type StartPhoneVerificationResponse = SuccessResponse<{
   expiresAt: Date;
   pollIntervalSec: number;
   requestedPhone: string | null;
+  provider?: 'TELEGRAM' | 'MAX';
 }> | ErrorResponse;
 
 export type StartEmailChangeRequest = {

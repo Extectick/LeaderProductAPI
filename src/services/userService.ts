@@ -168,9 +168,12 @@ export const getProfile = async (userId: number): Promise<Profile> => {
       phoneVerifiedAt: user.phoneVerifiedAt ?? null,
       telegramId: user.telegramId ? user.telegramId.toString() : null,
       telegramUsername: user.telegramUsername ?? null,
+      maxId: user.maxId ? user.maxId.toString() : null,
+      maxUsername: user.maxUsername ?? null,
       authProvider: user.authProvider,
       authMethods: {
         telegramLinked: Boolean(user.telegramId),
+        maxLinked: Boolean(user.maxId),
         passwordLoginEnabled: Boolean(user.email && user.passwordHash && user.isActive),
         passwordLoginPendingVerification: Boolean(user.email && user.passwordHash && !user.isActive),
       },

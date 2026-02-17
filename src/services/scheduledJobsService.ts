@@ -161,8 +161,15 @@ async function processUnreadReminder(appealId: number): Promise<void> {
       appealId,
       number: appeal.number,
       hoursUnread: UNREAD_REMINDER_HOURS,
+      channel: 'telegram',
     }),
-    channels: ['telegram'],
+    maxText: tplUnreadReminder({
+      appealId,
+      number: appeal.number,
+      hoursUnread: UNREAD_REMINDER_HOURS,
+      channel: 'max',
+    }),
+    channels: ['telegram', 'max'],
     recipientUserIds: recipients,
   });
 }
@@ -186,8 +193,15 @@ async function processClosureReminder(appealId: number): Promise<void> {
       appealId,
       number: appeal.number,
       hoursWaiting: CLOSURE_REMINDER_HOURS,
+      channel: 'telegram',
     }),
-    channels: ['telegram'],
+    maxText: tplClosureReminder({
+      appealId,
+      number: appeal.number,
+      hoursWaiting: CLOSURE_REMINDER_HOURS,
+      channel: 'max',
+    }),
+    channels: ['telegram', 'max'],
     recipientUserIds: [appeal.createdById],
   });
 }

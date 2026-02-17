@@ -19,7 +19,16 @@ import {
   verifyTelegramInitData,
 } from '../services/telegramAuthService';
 import {
+  getMaxContactPhone,
+  issueMaxSessionToken,
+  parseMaxSessionToken,
+  setMaxContactPhone,
+  verifyMaxInitData,
+} from '../services/maxAuthService';
+import {
+  bindMaxToPhoneVerificationByStartToken,
   bindTelegramToPhoneVerificationByStartToken,
+  verifyPhoneByMaxContact,
   verifyPhoneByTelegramContact,
 } from '../services/phoneVerificationService';
 import { getAuthMethodDescriptors } from '../services/authMethodRegistry';
@@ -27,7 +36,14 @@ import {
   registerTelegramUpdateHandler,
   sendPhoneContactRequestMessage,
   sendTelegramInfoMessage,
+  sendTelegramWelcomeMessage,
 } from '../services/telegramBotService';
+import {
+  registerMaxUpdateHandler,
+  sendMaxInfoMessage,
+  sendMaxPhoneContactRequestMessage,
+  sendMaxWelcomeMessage,
+} from '../services/maxBotService';
 import {
   AuthRegisterRequest,
   AuthRegisterResponse,
@@ -68,12 +84,21 @@ const RESEND_CODE_INTERVAL_MS = 25 * 1000; // 25 секунд
 const VERIFICATION_CODE_EXPIRATION_MS = 60 * 60 * 1000; // 1 час
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+const MAX_WEBHOOK_SECRET = process.env.MAX_WEBHOOK_SECRET || '';
 const TELEGRAM_RATE_LIMIT = rateLimit({ windowSec: 60, limit: 60 });
+const MAX_RATE_LIMIT = rateLimit({ windowSec: 60, limit: 60 });
 
 type TelegramState = 'AUTHORIZED' | 'NEED_PHONE' | 'NEED_LINK' | 'READY';
 
 type TelegramResolveResult = {
   state: TelegramState;
+  userId?: number;
+  conflictUserHint?: { maskedEmail: string | null; maskedPhone: string | null };
+};
+
+type MaxState = 'AUTHORIZED' | 'NEED_PHONE' | 'NEED_LINK' | 'READY';
+type MaxResolveResult = {
+  state: MaxState;
   userId?: number;
   conflictUserHint?: { maskedEmail: string | null; maskedPhone: string | null };
 };
@@ -99,10 +124,23 @@ type TelegramSessionInfo = {
   lastName: string | null;
 };
 
+type MaxSessionInfo = {
+  maxId: string;
+  username: string | null;
+  firstName: string | null;
+  lastName: string | null;
+};
+
 function tgLog(stage: string, payload?: Record<string, any>) {
   if (process.env.NODE_ENV === 'production') return;
   if (payload) console.log('[tg-auth]', stage, payload);
   else console.log('[tg-auth]', stage);
+}
+
+function maxLog(stage: string, payload?: Record<string, any>) {
+  if (process.env.NODE_ENV === 'production') return;
+  if (payload) console.log('[max-auth]', stage, payload);
+  else console.log('[max-auth]', stage);
 }
 
 function normalizeEmail(email: string) {
@@ -118,6 +156,27 @@ function toTelegramBigInt(telegramId: string) {
     return BigInt(String(telegramId));
   } catch {
     throw new Error('Invalid telegramId');
+  }
+}
+
+function toMaxBigInt(maxId: string) {
+  try {
+    return BigInt(String(maxId));
+  } catch {
+    throw new Error('Invalid maxId');
+  }
+}
+
+function resolveAuthProviderAfterMessengerAttach(
+  current: 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID'
+): 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID' {
+  switch (current) {
+    case 'LOCAL':
+    case 'TELEGRAM':
+    case 'MAX':
+    case 'HYBRID':
+    default:
+      return 'HYBRID';
   }
 }
 
@@ -182,10 +241,28 @@ async function resolveTelegramUserState(
 
   const userByPhone = await prisma.user.findFirst({
     where: { phone: normalizedPhone },
-    select: { id: true, email: true, phone: true, telegramId: true },
+    select: { id: true, email: true, phone: true, telegramId: true, authProvider: true },
   });
 
   if (userByPhone) {
+    if (!userByPhone.telegramId || userByPhone.telegramId === telegramId) {
+      const nextProvider = resolveAuthProviderAfterMessengerAttach(
+        userByPhone.authProvider as 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID'
+      );
+      await prisma.user.update({
+        where: { id: userByPhone.id },
+        data: {
+          telegramId,
+          telegramUsername: session.username,
+          telegramLinkedAt: new Date(),
+          phoneVerifiedAt: new Date(),
+          authProvider: nextProvider,
+        },
+      });
+      tgLog('auto_linked_by_phone', { telegramId: session.telegramId, userId: userByPhone.id });
+      return { state: 'READY', userId: userByPhone.id };
+    }
+
     tgLog('need_link_by_phone', { telegramId: session.telegramId, phoneOwnerId: userByPhone.id });
     return {
       state: 'NEED_LINK',
@@ -220,6 +297,111 @@ async function resolveTelegramUserState(
   return { state: 'READY', userId: created.id };
 }
 
+async function resolveMaxUserState(
+  session: MaxSessionInfo,
+  phoneDigits11?: string | null
+): Promise<MaxResolveResult> {
+  const maxId = toMaxBigInt(session.maxId);
+  const normalizedPhone = phoneDigits11 ? normalizePhoneToBigInt(phoneDigits11) : null;
+  const userByMax = await prisma.user.findFirst({
+    where: { maxId },
+    select: { id: true, phone: true, maxUsername: true },
+  });
+
+  if (userByMax) {
+    maxLog('linked_user_found', { userId: userByMax.id, maxId: session.maxId });
+    const updateData: Record<string, any> = {};
+    if (session.username !== userByMax.maxUsername) {
+      updateData.maxUsername = session.username;
+    }
+    if (Object.keys(updateData).length > 0) {
+      await prisma.user.update({ where: { id: userByMax.id }, data: updateData });
+    }
+
+    if (!userByMax.phone && normalizedPhone) {
+      const phoneOwner = await prisma.user.findFirst({
+        where: { phone: normalizedPhone },
+        select: { id: true },
+      });
+      if (!phoneOwner || phoneOwner.id === userByMax.id) {
+        await prisma.user.update({
+          where: { id: userByMax.id },
+          data: { phone: normalizedPhone, phoneVerifiedAt: new Date() },
+        });
+      } else {
+        maxLog('phone_conflict_ignored_for_linked_user', {
+          maxUserId: userByMax.id,
+          phoneOwnerId: phoneOwner.id,
+        });
+      }
+    }
+
+    return { state: 'READY', userId: userByMax.id };
+  }
+
+  if (!normalizedPhone) {
+    maxLog('phone_missing', { maxId: session.maxId });
+    return { state: 'NEED_PHONE' };
+  }
+
+  const userByPhone = await prisma.user.findFirst({
+    where: { phone: normalizedPhone },
+    select: { id: true, email: true, phone: true, maxId: true, authProvider: true },
+  });
+
+  if (userByPhone) {
+    if (!userByPhone.maxId || userByPhone.maxId === maxId) {
+      const nextProvider = resolveAuthProviderAfterMessengerAttach(
+        userByPhone.authProvider as 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID'
+      );
+      await prisma.user.update({
+        where: { id: userByPhone.id },
+        data: {
+          maxId,
+          maxUsername: session.username,
+          maxLinkedAt: new Date(),
+          phoneVerifiedAt: new Date(),
+          authProvider: nextProvider,
+        },
+      });
+      maxLog('auto_linked_by_phone', { maxId: session.maxId, userId: userByPhone.id });
+      return { state: 'READY', userId: userByPhone.id };
+    }
+
+    maxLog('need_link_by_phone', { maxId: session.maxId, phoneOwnerId: userByPhone.id });
+    return {
+      state: 'NEED_LINK',
+      conflictUserHint: {
+        maskedEmail: maskEmail(userByPhone.email),
+        maskedPhone: maskPhone(toApiPhoneString(userByPhone.phone)),
+      },
+    };
+  }
+
+  const created = await prisma.user.create({
+    data: {
+      email: null,
+      passwordHash: null,
+      isActive: true,
+      role: { connect: { name: 'user' } },
+      firstName: session.firstName ?? undefined,
+      lastName: session.lastName ?? undefined,
+      phone: normalizedPhone,
+      phoneVerifiedAt: new Date(),
+      maxId,
+      maxUsername: session.username,
+      maxLinkedAt: new Date(),
+      authProvider: 'MAX',
+      profileStatus: 'ACTIVE',
+      currentProfileType: null,
+    },
+    select: { id: true },
+  });
+  maxLog('created_max_user', { userId: created.id, maxId: session.maxId });
+
+  return { state: 'READY', userId: created.id };
+}
+
 async function issueAuthTokensForUser(userId: number) {
   const user = await loadUserWithRolePermissions(userId);
   if (!user) {
@@ -235,6 +417,16 @@ function parseTelegramSession(tgSessionToken: string): TelegramSessionInfo {
   const parsed = parseTelegramSessionToken(tgSessionToken);
   return {
     telegramId: String(parsed.telegramId),
+    username: parsed.username ?? null,
+    firstName: parsed.firstName ?? null,
+    lastName: parsed.lastName ?? null,
+  };
+}
+
+function parseMaxSession(maxSessionToken: string): MaxSessionInfo {
+  const parsed = parseMaxSessionToken(maxSessionToken);
+  return {
+    maxId: String(parsed.maxId),
     username: parsed.username ?? null,
     firstName: parsed.firstName ?? null,
     lastName: parsed.lastName ?? null,
@@ -738,7 +930,9 @@ router.post(
         return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
       }
 
-      const nextProvider = current.authProvider === 'LOCAL' ? 'HYBRID' : current.authProvider === 'TELEGRAM' ? 'HYBRID' : current.authProvider;
+      const nextProvider = resolveAuthProviderAfterMessengerAttach(
+        current.authProvider as 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID'
+      );
 
       await prisma.user.update({
         where: { id: Number(userId) },
@@ -755,6 +949,216 @@ router.post(
     } catch (error: any) {
       return res.status(401).json(
         errorResponse(error?.message || 'Не удалось привязать Telegram аккаунт', ErrorCodes.UNAUTHORIZED)
+      );
+    }
+  }
+);
+
+router.post('/max/init', MAX_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { initDataRaw } = req.body as { initDataRaw?: string };
+    if (!initDataRaw || typeof initDataRaw !== 'string') {
+      return res.status(400).json(
+        errorResponse('Требуется initDataRaw', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const maxUser = verifyMaxInitData(initDataRaw);
+    const maxSessionToken = issueMaxSessionToken(maxUser);
+    const phoneFromBot = await getMaxContactPhone(maxUser.id);
+    const resolved = await resolveMaxUserState(
+      {
+        maxId: maxUser.id,
+        username: maxUser.username,
+        firstName: maxUser.firstName,
+        lastName: maxUser.lastName,
+      },
+      phoneFromBot
+    );
+
+    return res.json(
+      successResponse({
+        maxSessionToken,
+        maxUser: {
+          id: maxUser.id,
+          username: maxUser.username,
+          firstName: maxUser.firstName,
+          lastName: maxUser.lastName,
+        },
+        state: resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(
+        error?.message || 'Не удалось проверить MAX initData',
+        ErrorCodes.UNAUTHORIZED
+      )
+    );
+  }
+});
+
+router.post('/max/contact', MAX_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { maxSessionToken, phoneE164 } = req.body as { maxSessionToken?: string; phoneE164?: string };
+    if (!maxSessionToken || !phoneE164) {
+      return res.status(400).json(
+        errorResponse('Требуются maxSessionToken и phoneE164', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseMaxSession(maxSessionToken);
+    const normalizedPhone = normalizePhoneE164(phoneE164);
+    if (!normalizedPhone) {
+      return res.status(400).json(
+        errorResponse('Некорректный формат телефона', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    await setMaxContactPhone(session.maxId, normalizedPhone);
+    const resolved = await resolveMaxUserState(session, normalizedPhone);
+
+    return res.json(
+      successResponse({
+        state: resolved.state === 'AUTHORIZED' ? 'NEED_PHONE' : resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось сохранить контакт', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.get('/max/contact-status', MAX_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const maxSessionToken = String((req.query?.maxSessionToken as string) || '').trim();
+    if (!maxSessionToken) {
+      return res.status(400).json(
+        errorResponse('Требуется maxSessionToken', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseMaxSession(maxSessionToken);
+    const phoneFromBot = await getMaxContactPhone(session.maxId);
+    const resolved = await resolveMaxUserState(session, phoneFromBot);
+
+    return res.json(
+      successResponse({
+        state: resolved.state,
+        conflictUserHint: resolved.conflictUserHint ?? null,
+      })
+    );
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось проверить статус контакта', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.post('/max/sign-in', MAX_RATE_LIMIT, async (req: express.Request, res: express.Response) => {
+  try {
+    const { maxSessionToken } = req.body as { maxSessionToken?: string };
+    if (!maxSessionToken) {
+      return res.status(400).json(
+        errorResponse('Требуется maxSessionToken', ErrorCodes.VALIDATION_ERROR)
+      );
+    }
+
+    const session = parseMaxSession(maxSessionToken);
+    const maxId = toMaxBigInt(session.maxId);
+    const linkedUser = await prisma.user.findFirst({
+      where: { maxId },
+      select: { id: true, profileStatus: true, maxUsername: true },
+    });
+
+    if (!linkedUser) {
+      return res.status(404).json(
+        errorResponse('MAX аккаунт не привязан', ErrorCodes.NOT_FOUND)
+      );
+    }
+
+    if (linkedUser.profileStatus === 'BLOCKED') {
+      return res.status(403).json(
+        errorResponse('Ваш аккаунт заблокирован. Обратитесь в поддержку.', ErrorCodes.FORBIDDEN)
+      );
+    }
+
+    if (session.username !== linkedUser.maxUsername) {
+      await prisma.user.update({
+        where: { id: linkedUser.id },
+        data: { maxUsername: session.username },
+      });
+    }
+
+    const authPayload = await issueAuthTokensForUser(linkedUser.id);
+    return res.json(successResponse({ ...authPayload, message: 'Вход через MAX успешен' }));
+  } catch (error: any) {
+    return res.status(401).json(
+      errorResponse(error?.message || 'Не удалось выполнить вход через MAX', ErrorCodes.UNAUTHORIZED)
+    );
+  }
+});
+
+router.post(
+  '/max/link',
+  MAX_RATE_LIMIT,
+  authenticateToken,
+  async (req: AuthRequest<{}, {}, { maxSessionToken?: string }>, res: express.Response) => {
+    try {
+      const userId = req.user?.userId;
+      const maxSessionToken = String(req.body?.maxSessionToken || '').trim();
+      if (!userId) {
+        return res.status(401).json(errorResponse('Не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+      if (!maxSessionToken) {
+        return res.status(400).json(
+          errorResponse('Требуется maxSessionToken', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const session = parseMaxSession(maxSessionToken);
+      const maxId = toMaxBigInt(session.maxId);
+
+      const owner = await prisma.user.findFirst({
+        where: { maxId },
+        select: { id: true },
+      });
+      if (owner && owner.id !== Number(userId)) {
+        return res.status(409).json(
+          errorResponse('Этот MAX аккаунт уже привязан к другому пользователю', ErrorCodes.CONFLICT)
+        );
+      }
+
+      const current = await prisma.user.findUnique({
+        where: { id: Number(userId) },
+        select: { authProvider: true },
+      });
+      if (!current) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const nextProvider = resolveAuthProviderAfterMessengerAttach(
+        current.authProvider as 'LOCAL' | 'TELEGRAM' | 'MAX' | 'HYBRID'
+      );
+
+      await prisma.user.update({
+        where: { id: Number(userId) },
+        data: {
+          maxId,
+          maxUsername: session.username,
+          maxLinkedAt: new Date(),
+          authProvider: nextProvider,
+        },
+      });
+
+      const profile = await getProfile(Number(userId));
+      return res.json(successResponse({ profile }, 'MAX аккаунт успешно привязан'));
+    } catch (error: any) {
+      return res.status(401).json(
+        errorResponse(error?.message || 'Не удалось привязать MAX аккаунт', ErrorCodes.UNAUTHORIZED)
       );
     }
   }
@@ -795,7 +1199,7 @@ router.post(
 
       const me = await prisma.user.findUnique({
         where: { id: Number(userId) },
-        select: { id: true, email: true, telegramId: true, authProvider: true },
+        select: { id: true, email: true, telegramId: true, maxId: true, authProvider: true },
       });
       if (!me) {
         return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
@@ -821,7 +1225,7 @@ router.post(
       }
 
       const passwordHash = await bcrypt.hash(password, 10);
-      const nextProvider = me.telegramId ? 'HYBRID' : me.authProvider;
+      const nextProvider = me.telegramId || me.maxId ? 'HYBRID' : me.authProvider;
 
       await prisma.user.update({
         where: { id: Number(userId) },
@@ -901,6 +1305,11 @@ async function processTelegramPhoneVerificationUpdate(update: any) {
           }).catch((e) => tgLog('bot_send_failed', { stage: 'start_already_done', error: String(e?.message || e) }));
         }
       }
+    } else if (chatIdRaw !== null && chatIdRaw !== undefined) {
+      await sendTelegramWelcomeMessage({
+        chatId: String(chatIdRaw),
+        startParam: 'home',
+      }).catch((e) => tgLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
     }
   }
 
@@ -976,6 +1385,186 @@ router.post('/telegram/webhook', async (req: express.Request, res: express.Respo
     }
 
     await processTelegramPhoneVerificationUpdate(req.body || {});
+    return res.json(successResponse({ ok: true }));
+  } catch (error: any) {
+    return res.status(500).json(
+      errorResponse(error?.message || 'Webhook processing failed', ErrorCodes.INTERNAL_ERROR)
+    );
+  }
+});
+
+function extractPhoneFromVcf(vcfInfo: string): string | null {
+  const raw = String(vcfInfo || '').trim();
+  if (!raw) return null;
+  const lines = raw.split(/\r?\n/);
+  const telLine = lines.find((line) => /^TEL/i.test(line.trim()));
+  if (!telLine) return null;
+  const phoneRaw = telLine.split(':').slice(1).join(':').trim();
+  return phoneRaw || null;
+}
+
+function parseMaxUpdatePayload(update: any) {
+  const updateType = String(update?.update_type || '').trim().toLowerCase();
+  const message = update?.message || null;
+  const fromIdRaw =
+    update?.user?.user_id ??
+    message?.sender?.user_id ??
+    null;
+  const chatIdRaw =
+    update?.chat_id ??
+    message?.recipient?.chat_id ??
+    null;
+  const username = update?.user?.username || message?.sender?.username
+    ? String(update?.user?.username || message?.sender?.username)
+    : null;
+  const textRaw = String(message?.body?.text || '').trim();
+
+  let startPayload = '';
+  if (updateType === 'bot_started') {
+    startPayload = String(update?.payload || '').trim();
+  } else if (textRaw.startsWith('/start')) {
+    startPayload = textRaw.split(/\s+/, 2)[1] || '';
+  }
+  const startToken = startPayload.startsWith('verify_phone_')
+    ? startPayload.slice('verify_phone_'.length)
+    : '';
+
+  let phoneRaw: string | null = null;
+  const attachments = Array.isArray(message?.body?.attachments) ? message.body.attachments : [];
+  for (const att of attachments) {
+    if (att?.type !== 'contact') continue;
+    const fromVcf = extractPhoneFromVcf(String(att?.payload?.vcf_info || ''));
+    if (fromVcf) {
+      phoneRaw = fromVcf;
+      break;
+    }
+  }
+
+  return { fromIdRaw, chatIdRaw, username, startToken, phoneRaw };
+}
+
+async function processMaxPhoneVerificationUpdate(update: any) {
+  const parsed = parseMaxUpdatePayload(update);
+  const fromIdRaw = parsed.fromIdRaw;
+  const username = parsed.username;
+  const targetChatId = parsed.fromIdRaw ?? null;
+
+  const isStartEvent =
+    String(update?.update_type || '').trim().toLowerCase() === 'bot_started' ||
+    String(update?.message?.body?.text || '').trim().startsWith('/start');
+
+  if (fromIdRaw && parsed.startToken) {
+    maxLog('phone_verify_start_received', {
+      fromIdRaw: String(fromIdRaw),
+      hasChatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined,
+    });
+    const session = await bindMaxToPhoneVerificationByStartToken({
+      token: parsed.startToken,
+      maxUserId: String(fromIdRaw),
+      chatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined ? String(parsed.chatIdRaw) : null,
+      username,
+    });
+    maxLog('phone_verify_start_bound', {
+      sessionId: session?.id ?? null,
+      sessionStatus: session?.status ?? null,
+    });
+
+    if (targetChatId !== null && targetChatId !== undefined) {
+      const chatId = String(targetChatId);
+      if (!session) {
+        await sendMaxInfoMessage({
+          chatId,
+          text: 'Ссылка подтверждения недействительна. Запустите подтверждение номера заново в приложении.',
+        }).catch((e) => maxLog('bot_send_failed', { stage: 'start_invalid', error: String(e?.message || e) }));
+      } else if (session.status === 'PENDING') {
+        await sendMaxPhoneContactRequestMessage({
+          chatId,
+          requestedPhone: toApiPhoneString(session.requestedPhone),
+        }).catch((e) => maxLog('bot_send_failed', { stage: 'start_pending', error: String(e?.message || e) }));
+      } else if (session.status === 'EXPIRED') {
+        await sendMaxInfoMessage({
+          chatId,
+          text: 'Сессия подтверждения истекла. Запустите подтверждение заново в приложении.',
+        }).catch((e) => maxLog('bot_send_failed', { stage: 'start_expired', error: String(e?.message || e) }));
+      } else {
+        await sendMaxInfoMessage({
+          chatId,
+          text: 'Эта сессия подтверждения уже завершена.',
+        }).catch((e) => maxLog('bot_send_failed', { stage: 'start_already_done', error: String(e?.message || e) }));
+      }
+    }
+  } else if (fromIdRaw && isStartEvent) {
+    await sendMaxWelcomeMessage({
+      chatId: String(targetChatId),
+      startParam: 'home',
+    }).catch((e) => maxLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
+  }
+
+  if (!fromIdRaw || !parsed.phoneRaw) return;
+
+  const normalized = normalizePhoneE164(String(parsed.phoneRaw));
+  if (!normalized) return;
+
+  await setMaxContactPhone(String(fromIdRaw), normalized);
+  const verification = await verifyPhoneByMaxContact({
+    maxUserId: String(fromIdRaw),
+    phoneRaw: String(parsed.phoneRaw),
+    username,
+  });
+
+  if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND') {
+    maxLog('contact_without_session', { maxUserId: String(fromIdRaw) });
+    return;
+  }
+
+  if (targetChatId !== null && targetChatId !== undefined) {
+    const chatId = String(targetChatId);
+    if (verification.ok) {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Номер телефона подтверждён. Можно вернуться в приложение.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'verified', error: String(e?.message || e) }));
+    } else if (verification.reason === 'PHONE_MISMATCH') {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Отправлен другой номер. Нажмите кнопку и отправьте контакт с нужным номером.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'phone_mismatch', error: String(e?.message || e) }));
+    } else if (verification.reason === 'SESSION_NOT_FOUND' || verification.reason === 'SESSION_EXPIRED') {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Сессия подтверждения не найдена или истекла. Запустите подтверждение заново в приложении.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'session_not_found_or_expired', error: String(e?.message || e) }));
+    } else if (verification.reason === 'PHONE_ALREADY_USED') {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Этот номер уже используется другим пользователем.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'phone_already_used', error: String(e?.message || e) }));
+    } else if (verification.reason === 'MAX_ALREADY_USED') {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Этот MAX-аккаунт уже привязан к другому пользователю.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'max_already_used', error: String(e?.message || e) }));
+    } else {
+      await sendMaxInfoMessage({
+        chatId,
+        text: 'Не удалось подтвердить номер. Попробуйте снова из приложения.',
+      }).catch((e) => maxLog('bot_send_failed', { stage: 'unknown_verification_error', error: String(e?.message || e) }));
+    }
+  }
+}
+
+registerMaxUpdateHandler(processMaxPhoneVerificationUpdate);
+
+router.post('/max/webhook', async (req: express.Request, res: express.Response) => {
+  try {
+    if (MAX_WEBHOOK_SECRET) {
+      const header = String(req.headers['x-max-bot-api-secret'] || '');
+      if (!header || header !== MAX_WEBHOOK_SECRET) {
+        return res.status(403).json(errorResponse('Forbidden', ErrorCodes.FORBIDDEN));
+      }
+    }
+
+    await processMaxPhoneVerificationUpdate(req.body || {});
     return res.json(successResponse({ ok: true }));
   } catch (error: any) {
     return res.status(500).json(
