@@ -4,8 +4,47 @@ import { authenticateToken, authorizePermissions, AuthRequest } from '../middlew
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { ErrorCodes, errorResponse, successResponse } from '../utils/apiResponse';
 import { listServicesForAdmin, listServicesForUser } from '../services/serviceAccess';
+import {
+  DEFAULT_SERVICE_PERMISSION_ACTIONS,
+  SERVICE_PERMISSION_ACTION_LABELS,
+} from '../rbac/permissionCatalog';
 
 const router = express.Router();
+
+const SNAKE_CASE_RE = /^[a-z0-9_]+$/;
+
+function normalizeActionList(value: unknown): { ok: true; actions: string[] } | { ok: false; message: string } {
+  const source = Array.isArray(value) ? value : DEFAULT_SERVICE_PERMISSION_ACTIONS;
+  const unique = Array.from(
+    new Set(
+      source
+        .map((item) => String(item || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+
+  if (!unique.length) {
+    return { ok: false, message: 'Список действий для прав не может быть пустым' };
+  }
+  if (!unique.every((action) => SNAKE_CASE_RE.test(action))) {
+    return {
+      ok: false,
+      message: 'Каждое действие должно быть в формате lowercase snake_case',
+    };
+  }
+
+  return { ok: true, actions: unique };
+}
+
+function makeServicePermissionDisplay(action: string, serviceName: string): string {
+  const actionLabel = SERVICE_PERMISSION_ACTION_LABELS[action] || action;
+  return `${actionLabel} (${serviceName})`;
+}
+
+function makeServicePermissionDescription(action: string, serviceName: string): string {
+  const actionLabel = (SERVICE_PERMISSION_ACTION_LABELS[action] || action).toLowerCase();
+  return `Разрешает ${actionLabel} в сервисе "${serviceName}".`;
+}
 
 /**
  * @openapi
@@ -67,6 +106,196 @@ router.get(
       return res
         .status(500)
         .json(errorResponse('Ошибка получения сервисов', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.post(
+  '/admin',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_services'], { mode: 'any' }),
+  async (
+    req: AuthRequest<
+      {},
+      {},
+      {
+        key?: string;
+        name?: string;
+        route?: string | null;
+        icon?: string | null;
+        description?: string | null;
+        gradientStart?: string | null;
+        gradientEnd?: string | null;
+        isActive?: boolean;
+        defaultVisible?: boolean;
+        defaultEnabled?: boolean;
+        generatePermissionTemplate?: boolean;
+        permissionActions?: string[];
+      }
+    >,
+    res: express.Response
+  ) => {
+    try {
+      const key = String(req.body.key || '').trim().toLowerCase();
+      const name = String(req.body.name || '').trim();
+      if (!key || !SNAKE_CASE_RE.test(key)) {
+        return res.status(400).json(
+          errorResponse('Ключ сервиса обязателен и должен быть в формате lowercase snake_case', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+      if (!name) {
+        return res
+          .status(400)
+          .json(errorResponse('Название сервиса обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const generatePermissionTemplate = req.body.generatePermissionTemplate !== false;
+      const normalizedActionsResult = normalizeActionList(req.body.permissionActions);
+      let actions: string[] = [];
+      if (generatePermissionTemplate) {
+        if (!normalizedActionsResult.ok) {
+          return res
+            .status(400)
+            .json(errorResponse(normalizedActionsResult.message, ErrorCodes.VALIDATION_ERROR));
+        }
+        actions = normalizedActionsResult.actions;
+      }
+
+      const existingService = await prisma.service.findUnique({ where: { key }, select: { id: true } });
+      if (existingService) {
+        return res
+          .status(400)
+          .json(errorResponse('Сервис с таким key уже существует', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const permissionNames = actions.map((action) => `${action}_${key}`);
+      if (permissionNames.length) {
+        const existingPermissions = await prisma.permission.findMany({
+          where: { name: { in: permissionNames } },
+          select: { name: true },
+        });
+        if (existingPermissions.length) {
+          return res.status(400).json(
+            errorResponse(
+              `Найдены коллизии прав: ${existingPermissions.map((p) => p.name).join(', ')}`,
+              ErrorCodes.VALIDATION_ERROR
+            )
+          );
+        }
+      }
+
+      const groupKey = `service_${key}`;
+      if (generatePermissionTemplate) {
+        const existingGroup = await prisma.permissionGroup.findUnique({
+          where: { key: groupKey },
+          select: { id: true },
+        });
+        if (existingGroup) {
+          return res.status(400).json(
+            errorResponse(
+              `Группа прав ${groupKey} уже существует`,
+              ErrorCodes.VALIDATION_ERROR
+            )
+          );
+        }
+      }
+
+      const created = await prisma.$transaction(async (tx) => {
+        const service = await tx.service.create({
+          data: {
+            key,
+            name,
+            route: req.body.route ?? null,
+            icon: req.body.icon ?? null,
+            description: req.body.description ?? null,
+            gradientStart: req.body.gradientStart ?? null,
+            gradientEnd: req.body.gradientEnd ?? null,
+            isActive: req.body.isActive ?? true,
+            defaultVisible: req.body.defaultVisible ?? true,
+            defaultEnabled: req.body.defaultEnabled ?? true,
+          },
+          include: {
+            roleAccess: { select: { id: true, roleId: true, visible: true, enabled: true } },
+            departmentAccess: { select: { id: true, departmentId: true, visible: true, enabled: true } },
+          },
+        });
+
+        let permissionGroup: {
+          id: number;
+          key: string;
+          displayName: string;
+          description: string;
+          isSystem: boolean;
+          sortOrder: number;
+          serviceId: number | null;
+        } | null = null;
+        const createdPermissions: Array<{ id: number; name: string; displayName: string; description: string }> = [];
+
+        if (generatePermissionTemplate) {
+          permissionGroup = await tx.permissionGroup.create({
+            data: {
+              key: groupKey,
+              displayName: `Сервис: ${name}`,
+              description: `Права доступа к сервису "${name}".`,
+              sortOrder: 500,
+              isSystem: true,
+              serviceId: service.id,
+            },
+            select: {
+              id: true,
+              key: true,
+              displayName: true,
+              description: true,
+              isSystem: true,
+              sortOrder: true,
+              serviceId: true,
+            },
+          });
+
+          for (const action of actions) {
+            const permissionName = `${action}_${key}`;
+            const createdPermission = await tx.permission.create({
+              data: {
+                name: permissionName,
+                displayName: makeServicePermissionDisplay(action, name),
+                description: makeServicePermissionDescription(action, name),
+                groupId: permissionGroup.id,
+              },
+              select: { id: true, name: true, displayName: true, description: true },
+            });
+            createdPermissions.push(createdPermission);
+          }
+
+          if (createdPermissions.length) {
+            const adminRole = await tx.role.findUnique({ where: { name: 'admin' }, select: { id: true } });
+            if (adminRole) {
+              await tx.rolePermissions.createMany({
+                data: createdPermissions.map((perm) => ({
+                  roleId: adminRole.id,
+                  permissionId: perm.id,
+                })),
+                skipDuplicates: true,
+              });
+            }
+          }
+        }
+
+        return { service, permissionGroup, createdPermissions };
+      });
+
+      return res.json(
+        successResponse({
+          service: created.service,
+          permissionGroup: created.permissionGroup,
+          createdPermissions: created.createdPermissions,
+        })
+      );
+    } catch (error) {
+      console.error('service create error:', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка создания сервиса', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );

@@ -63,8 +63,8 @@ describe('Auth: Telegram + credentials flow', () => {
   beforeAll(async () => {
     const userRole = await prisma.role.upsert({
       where: { name: 'user' },
-      update: {},
-      create: { name: 'user' },
+      update: { displayName: 'Пользователь' },
+      create: { name: 'user', displayName: 'Пользователь' },
     });
     userRoleId = userRole.id;
   });

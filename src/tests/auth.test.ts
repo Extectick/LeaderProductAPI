@@ -25,17 +25,22 @@ describe('Auth API Integration Tests', () => {
     const userRole = await prisma.role.create({
       data: {
         name: 'user',
+        displayName: 'Пользователь',
       },
     });
 
     // Check if permissions exist, create if not
     let readPermission = await prisma.permission.findUnique({ where: { name: 'read' } });
     if (!readPermission) {
-      readPermission = await prisma.permission.create({ data: { name: 'read' } });
+      readPermission = await prisma.permission.create({
+        data: { name: 'read', displayName: 'Чтение', description: 'Тестовое право чтения.' },
+      });
     }
     let writePermission = await prisma.permission.findUnique({ where: { name: 'write' } });
     if (!writePermission) {
-      writePermission = await prisma.permission.create({ data: { name: 'write' } });
+      writePermission = await prisma.permission.create({
+        data: { name: 'write', displayName: 'Запись', description: 'Тестовое право записи.' },
+      });
     }
 
     // Connect permissions to role

@@ -68,18 +68,25 @@ async function getRoleHierarchyByName(roleName: string): Promise<Set<string>> {
   return names;
 }
 
-async function collectRoleChain(roleId?: number | null): Promise<Set<number>> {
+async function collectRoleDescendants(roleId?: number | null): Promise<Set<number>> {
   const ids = new Set<number>();
-  let current: number | null = roleId ?? null;
+  if (!roleId) return ids;
 
-  while (current) {
-    if (ids.has(current)) break;
+  const queue: number[] = [roleId];
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || ids.has(current)) continue;
     ids.add(current);
-    const next = await prisma.role.findUnique({
-      where: { id: current },
-      select: { parentRoleId: true },
+
+    const children = await prisma.role.findMany({
+      where: { parentRoleId: current },
+      select: { id: true },
     });
-    current = next?.parentRoleId ?? null;
+    for (const child of children) {
+      if (!ids.has(child.id)) {
+        queue.push(child.id);
+      }
+    }
   }
 
   return ids;
@@ -112,10 +119,13 @@ async function resolveUserAccessContext(userId: number): Promise<UserAccessConte
     if (dr.roleId) seedRoleIds.add(dr.roleId);
   }
 
+  // Для сервисов применяем иерархию "сверху вниз":
+  // правило на более старшую (дочернюю) роль должно влиять на более младшие роли.
+  // Пример: deny на department_manager блокирует и employee, и user.
   const roleIds = new Set<number>();
   for (const rid of seedRoleIds) {
-    const chain = await collectRoleChain(rid);
-    chain.forEach((id) => roleIds.add(id));
+    const descendants = await collectRoleDescendants(rid);
+    descendants.forEach((id) => roleIds.add(id));
   }
 
   const departmentIds = new Set<number>();

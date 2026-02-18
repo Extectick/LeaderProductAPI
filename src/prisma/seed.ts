@@ -1,111 +1,19 @@
 import prisma from './client';
+import {
+  DEFAULT_PERMISSION_GROUP_KEY,
+  DEFAULT_ROLE_DISPLAY_NAMES,
+  DEFAULT_ROLE_PERMISSIONS,
+  PERMISSION_CATALOG,
+  PERMISSION_GROUP_CATALOG,
+} from '../rbac/permissionCatalog';
 
 async function main() {
-  const permissionNames = [
-    'view_profile',
-    'update_profile',
-    'logout',
-    'manage_roles',
-    'manage_permissions',
-    'manage_services',
-    'assign_roles',
-    'assign_permissions',
-    'manage_departments',
-    'manage_users',
-    'view_fin_reports',
-    'approve_payments',
-    'manage_payroll',
-    'view_shipments',
-    'manage_shipments',
-    'manage_inventory',
-    'create_appeal',
-    'view_appeal',
-    'assign_appeal',
-    'update_appeal_status',
-    'add_appeal_message',
-    'edit_appeal_message',
-    'delete_appeal_message',
-    'manage_appeal_watchers',
-    'export_appeals',
-    'manage_updates',
-  ];
-
   const departmentNames = [
     'IT Отдел',
     'Бухгалтерия',
     'Маркетинг',
     'Менеджеры',
   ];
-
-  for (const name of permissionNames) {
-    await prisma.permission.upsert({
-      where: { name },
-      update: {},
-      create: { name },
-    });
-  }
-
-  for (const name of departmentNames) {
-    await prisma.department.upsert({
-      where: { name },
-      update: {},
-      create: { name },
-    });
-  }
-
-  const userRole = await prisma.role.upsert({
-    where: { name: 'user' },
-    update: {},
-    create: { name: 'user' },
-  });
-  const employeeRole = await prisma.role.upsert({
-    where: { name: 'employee' },
-    update: {},
-    create: { name: 'employee', parentRoleId: userRole.id },
-  });
-  const managerRole = await prisma.role.upsert({
-    where: { name: 'department_manager' },
-    update: {},
-    create: { name: 'department_manager', parentRoleId: employeeRole.id },
-  });
-  const adminRole = await prisma.role.upsert({
-    where: { name: 'admin' },
-    update: {},
-    create: { name: 'admin', parentRoleId: managerRole.id },
-  });
-
-  const give = async (roleName: string, names: string[]) => {
-    const role = await prisma.role.findUnique({ where: { name: roleName } });
-    if (!role) return;
-    await prisma.rolePermissions.deleteMany({ where: { roleId: role.id } });
-    for (const n of names) {
-      const p = await prisma.permission.findUnique({ where: { name: n } });
-      if (p) {
-        await prisma.rolePermissions.create({
-          data: { roleId: role.id, permissionId: p.id },
-        });
-      }
-    }
-  };
-
-  await give('user', ['view_profile', 'update_profile', 'logout']);
-  await give('employee', [
-    'create_appeal',
-    'view_appeal',
-    'add_appeal_message',
-    'edit_appeal_message',
-    'delete_appeal_message',
-    'manage_appeal_watchers',
-  ]);
-  await give('department_manager', ['assign_appeal', 'update_appeal_status', 'export_appeals']);
-
-  const allPerms = await prisma.permission.findMany();
-  await prisma.rolePermissions.deleteMany({ where: { roleId: adminRole.id } });
-  for (const p of allPerms) {
-    await prisma.rolePermissions.create({
-      data: { roleId: adminRole.id, permissionId: p.id },
-    });
-  }
 
   const services = [
     {
@@ -182,8 +90,9 @@ async function main() {
     },
   ];
 
+  const serviceByKey = new Map<string, number>();
   for (const service of services) {
-    await prisma.service.upsert({
+    const upserted = await prisma.service.upsert({
       where: { key: service.key },
       update: {
         name: service.name,
@@ -196,7 +105,163 @@ async function main() {
         defaultEnabled: service.defaultEnabled,
         isActive: service.isActive,
       },
-      create: service,
+      create: {
+        ...service,
+      },
+      select: { id: true, key: true },
+    });
+    serviceByKey.set(upserted.key, upserted.id);
+  }
+
+  const groupIdByKey = new Map<string, number>();
+  for (const group of PERMISSION_GROUP_CATALOG) {
+    const serviceId = group.serviceKey ? serviceByKey.get(group.serviceKey) ?? null : null;
+    const upserted = await prisma.permissionGroup.upsert({
+      where: { key: group.key },
+      update: {
+        displayName: group.displayName,
+        description: group.description,
+        sortOrder: group.sortOrder,
+        isSystem: group.isSystem,
+        serviceId,
+      },
+      create: {
+        key: group.key,
+        displayName: group.displayName,
+        description: group.description,
+        sortOrder: group.sortOrder,
+        isSystem: group.isSystem,
+        serviceId,
+      },
+      select: { id: true, key: true },
+    });
+    groupIdByKey.set(upserted.key, upserted.id);
+  }
+
+  if (!groupIdByKey.has(DEFAULT_PERMISSION_GROUP_KEY)) {
+    const fallbackCore = await prisma.permissionGroup.upsert({
+      where: { key: DEFAULT_PERMISSION_GROUP_KEY },
+      update: {
+        displayName: 'Основные',
+        description: 'Базовые права пользователя и общесистемные действия.',
+        sortOrder: 10,
+        isSystem: true,
+      },
+      create: {
+        key: DEFAULT_PERMISSION_GROUP_KEY,
+        displayName: 'Основные',
+        description: 'Базовые права пользователя и общесистемные действия.',
+        sortOrder: 10,
+        isSystem: true,
+      },
+      select: { id: true, key: true },
+    });
+    groupIdByKey.set(fallbackCore.key, fallbackCore.id);
+  }
+
+  const coreGroupId = groupIdByKey.get(DEFAULT_PERMISSION_GROUP_KEY)!;
+
+  for (const entry of PERMISSION_CATALOG) {
+    const targetGroupId = groupIdByKey.get(entry.groupKey) ?? coreGroupId;
+    const existing = await prisma.permission.findUnique({
+      where: { name: entry.name },
+      select: { id: true, groupId: true },
+    });
+
+    if (existing) {
+      await prisma.permission.update({
+        where: { id: existing.id },
+        data: {
+          displayName: entry.displayName,
+          description: entry.description,
+          ...(existing.groupId == null ? { groupId: targetGroupId } : {}),
+        },
+      });
+    } else {
+      await prisma.permission.create({
+        data: {
+          name: entry.name,
+          displayName: entry.displayName,
+          description: entry.description,
+          groupId: targetGroupId,
+        },
+      });
+    }
+  }
+
+  for (const name of departmentNames) {
+    await prisma.department.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+    });
+  }
+
+  const userRole = await prisma.role.upsert({
+    where: { name: 'user' },
+    update: { displayName: DEFAULT_ROLE_DISPLAY_NAMES.user, parentRoleId: null },
+    create: { name: 'user', displayName: DEFAULT_ROLE_DISPLAY_NAMES.user },
+  });
+  const employeeRole = await prisma.role.upsert({
+    where: { name: 'employee' },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.employee,
+      parentRoleId: userRole.id,
+    },
+    create: {
+      name: 'employee',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.employee,
+      parentRoleId: userRole.id,
+    },
+  });
+  const managerRole = await prisma.role.upsert({
+    where: { name: 'department_manager' },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.department_manager,
+      parentRoleId: employeeRole.id,
+    },
+    create: {
+      name: 'department_manager',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.department_manager,
+      parentRoleId: employeeRole.id,
+    },
+  });
+  const adminRole = await prisma.role.upsert({
+    where: { name: 'admin' },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.admin,
+      parentRoleId: managerRole.id,
+    },
+    create: {
+      name: 'admin',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.admin,
+      parentRoleId: managerRole.id,
+    },
+  });
+
+  const give = async (roleName: string, names: string[]) => {
+    const role = await prisma.role.findUnique({ where: { name: roleName } });
+    if (!role) return;
+    await prisma.rolePermissions.deleteMany({ where: { roleId: role.id } });
+    for (const n of names) {
+      const p = await prisma.permission.findUnique({ where: { name: n } });
+      if (p) {
+        await prisma.rolePermissions.create({
+          data: { roleId: role.id, permissionId: p.id },
+        });
+      }
+    }
+  };
+
+  await give('user', DEFAULT_ROLE_PERMISSIONS.user);
+  await give('employee', DEFAULT_ROLE_PERMISSIONS.employee);
+  await give('department_manager', DEFAULT_ROLE_PERMISSIONS.department_manager);
+
+  const allPerms = await prisma.permission.findMany();
+  await prisma.rolePermissions.deleteMany({ where: { roleId: adminRole.id } });
+  for (const p of allPerms) {
+    await prisma.rolePermissions.create({
+      data: { roleId: adminRole.id, permissionId: p.id },
     });
   }
 }

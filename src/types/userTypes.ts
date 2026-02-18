@@ -29,6 +29,7 @@ export type Profile = {
     role: {
         id: number;
         name: string;
+        displayName: string;
     };
     departmentRoles: Array<{
         department: {
@@ -38,6 +39,7 @@ export type Profile = {
         role: {
         id: number;
         name: string;
+        displayName: string;
         };
     }>;
     clientProfile?: clientProfile | null;
@@ -53,6 +55,7 @@ export type DepartmentRole = {
     role: {
     id: number;
     name: string;
+    displayName: string;
     };
 }
 
@@ -137,6 +140,7 @@ export type employeeProfile = {
     role: {
         id: number;
         name: string;
+        displayName: string;
     };
     }>;
     createdAt: Date;

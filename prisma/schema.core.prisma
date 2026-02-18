@@ -370,6 +370,7 @@ model Address {
 model Role {
   id            Int               @id @default(autoincrement())
   name          String            @unique
+  displayName   String            @default("")
   permissions   RolePermissions[] @relation("RolePermissions")
   users         User[]
   departmentRoles DepartmentRole[]
@@ -381,9 +382,31 @@ model Role {
 }
 
 model Permission {
-  id    Int               @id @default(autoincrement())
-  name  String            @unique
-  roles RolePermissions[] @relation("RolePermissions")
+  id          Int               @id @default(autoincrement())
+  name        String            @unique
+  displayName String            @default("")
+  description String            @default("")
+  groupId     Int?
+  group       PermissionGroup?  @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  roles       RolePermissions[] @relation("RolePermissions")
+
+  @@index([groupId])
+}
+
+model PermissionGroup {
+  id          Int          @id @default(autoincrement())
+  key         String       @unique
+  displayName String
+  description String       @default("")
+  sortOrder   Int          @default(100)
+  isSystem    Boolean      @default(false)
+  serviceId   Int?         @unique
+  service     Service?     @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  permissions Permission[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([sortOrder])
 }
 
 model RolePermissions {
@@ -412,6 +435,7 @@ model Service {
 
   roleAccess      ServiceRoleAccess[]
   departmentAccess ServiceDepartmentAccess[]
+  permissionGroup PermissionGroup?
 }
 
 model ServiceRoleAccess {

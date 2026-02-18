@@ -41,6 +41,13 @@ import {
   startEmailChangeSession,
   verifyEmailChangeSession,
 } from '../services/emailChangeService';
+import {
+  DEFAULT_PERMISSION_GROUP_KEY,
+  DEFAULT_ROLE_DISPLAY_NAMES,
+  PERMISSION_GROUP_CATALOG_BY_KEY,
+  PERMISSION_CATALOG_BY_NAME,
+  SYSTEM_ROLE_NAMES,
+} from '../rbac/permissionCatalog';
 
 const router = express.Router();
 const USER_LIST_SELECT = {
@@ -53,11 +60,118 @@ const USER_LIST_SELECT = {
   lastSeenAt: true,
   profileStatus: true,
   currentProfileType: true,
-  role: { select: { id: true, name: true } },
+  role: { select: { id: true, name: true, displayName: true } },
   clientProfile: { select: { avatarUrl: true } },
   supplierProfile: { select: { avatarUrl: true } },
   employeeProfile: { select: { departmentId: true, avatarUrl: true, department: { select: { id: true, name: true } } } },
 };
+
+const SYSTEM_ROLE_NAME_SET = new Set<string>(SYSTEM_ROLE_NAMES);
+
+function resolveRoleDisplayName(name: string, displayName?: string | null): string {
+  const explicit = String(displayName || '').trim();
+  if (explicit) return explicit;
+  return DEFAULT_ROLE_DISPLAY_NAMES[name] || name;
+}
+
+type PermissionGroupView = {
+  id: number;
+  key: string;
+  displayName: string;
+  description: string;
+  isSystem: boolean;
+  sortOrder?: number;
+  serviceId: number | null;
+  service?: { id: number; key: string; name: string } | null;
+};
+
+function resolvePermissionGroupView(input: {
+  group:
+    | {
+        id: number;
+        key: string;
+        displayName: string;
+        description: string;
+        isSystem: boolean;
+        sortOrder?: number;
+        serviceId: number | null;
+        service?: { id: number; key: string; name: string } | null;
+      }
+    | null;
+  fallbackGroupKey?: string | null;
+  groupsByKey?: Map<string, PermissionGroupView>;
+}): PermissionGroupView {
+  const group = input.group;
+  if (group) {
+    return {
+      id: group.id,
+      key: group.key,
+      displayName: String(group.displayName || '').trim() || group.key,
+      description: String(group.description || '').trim(),
+      isSystem: Boolean(group.isSystem),
+      sortOrder: group.sortOrder,
+      serviceId: group.serviceId ?? null,
+      ...(group.service ? { service: group.service } : {}),
+    };
+  }
+
+  const fallbackKey = String(input.fallbackGroupKey || DEFAULT_PERMISSION_GROUP_KEY);
+  const fromDb = input.groupsByKey?.get(fallbackKey) || input.groupsByKey?.get(DEFAULT_PERMISSION_GROUP_KEY);
+  if (fromDb) return fromDb;
+
+  const fromCatalog =
+    PERMISSION_GROUP_CATALOG_BY_KEY.get(fallbackKey) ||
+    PERMISSION_GROUP_CATALOG_BY_KEY.get(DEFAULT_PERMISSION_GROUP_KEY);
+  if (fromCatalog) {
+    return {
+      id: 0,
+      key: fromCatalog.key,
+      displayName: fromCatalog.displayName,
+      description: fromCatalog.description,
+      isSystem: fromCatalog.isSystem,
+      sortOrder: fromCatalog.sortOrder,
+      serviceId: null,
+    };
+  }
+
+  return {
+    id: 0,
+    key: DEFAULT_PERMISSION_GROUP_KEY,
+    displayName: 'Основные',
+    description: '',
+    isSystem: true,
+    sortOrder: 10,
+    serviceId: null,
+  };
+}
+
+async function validateParentRoleId(parentRoleId: number | null): Promise<{ valid: true } | { valid: false; message: string }> {
+  if (parentRoleId === null) return { valid: true };
+  const parentRole = await prisma.role.findUnique({
+    where: { id: parentRoleId },
+    select: { id: true },
+  });
+  if (!parentRole) {
+    return { valid: false, message: 'Родительская роль не найдена' };
+  }
+  return { valid: true };
+}
+
+async function wouldCreateRoleCycle(roleId: number, parentRoleId: number | null): Promise<boolean> {
+  let currentRoleId = parentRoleId;
+  const visited = new Set<number>();
+  while (currentRoleId) {
+    if (currentRoleId === roleId) return true;
+    if (visited.has(currentRoleId)) return true;
+    visited.add(currentRoleId);
+    const parent = await prisma.role.findUnique({
+      where: { id: currentRoleId },
+      select: { parentRoleId: true },
+    });
+    currentRoleId = parent?.parentRoleId ?? null;
+  }
+  return false;
+}
 
 const avatarUpload = multer({
   storage: multer.memoryStorage(),
@@ -1187,12 +1301,471 @@ router.get(
   authorizePermissions(['manage_permissions'], { mode: 'any' }),
   async (req: AuthRequest, res: express.Response) => {
     try {
-      const permissions = await prisma.permission.findMany({ orderBy: { name: 'asc' } });
-      res.json(successResponse(permissions));
+      const [permissions, groups] = await Promise.all([
+        prisma.permission.findMany({
+          orderBy: { name: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            displayName: true,
+            description: true,
+            group: {
+              select: {
+                id: true,
+                key: true,
+                displayName: true,
+                description: true,
+                isSystem: true,
+                sortOrder: true,
+                serviceId: true,
+                service: { select: { id: true, key: true, name: true } },
+              },
+            },
+          },
+        }),
+        prisma.permissionGroup.findMany({
+          select: {
+            id: true,
+            key: true,
+            displayName: true,
+            description: true,
+            isSystem: true,
+            sortOrder: true,
+            serviceId: true,
+            service: { select: { id: true, key: true, name: true } },
+          },
+        }),
+      ]);
+      const groupsByKey = new Map<string, PermissionGroupView>();
+      for (const group of groups) {
+        groupsByKey.set(
+          group.key,
+          resolvePermissionGroupView({
+            group,
+          })
+        );
+      }
+
+      const data = permissions.map((perm) => {
+        const fromCatalog = PERMISSION_CATALOG_BY_NAME.get(perm.name);
+        const displayName = String(perm.displayName || '').trim() || fromCatalog?.displayName || perm.name;
+        const description = String(perm.description || '').trim() || fromCatalog?.description || '';
+        const group = resolvePermissionGroupView({
+          group: perm.group,
+          fallbackGroupKey: fromCatalog?.groupKey,
+          groupsByKey,
+        });
+        return {
+          id: perm.id,
+          name: perm.name,
+          displayName,
+          description,
+          group,
+        };
+      });
+      res.json(successResponse(data));
     } catch (error) {
       res.status(500).json(
         errorResponse(
           'Ошибка получения списка прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+router.get(
+  '/permission-groups',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (_req: AuthRequest, res: express.Response) => {
+    try {
+      const groups = await prisma.permissionGroup.findMany({
+        orderBy: [{ sortOrder: 'asc' }, { displayName: 'asc' }],
+        select: {
+          id: true,
+          key: true,
+          displayName: true,
+          description: true,
+          isSystem: true,
+          sortOrder: true,
+          serviceId: true,
+          service: { select: { id: true, key: true, name: true } },
+        },
+      });
+      res.json(
+        successResponse(
+          groups.map((group) =>
+            resolvePermissionGroupView({
+              group,
+            })
+          )
+        )
+      );
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка получения групп прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+router.post(
+  '/permission-groups',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (
+    req: AuthRequest<
+      {},
+      {},
+      { key?: string; displayName?: string; description?: string; sortOrder?: number; serviceId?: number | null }
+    >,
+    res: express.Response
+  ) => {
+    try {
+      const key = String(req.body.key || '').trim().toLowerCase();
+      const displayName = String(req.body.displayName || '').trim();
+      const description = String(req.body.description || '').trim();
+      const sortOrderRaw = req.body.sortOrder;
+      const sortOrder =
+        sortOrderRaw === undefined || sortOrderRaw === null ? 500 : Number(sortOrderRaw);
+      const serviceIdRaw = req.body.serviceId;
+      const serviceId =
+        serviceIdRaw === undefined || serviceIdRaw === null ? null : Number(serviceIdRaw);
+
+      if (!key) {
+        return res
+          .status(400)
+          .json(errorResponse('Ключ группы обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!/^[a-z0-9_]+$/.test(key)) {
+        return res.status(400).json(
+          errorResponse(
+            'Ключ группы должен быть в формате lowercase snake_case',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+      if (!displayName) {
+        return res
+          .status(400)
+          .json(errorResponse('Название группы обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!Number.isFinite(sortOrder)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный порядок сортировки', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (serviceIdRaw !== undefined && serviceIdRaw !== null && Number.isNaN(serviceId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный serviceId', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (serviceId) {
+        const service = await prisma.service.findUnique({ where: { id: serviceId }, select: { id: true } });
+        if (!service) {
+          return res
+            .status(404)
+            .json(errorResponse('Сервис не найден', ErrorCodes.NOT_FOUND));
+        }
+      }
+
+      const group = await prisma.permissionGroup.create({
+        data: {
+          key,
+          displayName,
+          description,
+          sortOrder: Math.trunc(sortOrder),
+          isSystem: false,
+          serviceId,
+        },
+        select: {
+          id: true,
+          key: true,
+          displayName: true,
+          description: true,
+          isSystem: true,
+          sortOrder: true,
+          serviceId: true,
+          service: { select: { id: true, key: true, name: true } },
+        },
+      });
+
+      return res.json(
+        successResponse(
+          resolvePermissionGroupView({
+            group,
+          })
+        )
+      );
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        return res
+          .status(400)
+          .json(errorResponse('Группа с таким ключом уже существует', ErrorCodes.VALIDATION_ERROR));
+      }
+      res.status(500).json(
+        errorResponse(
+          'Ошибка создания группы прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+router.patch(
+  '/permission-groups/:groupId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (
+    req: AuthRequest<
+      { groupId: string },
+      {},
+      { displayName?: string; description?: string; sortOrder?: number; key?: string }
+    >,
+    res: express.Response
+  ) => {
+    try {
+      const groupId = Number(req.params.groupId);
+      if (Number.isNaN(groupId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный ID группы', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (req.body.key !== undefined) {
+        return res
+          .status(400)
+          .json(errorResponse('Ключ группы не редактируется через API', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const existing = await prisma.permissionGroup.findUnique({
+        where: { id: groupId },
+        select: { id: true },
+      });
+      if (!existing) {
+        return res
+          .status(404)
+          .json(errorResponse('Группа прав не найдена', ErrorCodes.NOT_FOUND));
+      }
+
+      const data: { displayName?: string; description?: string; sortOrder?: number } = {};
+      if (req.body.displayName !== undefined) {
+        const displayName = String(req.body.displayName || '').trim();
+        if (!displayName) {
+          return res
+            .status(400)
+            .json(errorResponse('Название группы не может быть пустым', ErrorCodes.VALIDATION_ERROR));
+        }
+        data.displayName = displayName;
+      }
+      if (req.body.description !== undefined) {
+        data.description = String(req.body.description || '').trim();
+      }
+      if (req.body.sortOrder !== undefined) {
+        const sortOrder = Number(req.body.sortOrder);
+        if (!Number.isFinite(sortOrder)) {
+          return res
+            .status(400)
+            .json(errorResponse('Некорректный порядок сортировки', ErrorCodes.VALIDATION_ERROR));
+        }
+        data.sortOrder = Math.trunc(sortOrder);
+      }
+      if (!Object.keys(data).length) {
+        return res
+          .status(400)
+          .json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const group = await prisma.permissionGroup.update({
+        where: { id: groupId },
+        data,
+        select: {
+          id: true,
+          key: true,
+          displayName: true,
+          description: true,
+          isSystem: true,
+          sortOrder: true,
+          serviceId: true,
+          service: { select: { id: true, key: true, name: true } },
+        },
+      });
+      return res.json(
+        successResponse(
+          resolvePermissionGroupView({
+            group,
+          })
+        )
+      );
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка обновления группы прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+router.delete(
+  '/permission-groups/:groupId',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (req: AuthRequest<{ groupId: string }>, res: express.Response) => {
+    try {
+      const groupId = Number(req.params.groupId);
+      if (Number.isNaN(groupId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный ID группы', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const group = await prisma.permissionGroup.findUnique({
+        where: { id: groupId },
+        select: { id: true, key: true, isSystem: true },
+      });
+      if (!group) {
+        return res
+          .status(404)
+          .json(errorResponse('Группа прав не найдена', ErrorCodes.NOT_FOUND));
+      }
+      if (group.isSystem || group.key === DEFAULT_PERMISSION_GROUP_KEY) {
+        return res
+          .status(400)
+          .json(errorResponse('Системную группу нельзя удалить', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const coreGroupCatalog = PERMISSION_GROUP_CATALOG_BY_KEY.get(DEFAULT_PERMISSION_GROUP_KEY);
+      const coreGroup = await prisma.permissionGroup.upsert({
+        where: { key: DEFAULT_PERMISSION_GROUP_KEY },
+        update: {
+          displayName: coreGroupCatalog?.displayName || 'Основные',
+          description: coreGroupCatalog?.description || '',
+          sortOrder: coreGroupCatalog?.sortOrder ?? 10,
+          isSystem: true,
+        },
+        create: {
+          key: DEFAULT_PERMISSION_GROUP_KEY,
+          displayName: coreGroupCatalog?.displayName || 'Основные',
+          description: coreGroupCatalog?.description || '',
+          sortOrder: coreGroupCatalog?.sortOrder ?? 10,
+          isSystem: true,
+        },
+        select: { id: true },
+      });
+
+      await prisma.$transaction([
+        prisma.permission.updateMany({
+          where: { groupId: group.id },
+          data: { groupId: coreGroup.id },
+        }),
+        prisma.permissionGroup.delete({ where: { id: group.id } }),
+      ]);
+
+      return res.json(successResponse({ message: 'Группа прав удалена' }));
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка удаления группы прав',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+router.patch(
+  '/permissions/:permissionId/group',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_permissions'], { mode: 'any' }),
+  async (
+    req: AuthRequest<{ permissionId: string }, {}, { groupId?: number }>,
+    res: express.Response
+  ) => {
+    try {
+      const permissionId = Number(req.params.permissionId);
+      const groupId = Number(req.body.groupId);
+      if (Number.isNaN(permissionId) || Number.isNaN(groupId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректные параметры', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const [permission, group] = await Promise.all([
+        prisma.permission.findUnique({
+          where: { id: permissionId },
+          select: { id: true, name: true, displayName: true, description: true },
+        }),
+        prisma.permissionGroup.findUnique({
+          where: { id: groupId },
+          select: {
+            id: true,
+            key: true,
+            displayName: true,
+            description: true,
+            isSystem: true,
+            sortOrder: true,
+            serviceId: true,
+            service: { select: { id: true, key: true, name: true } },
+          },
+        }),
+      ]);
+
+      if (!permission) {
+        return res
+          .status(404)
+          .json(errorResponse('Право не найдено', ErrorCodes.NOT_FOUND));
+      }
+      if (!group) {
+        return res
+          .status(404)
+          .json(errorResponse('Группа прав не найдена', ErrorCodes.NOT_FOUND));
+      }
+
+      const updated = await prisma.permission.update({
+        where: { id: permission.id },
+        data: { groupId: group.id },
+        select: { id: true, name: true, displayName: true, description: true },
+      });
+      const fromCatalog = PERMISSION_CATALOG_BY_NAME.get(updated.name);
+      const displayName =
+        String(updated.displayName || '').trim() || fromCatalog?.displayName || updated.name;
+      const description =
+        String(updated.description || '').trim() || fromCatalog?.description || '';
+
+      return res.json(
+        successResponse({
+          id: updated.id,
+          name: updated.name,
+          displayName,
+          description,
+          group: resolvePermissionGroupView({
+            group,
+          }),
+        })
+      );
+    } catch (error) {
+      res.status(500).json(
+        errorResponse(
+          'Ошибка переноса права в группу',
           ErrorCodes.INTERNAL_ERROR,
           process.env.NODE_ENV === 'development' ? error : undefined
         )
@@ -1214,14 +1787,21 @@ router.get(
       const roles = await prisma.role.findMany({
         orderBy: { name: 'asc' },
         include: {
-          parentRole: { select: { id: true, name: true } },
+          parentRole: { select: { id: true, name: true, displayName: true } },
           permissions: { include: { permission: true } },
         },
       });
       const data = roles.map((r) => ({
         id: r.id,
         name: r.name,
-        parentRole: r.parentRole ? { id: r.parentRole.id, name: r.parentRole.name } : null,
+        displayName: resolveRoleDisplayName(r.name, r.displayName),
+        parentRole: r.parentRole
+          ? {
+              id: r.parentRole.id,
+              name: r.parentRole.name,
+              displayName: resolveRoleDisplayName(r.parentRole.name, r.parentRole.displayName),
+            }
+          : null,
         permissions: r.permissions.map((p) => p.permission.name),
       }));
       res.json(successResponse(data));
@@ -2114,17 +2694,43 @@ router.post(
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['manage_roles'], { mode: 'any' }),
-  async (req: AuthRequest<{}, {}, { name?: string; parentRoleId?: number; permissions?: string[] }>, res: express.Response) => {
+  async (
+    req: AuthRequest<
+      {},
+      {},
+      { name?: string; displayName?: string; parentRoleId?: number | null; permissions?: string[] }
+    >,
+    res: express.Response
+  ) => {
     try {
       const name = (req.body.name || '').trim();
+      const displayName = (req.body.displayName || '').trim();
       if (!name) {
+        return res.status(400).json(errorResponse('Код роли обязателен', ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!displayName) {
         return res.status(400).json(errorResponse('Название роли обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const parentRoleIdRaw = req.body.parentRoleId;
+      const parentRoleId =
+        parentRoleIdRaw === null || parentRoleIdRaw === undefined ? null : Number(parentRoleIdRaw);
+      if (parentRoleIdRaw !== null && parentRoleIdRaw !== undefined && Number.isNaN(parentRoleId)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный ID родительской роли', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const parentValidation = await validateParentRoleId(parentRoleId);
+      if (!parentValidation.valid) {
+        return res.status(400).json(errorResponse(parentValidation.message, ErrorCodes.VALIDATION_ERROR));
       }
 
       const role = await prisma.role.create({
         data: {
           name,
-          parentRoleId: req.body.parentRoleId ?? null,
+          displayName,
+          parentRoleId,
         },
       });
 
@@ -2138,7 +2744,31 @@ router.post(
         }
       }
 
-      res.json(successResponse({ id: role.id, name: role.name }));
+      const createdRole = await prisma.role.findUnique({
+        where: { id: role.id },
+        select: {
+          id: true,
+          name: true,
+          displayName: true,
+          parentRole: { select: { id: true, name: true, displayName: true } },
+        },
+      });
+      const data = createdRole
+        ? {
+            ...createdRole,
+            displayName: resolveRoleDisplayName(createdRole.name, createdRole.displayName),
+            parentRole: createdRole.parentRole
+              ? {
+                  ...createdRole.parentRole,
+                  displayName: resolveRoleDisplayName(
+                    createdRole.parentRole.name,
+                    createdRole.parentRole.displayName
+                  ),
+                }
+              : null,
+          }
+        : null;
+      res.json(successResponse(data));
     } catch (error) {
       res.status(500).json(
         errorResponse(
@@ -2159,21 +2789,97 @@ router.patch(
   authenticateToken,
   checkUserStatus,
   authorizePermissions(['manage_roles'], { mode: 'any' }),
-  async (req: AuthRequest<{ roleId: string }, {}, { name?: string; parentRoleId?: number }>, res: express.Response) => {
+  async (
+    req: AuthRequest<
+      { roleId: string },
+      {},
+      { name?: string; displayName?: string; parentRoleId?: number | null }
+    >,
+    res: express.Response
+  ) => {
     try {
       const roleId = Number(req.params.roleId);
       if (Number.isNaN(roleId)) {
         return res.status(400).json(errorResponse('Некорректный ID роли', ErrorCodes.VALIDATION_ERROR));
       }
+
+      const existingRole = await prisma.role.findUnique({
+        where: { id: roleId },
+        select: { id: true, name: true },
+      });
+      if (!existingRole) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+
+      if (req.body.name !== undefined) {
+        return res.status(400).json(
+          errorResponse('Технический код роли менять нельзя', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
       const data: any = {};
-      if (req.body.name) data.name = req.body.name.trim();
-      if (req.body.parentRoleId !== undefined) data.parentRoleId = req.body.parentRoleId ?? null;
+      if (req.body.displayName !== undefined) {
+        const displayName = String(req.body.displayName || '').trim();
+        if (!displayName) {
+          return res
+            .status(400)
+            .json(errorResponse('Название роли не может быть пустым', ErrorCodes.VALIDATION_ERROR));
+        }
+        data.displayName = displayName;
+      }
+
+      if (req.body.parentRoleId !== undefined) {
+        const parentRoleIdRaw = req.body.parentRoleId;
+        const parentRoleId =
+          parentRoleIdRaw === null || parentRoleIdRaw === undefined ? null : Number(parentRoleIdRaw);
+        if (parentRoleIdRaw !== null && parentRoleIdRaw !== undefined && Number.isNaN(parentRoleId)) {
+          return res
+            .status(400)
+            .json(errorResponse('Некорректный ID родительской роли', ErrorCodes.VALIDATION_ERROR));
+        }
+        if (parentRoleId === roleId) {
+          return res
+            .status(400)
+            .json(errorResponse('Роль не может быть родителем самой себя', ErrorCodes.VALIDATION_ERROR));
+        }
+        const parentValidation = await validateParentRoleId(parentRoleId);
+        if (!parentValidation.valid) {
+          return res.status(400).json(errorResponse(parentValidation.message, ErrorCodes.VALIDATION_ERROR));
+        }
+        if (await wouldCreateRoleCycle(roleId, parentRoleId)) {
+          return res
+            .status(400)
+            .json(errorResponse('Нельзя создать циклическую иерархию ролей', ErrorCodes.VALIDATION_ERROR));
+        }
+        data.parentRoleId = parentRoleId;
+      }
+
       if (!Object.keys(data).length) {
         return res.status(400).json(errorResponse('Нет данных для обновления', ErrorCodes.VALIDATION_ERROR));
       }
 
-      const role = await prisma.role.update({ where: { id: roleId }, data });
-      res.json(successResponse({ id: role.id, name: role.name }));
+      const role = await prisma.role.update({
+        where: { id: roleId },
+        data,
+        select: {
+          id: true,
+          name: true,
+          displayName: true,
+          parentRole: { select: { id: true, name: true, displayName: true } },
+        },
+      });
+      res.json(
+        successResponse({
+          ...role,
+          displayName: resolveRoleDisplayName(role.name, role.displayName),
+          parentRole: role.parentRole
+            ? {
+                ...role.parentRole,
+                displayName: resolveRoleDisplayName(role.parentRole.name, role.parentRole.displayName),
+              }
+            : null,
+        })
+      );
     } catch (error) {
       const isNotFound = (error as any)?.code === 'P2025';
       if (isNotFound) {
@@ -2244,6 +2950,19 @@ router.delete(
       const roleId = Number(req.params.roleId);
       if (Number.isNaN(roleId)) {
         return res.status(400).json(errorResponse('Некорректный ID роли', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const role = await prisma.role.findUnique({
+        where: { id: roleId },
+        select: { id: true, name: true },
+      });
+      if (!role) {
+        return res.status(404).json(errorResponse('Роль не найдена', ErrorCodes.NOT_FOUND));
+      }
+      if (SYSTEM_ROLE_NAME_SET.has(role.name)) {
+        return res
+          .status(400)
+          .json(errorResponse('Базовую роль нельзя удалить', ErrorCodes.VALIDATION_ERROR));
       }
 
       // Снимаем внешние связи перед удалением роли

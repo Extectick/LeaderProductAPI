@@ -10,6 +10,13 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env.test') });
 // Инициализируем Prisma после загрузки env, чтобы взять правильный DATABASE_URL
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const prisma = require('../src/prisma/client').default as typeof import('../src/prisma/client').default;
+const {
+  DEFAULT_PERMISSION_GROUP_KEY,
+  DEFAULT_ROLE_DISPLAY_NAMES,
+  DEFAULT_ROLE_PERMISSIONS,
+  PERMISSION_CATALOG,
+  PERMISSION_GROUP_CATALOG,
+} = require('../src/rbac/permissionCatalog') as typeof import('../src/rbac/permissionCatalog');
 
 // Отключаем Redis в тестах, чтобы не было лишних подключений/ошибок
 process.env.REDIS_URL = '';
@@ -47,45 +54,114 @@ beforeAll(async () => {
     // no-op
   }
 
-  // Регистрируем базовые permissions/roles (минимально необходимые)
-  const permissionNames = [
-    // общие
-    'view_profile', 'update_profile', 'logout',
-    // обращения
-    'create_appeal', 'view_appeal', 'assign_appeal',
-    'update_appeal_status', 'add_appeal_message',
-    'edit_appeal_message', 'delete_appeal_message',
-    'manage_appeal_watchers',
-    // для полноты — экспорт
-    'export_appeals',
+  // Базовые сервисы, чтобы можно было привязать системные группы прав к сервисам
+  const seededServices = [
+    { key: 'appeals', name: 'Appeals' },
+    { key: 'qrcodes', name: 'QR Codes' },
   ];
-  for (const name of permissionNames) {
+  const serviceByKey = new Map<string, number>();
+  for (const svc of seededServices) {
+    const service = await prisma.service.upsert({
+      where: { key: svc.key },
+      update: { isActive: true, defaultVisible: true, defaultEnabled: true },
+      create: {
+        key: svc.key,
+        name: svc.name,
+        isActive: true,
+        defaultVisible: true,
+        defaultEnabled: true,
+      },
+      select: { id: true, key: true },
+    });
+    serviceByKey.set(service.key, service.id);
+  }
+
+  const groupByKey = new Map<string, number>();
+  for (const group of PERMISSION_GROUP_CATALOG) {
+    const serviceId = group.serviceKey ? serviceByKey.get(group.serviceKey) ?? null : null;
+    const savedGroup = await prisma.permissionGroup.upsert({
+      where: { key: group.key },
+      update: {
+        displayName: group.displayName,
+        description: group.description,
+        sortOrder: group.sortOrder,
+        isSystem: group.isSystem,
+        serviceId,
+      },
+      create: {
+        key: group.key,
+        displayName: group.displayName,
+        description: group.description,
+        sortOrder: group.sortOrder,
+        isSystem: group.isSystem,
+        serviceId,
+      },
+      select: { id: true, key: true },
+    });
+    groupByKey.set(savedGroup.key, savedGroup.id);
+  }
+
+  const coreGroupId = groupByKey.get(DEFAULT_PERMISSION_GROUP_KEY);
+
+  // Регистрируем базовые permissions/roles (минимально необходимые)
+  for (const entry of PERMISSION_CATALOG) {
+    const groupId = groupByKey.get(entry.groupKey) ?? coreGroupId ?? null;
     await prisma.permission.upsert({
-      where: { name },
-      update: {},
-      create: { name },
+      where: { name: entry.name },
+      update: {
+        displayName: entry.displayName,
+        description: entry.description,
+        ...(groupId ? { groupId } : {}),
+      },
+      create: {
+        name: entry.name,
+        displayName: entry.displayName,
+        description: entry.description,
+        ...(groupId ? { groupId } : {}),
+      },
     });
   }
 
   const userRole = await prisma.role.upsert({
     where: { name: 'user' },
-    update: {},
-    create: { name: 'user' },
+    update: { displayName: DEFAULT_ROLE_DISPLAY_NAMES.user, parentRoleId: null },
+    create: { name: 'user', displayName: DEFAULT_ROLE_DISPLAY_NAMES.user },
   });
   const employeeRole = await prisma.role.upsert({
     where: { name: 'employee' },
-    update: {},
-    create: { name: 'employee', parentRoleId: userRole.id },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.employee,
+      parentRoleId: userRole.id,
+    },
+    create: {
+      name: 'employee',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.employee,
+      parentRoleId: userRole.id,
+    },
   });
   const managerRole = await prisma.role.upsert({
     where: { name: 'department_manager' },
-    update: {},
-    create: { name: 'department_manager', parentRoleId: employeeRole.id },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.department_manager,
+      parentRoleId: employeeRole.id,
+    },
+    create: {
+      name: 'department_manager',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.department_manager,
+      parentRoleId: employeeRole.id,
+    },
   });
   const adminRole = await prisma.role.upsert({
     where: { name: 'admin' },
-    update: {},
-    create: { name: 'admin', parentRoleId: managerRole.id },
+    update: {
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.admin,
+      parentRoleId: managerRole.id,
+    },
+    create: {
+      name: 'admin',
+      displayName: DEFAULT_ROLE_DISPLAY_NAMES.admin,
+      parentRoleId: managerRole.id,
+    },
   });
 
 // Назначаем базовые права
@@ -102,16 +178,9 @@ beforeAll(async () => {
       }
     }
   };
-  await give('user', ['view_profile', 'update_profile', 'logout']);
-  await give('employee', [
-    'create_appeal',
-    'view_appeal',
-    'add_appeal_message',
-    'edit_appeal_message',
-    'delete_appeal_message',
-    'manage_appeal_watchers',
-  ]);
-  await give('department_manager', ['assign_appeal', 'update_appeal_status', 'export_appeals']);
+  await give('user', DEFAULT_ROLE_PERMISSIONS.user);
+  await give('employee', DEFAULT_ROLE_PERMISSIONS.employee);
+  await give('department_manager', DEFAULT_ROLE_PERMISSIONS.department_manager);
 
   // админ — все
   const allPerms = await prisma.permission.findMany();
@@ -122,17 +191,10 @@ beforeAll(async () => {
     });
   }
 
-  // Базовый сервис "appeals" для authorizeServiceAccess
-  await prisma.service.upsert({
+  // "appeals" уже создан выше, но поддержим идемпотентно
+  await prisma.service.updateMany({
     where: { key: 'appeals' },
-    update: { isActive: true, defaultVisible: true, defaultEnabled: true },
-    create: {
-      key: 'appeals',
-      name: 'Appeals',
-      isActive: true,
-      defaultVisible: true,
-      defaultEnabled: true,
-    },
+    data: { isActive: true, defaultVisible: true, defaultEnabled: true },
   });
 });
 
