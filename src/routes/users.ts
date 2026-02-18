@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { ProfileStatus, ProfileType } from '@prisma/client';
+import { ActionType, ProfileStatus, ProfileType } from '@prisma/client';
 import prisma from '../prisma/client';
 import {
   authenticateToken,
@@ -26,6 +26,7 @@ import { auditLog } from '../middleware/audit';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import { getProfile } from '../services/userService';
 import { notifyProfileActivated } from '../services/pushService';
+import { notifyEmployeeModerationResult } from '../services/profileModerationNotificationService';
 import { getPresenceForUsers, markUserOnline } from '../services/presenceService';
 import { uploadMulterFile, resolveObjectUrl } from '../storage/minio';
 import { normalizePhoneToBigInt, sanitizePhoneForSearch, toApiPhoneString } from '../utils/phone';
@@ -66,12 +67,66 @@ const USER_LIST_SELECT = {
   employeeProfile: { select: { departmentId: true, avatarUrl: true, department: { select: { id: true, name: true } } } },
 };
 
+const ADMIN_USER_LIST_SELECT = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  middleName: true,
+  phone: true,
+  avatarUrl: true,
+  lastSeenAt: true,
+  createdAt: true,
+  profileStatus: true,
+  currentProfileType: true,
+  telegramId: true,
+  maxId: true,
+  role: { select: { id: true, name: true, displayName: true } },
+  clientProfile: { select: { avatarUrl: true } },
+  supplierProfile: { select: { avatarUrl: true } },
+  employeeProfile: {
+    select: {
+      status: true,
+      departmentId: true,
+      avatarUrl: true,
+      department: { select: { id: true, name: true } },
+    },
+  },
+  _count: {
+    select: {
+      deviceTokens: true,
+    },
+  },
+} as const;
+
 const SYSTEM_ROLE_NAME_SET = new Set<string>(SYSTEM_ROLE_NAMES);
+const ADMIN_LIST_SORT_FIELDS = new Set(['createdAt', 'name', 'email', 'lastSeenAt', 'role', 'status']);
+const ADMIN_LIST_SORT_DIRS = new Set(['asc', 'desc']);
+
+type AdminModerationState =
+  | 'NO_EMPLOYEE_PROFILE'
+  | 'EMPLOYEE_PENDING'
+  | 'EMPLOYEE_ACTIVE'
+  | 'EMPLOYEE_BLOCKED';
+
+const ADMIN_MODERATION_STATE_SET = new Set<AdminModerationState>([
+  'NO_EMPLOYEE_PROFILE',
+  'EMPLOYEE_PENDING',
+  'EMPLOYEE_ACTIVE',
+  'EMPLOYEE_BLOCKED',
+]);
 
 function resolveRoleDisplayName(name: string, displayName?: string | null): string {
   const explicit = String(displayName || '').trim();
   if (explicit) return explicit;
   return DEFAULT_ROLE_DISPLAY_NAMES[name] || name;
+}
+
+function resolveEmployeeModerationState(status: ProfileStatus | null | undefined): AdminModerationState {
+  if (!status) return 'NO_EMPLOYEE_PROFILE';
+  if (status === 'ACTIVE') return 'EMPLOYEE_ACTIVE';
+  if (status === 'BLOCKED') return 'EMPLOYEE_BLOCKED';
+  return 'EMPLOYEE_PENDING';
 }
 
 type PermissionGroupView = {
@@ -171,6 +226,49 @@ async function wouldCreateRoleCycle(roleId: number, parentRoleId: number | null)
     currentRoleId = parent?.parentRoleId ?? null;
   }
   return false;
+}
+
+function toPositiveInt(raw: unknown, fallback: number, limits?: { min?: number; max?: number }): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = Math.trunc(parsed);
+  const min = limits?.min ?? 1;
+  const max = limits?.max ?? Number.MAX_SAFE_INTEGER;
+  if (normalized < min) return min;
+  if (normalized > max) return max;
+  return normalized;
+}
+
+function toOptionalInt(raw: unknown): number | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = Math.trunc(parsed);
+  return normalized > 0 ? normalized : null;
+}
+
+function toOnlineFilter(raw: unknown): boolean | null {
+  const value = String(raw || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value === '1' || value === 'true' || value === 'online') return true;
+  if (value === '0' || value === 'false' || value === 'offline') return false;
+  return null;
+}
+
+function buildAdminListOrder(sortBy: string, sortDir: 'asc' | 'desc') {
+  if (sortBy === 'name') {
+    return [{ lastName: sortDir }, { firstName: sortDir }, { id: 'asc' as const }];
+  }
+  if (sortBy === 'email') {
+    return [{ email: sortDir }, { id: 'asc' as const }];
+  }
+  if (sortBy === 'createdAt') {
+    return [{ createdAt: sortDir }, { id: 'asc' as const }];
+  }
+  if (sortBy === 'role') {
+    return [{ role: { name: sortDir } }, { id: 'asc' as const }];
+  }
+  return [{ lastSeenAt: sortDir }, { id: 'asc' as const }];
 }
 
 const avatarUpload = multer({
@@ -1818,6 +1916,297 @@ router.get(
 );
 
 /**
+ * Админ: новый список пользователей с фильтрами/пагинацией (без breaking change старого /users)
+ */
+router.get(
+  '/admin/list',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_users'], { mode: 'any' }),
+  async (
+    req: AuthRequest<
+      {},
+      {},
+      {},
+      {
+        search?: string;
+        page?: string;
+        limit?: string;
+        moderationState?: string;
+        roleId?: string;
+        departmentId?: string;
+        online?: string;
+        sortBy?: string;
+        sortDir?: string;
+      }
+    >,
+    res: express.Response
+  ) => {
+    try {
+      const search = String(req.query.search || '').trim();
+      const moderationStateRaw = String(req.query.moderationState || '').trim().toUpperCase();
+      const moderationState = moderationStateRaw
+        ? (moderationStateRaw as AdminModerationState)
+        : null;
+      if (moderationState && !ADMIN_MODERATION_STATE_SET.has(moderationState)) {
+        return res
+          .status(400)
+          .json(errorResponse('Некорректный moderationState', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const page = toPositiveInt(req.query.page, 1, { min: 1, max: 1000000 });
+      const limit = toPositiveInt(req.query.limit, 20, { min: 1, max: 100 });
+      const roleId = toOptionalInt(req.query.roleId);
+      const departmentId = toOptionalInt(req.query.departmentId);
+      const onlineFilter = toOnlineFilter(req.query.online);
+
+      const sortByRaw = String(req.query.sortBy || '').trim();
+      const sortBy = ADMIN_LIST_SORT_FIELDS.has(sortByRaw) ? sortByRaw : 'lastSeenAt';
+      const sortDirRaw = String(req.query.sortDir || '').trim().toLowerCase();
+      const sortDir: 'asc' | 'desc' = ADMIN_LIST_SORT_DIRS.has(sortDirRaw) ? (sortDirRaw as 'asc' | 'desc') : 'desc';
+
+      const where: any = {};
+      if (search) {
+        const searchPhone = normalizePhoneToBigInt(sanitizePhoneForSearch(search));
+        const searchOr: any[] = [
+          { email: { contains: search, mode: 'insensitive' } },
+          { firstName: { contains: search, mode: 'insensitive' } },
+          { lastName: { contains: search, mode: 'insensitive' } },
+        ];
+        if (searchPhone) searchOr.push({ phone: searchPhone });
+        where.OR = searchOr;
+      }
+      if (roleId) where.roleId = roleId;
+      const employeeProfileFilter: Record<string, any> = {};
+      if (departmentId) employeeProfileFilter.departmentId = departmentId;
+      if (moderationState === 'EMPLOYEE_PENDING') employeeProfileFilter.status = 'PENDING';
+      if (moderationState === 'EMPLOYEE_ACTIVE') employeeProfileFilter.status = 'ACTIVE';
+      if (moderationState === 'EMPLOYEE_BLOCKED') employeeProfileFilter.status = 'BLOCKED';
+      if (moderationState === 'NO_EMPLOYEE_PROFILE') {
+        where.employeeProfile = null;
+      } else if (Object.keys(employeeProfileFilter).length > 0) {
+        where.employeeProfile = { is: employeeProfileFilter };
+      }
+
+      type CandidateUser = {
+        id: number;
+        email: string | null;
+        firstName: string | null;
+        lastName: string | null;
+        lastSeenAt: Date | null;
+        createdAt: Date;
+        role: { id: number; name: string; displayName: string | null } | null;
+        employeeProfile: { status: ProfileStatus } | null;
+      };
+
+      const sortCandidates = (
+        users: CandidateUser[],
+        presenceMap: Map<number, { isOnline: boolean; lastSeenAt: Date | null }>
+      ) => {
+        const dir = sortDir === 'asc' ? 1 : -1;
+        const statusRank = (state: AdminModerationState) => {
+          if (state === 'NO_EMPLOYEE_PROFILE') return 0;
+          if (state === 'EMPLOYEE_PENDING') return 1;
+          if (state === 'EMPLOYEE_ACTIVE') return 2;
+          return 3;
+        };
+        const byName = (u: CandidateUser) =>
+          `${u.lastName || ''} ${u.firstName || ''}`.trim().toLowerCase();
+        const byEmail = (u: CandidateUser) => String(u.email || '').toLowerCase();
+        const byRole = (u: CandidateUser) => String(u.role?.name || '');
+        const byStatus = (u: CandidateUser) =>
+          statusRank(resolveEmployeeModerationState(u.employeeProfile?.status ?? null));
+        const byLastSeen = (u: CandidateUser) => {
+          const p = presenceMap.get(u.id);
+          return (p?.lastSeenAt ?? u.lastSeenAt ?? null)?.getTime() || 0;
+        };
+        const byCreated = (u: CandidateUser) => u.createdAt.getTime();
+
+        users.sort((a, b) => {
+          if (sortBy === 'name') return byName(a).localeCompare(byName(b), 'ru') * dir;
+          if (sortBy === 'email') return byEmail(a).localeCompare(byEmail(b), 'ru') * dir;
+          if (sortBy === 'role') return byRole(a).localeCompare(byRole(b), 'ru') * dir;
+          if (sortBy === 'status') return (byStatus(a) - byStatus(b)) * dir;
+          if (sortBy === 'createdAt') return (byCreated(a) - byCreated(b)) * dir;
+          return (byLastSeen(a) - byLastSeen(b)) * dir;
+        });
+      };
+
+      let total = 0;
+      let usersPage: any[] = [];
+      let pagePresence = new Map<number, { isOnline: boolean; lastSeenAt: Date | null }>();
+
+      if (onlineFilter === null) {
+        if (sortBy === 'status') {
+          const candidateUsers = (await prisma.user.findMany({
+            where,
+            select: {
+              id: true,
+              email: true,
+              firstName: true,
+              lastName: true,
+              lastSeenAt: true,
+              createdAt: true,
+              role: { select: { id: true, name: true, displayName: true } },
+              employeeProfile: { select: { status: true } },
+            },
+          })) as CandidateUser[];
+          sortCandidates(candidateUsers, new Map());
+          total = candidateUsers.length;
+          const pageIds = candidateUsers.slice((page - 1) * limit, page * limit).map((u) => u.id);
+          const users = pageIds.length
+            ? await prisma.user.findMany({
+                where: { id: { in: pageIds } },
+                select: ADMIN_USER_LIST_SELECT,
+              })
+            : [];
+          const userById = new Map(users.map((u) => [u.id, u]));
+          usersPage = pageIds.map((id) => userById.get(id)).filter(Boolean) as any[];
+          const presenceRows = await getPresenceForUsers(pageIds);
+          pagePresence = new Map(
+            presenceRows.map((p) => [p.userId, { isOnline: Boolean(p.isOnline), lastSeenAt: p.lastSeenAt ?? null }])
+          );
+        } else {
+          total = await prisma.user.count({ where });
+          const users = await prisma.user.findMany({
+            where,
+            select: ADMIN_USER_LIST_SELECT,
+            orderBy: buildAdminListOrder(sortBy, sortDir) as any,
+            skip: (page - 1) * limit,
+            take: limit,
+          });
+          const presenceRows = await getPresenceForUsers(users.map((u) => u.id));
+          pagePresence = new Map(
+            presenceRows.map((p) => [p.userId, { isOnline: Boolean(p.isOnline), lastSeenAt: p.lastSeenAt ?? null }])
+          );
+          usersPage = users;
+        }
+      } else {
+        const candidateUsers = (await prisma.user.findMany({
+          where,
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            lastSeenAt: true,
+            createdAt: true,
+            role: { select: { id: true, name: true, displayName: true } },
+            employeeProfile: { select: { status: true } },
+          },
+        })) as CandidateUser[];
+
+        const candidatePresenceRows = await getPresenceForUsers(candidateUsers.map((u) => u.id));
+        const candidatePresence = new Map<number, { isOnline: boolean; lastSeenAt: Date | null }>(
+          candidatePresenceRows.map((p) => [p.userId, { isOnline: Boolean(p.isOnline), lastSeenAt: p.lastSeenAt ?? null }])
+        );
+
+        const filteredCandidates = candidateUsers.filter((u) => {
+          const isOnline = candidatePresence.get(u.id)?.isOnline ?? false;
+          return onlineFilter ? isOnline : !isOnline;
+        });
+
+        sortCandidates(filteredCandidates, candidatePresence);
+        total = filteredCandidates.length;
+
+        const pageIds = filteredCandidates.slice((page - 1) * limit, page * limit).map((u) => u.id);
+        if (pageIds.length) {
+          const users = await prisma.user.findMany({
+            where: { id: { in: pageIds } },
+            select: ADMIN_USER_LIST_SELECT,
+          });
+          const userById = new Map(users.map((u) => [u.id, u]));
+          usersPage = pageIds.map((id) => userById.get(id)).filter(Boolean) as any[];
+          pagePresence = new Map(
+            pageIds.map((id) => [id, candidatePresence.get(id) ?? { isOnline: false, lastSeenAt: null }])
+          );
+        }
+      }
+
+      const items = await Promise.all(
+        usersPage.map(async (u: any) => {
+          const rawAvatar =
+            u.currentProfileType === 'CLIENT'
+              ? u.clientProfile?.avatarUrl
+              : u.currentProfileType === 'SUPPLIER'
+              ? u.supplierProfile?.avatarUrl
+              : u.currentProfileType === 'EMPLOYEE'
+              ? u.employeeProfile?.avatarUrl
+              : u.avatarUrl;
+          const avatarUrl = await resolveObjectUrl(rawAvatar ?? null);
+          const presence = pagePresence.get(u.id);
+          const employeeStatus = u.employeeProfile?.status ?? null;
+          const moderationState = resolveEmployeeModerationState(employeeStatus);
+          return {
+            id: u.id,
+            email: u.email,
+            firstName: u.firstName,
+            lastName: u.lastName,
+            middleName: u.middleName ?? null,
+            phone: toApiPhoneString(u.phone),
+            avatarUrl,
+            profileStatus: u.profileStatus,
+            currentProfileType: u.currentProfileType,
+            role: u.role
+              ? {
+                  id: u.role.id,
+                  name: u.role.name,
+                  displayName: resolveRoleDisplayName(u.role.name, u.role.displayName),
+                }
+              : null,
+            departmentName: u.employeeProfile?.department?.name ?? null,
+            departmentId: u.employeeProfile?.department?.id ?? null,
+            employeeStatus,
+            moderationState,
+            isOnline: presence?.isOnline ?? false,
+            lastSeenAt: (presence?.lastSeenAt ?? u.lastSeenAt ?? null) as Date | null,
+            channels: {
+              push: (u._count?.deviceTokens || 0) > 0,
+              telegram: Boolean(u.telegramId),
+              max: Boolean(u.maxId),
+            },
+            createdAt: u.createdAt,
+          };
+        })
+      );
+
+      if (sortBy === 'status' && onlineFilter === null) {
+        const rank = (state: AdminModerationState) => {
+          if (state === 'NO_EMPLOYEE_PROFILE') return 0;
+          if (state === 'EMPLOYEE_PENDING') return 1;
+          if (state === 'EMPLOYEE_ACTIVE') return 2;
+          return 3;
+        };
+        items.sort((a, b) => {
+          const diff = rank(a.moderationState as AdminModerationState) - rank(b.moderationState as AdminModerationState);
+          return sortDir === 'asc' ? diff : -diff;
+        });
+      }
+
+      return res.json(
+        successResponse({
+          items,
+          meta: {
+            page,
+            limit,
+            total,
+            hasNext: page * limit < total,
+          },
+        })
+      );
+    } catch (error) {
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения списка пользователей',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
+      );
+    }
+  }
+);
+
+/**
  * Список пользователей с поиском
  */
 router.get(
@@ -2572,6 +2961,174 @@ router.post(
     } catch (error: any) {
       return res.status(500).json(
         errorResponse(error?.message || 'Не удалось отменить верификацию', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+/**
+ * Админ: модерация профиля сотрудника (approve/reject)
+ */
+router.post(
+  '/:userId/employee-moderation',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_users'], { mode: 'any' }),
+  async (
+    req: AuthRequest<{ userId: string }, {}, { action?: 'APPROVE' | 'REJECT'; reason?: string }>,
+    res: express.Response
+  ) => {
+    try {
+      const actorUserId = Number(req.user!.userId);
+      const userId = Number(req.params.userId);
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const actionRaw = String(req.body?.action || '').trim().toUpperCase();
+      const action = actionRaw === 'APPROVE' || actionRaw === 'REJECT' ? actionRaw : null;
+      if (!action) {
+        return res
+          .status(400)
+          .json(errorResponse('action должен быть APPROVE или REJECT', ErrorCodes.VALIDATION_ERROR));
+      }
+      const reason = String(req.body?.reason || '').trim() || null;
+
+      const moderation = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            role: { select: { id: true, name: true } },
+            currentProfileType: true,
+            employeeProfile: { select: { status: true } },
+          },
+        });
+
+        if (!user) {
+          throw new Error('USER_NOT_FOUND');
+        }
+        if (!user.employeeProfile) {
+          throw new Error('EMPLOYEE_PROFILE_NOT_FOUND');
+        }
+
+        const [employeeRole, userRole] = await Promise.all([
+          tx.role.findUnique({ where: { name: 'employee' }, select: { id: true, name: true } }),
+          tx.role.findUnique({ where: { name: 'user' }, select: { id: true, name: true } }),
+        ]);
+
+        const userPatch: { roleId?: number; currentProfileType?: ProfileType | null } = {};
+        let nextEmployeeStatus: ProfileStatus = user.employeeProfile.status;
+        let roleChanged = false;
+        let currentProfileTypeReset = false;
+        let roleChange: { from: string | null; to: string | null } | null = null;
+
+        if (action === 'APPROVE') {
+          nextEmployeeStatus = 'ACTIVE';
+          if (user.role?.name === 'user') {
+            if (!employeeRole) throw new Error('EMPLOYEE_ROLE_NOT_FOUND');
+            if (user.role.id !== employeeRole.id) {
+              userPatch.roleId = employeeRole.id;
+              roleChanged = true;
+              roleChange = { from: user.role.name, to: employeeRole.name };
+            }
+          }
+        } else {
+          nextEmployeeStatus = 'BLOCKED';
+          if (user.role?.name === 'employee') {
+            if (!userRole) throw new Error('USER_ROLE_NOT_FOUND');
+            if (user.role.id !== userRole.id) {
+              userPatch.roleId = userRole.id;
+              roleChanged = true;
+              roleChange = { from: user.role.name, to: userRole.name };
+            }
+          }
+          if (user.currentProfileType === 'EMPLOYEE') {
+            userPatch.currentProfileType = null;
+            currentProfileTypeReset = true;
+          }
+        }
+
+        if (nextEmployeeStatus !== user.employeeProfile.status) {
+          await tx.employeeProfile.update({
+            where: { userId },
+            data: { status: nextEmployeeStatus },
+          });
+        }
+
+        if (Object.keys(userPatch).length) {
+          await tx.user.update({
+            where: { id: userId },
+            data: userPatch,
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: actorUserId,
+            action: ActionType.UPDATE,
+            targetType: 'EMPLOYEE_MODERATION',
+            targetId: userId,
+            details: JSON.stringify({
+              action,
+              reason,
+              employeeStatusBefore: user.employeeProfile.status,
+              employeeStatusAfter: nextEmployeeStatus,
+              roleChange,
+              currentProfileTypeReset,
+            }),
+          },
+        });
+
+        return {
+          action,
+          reason,
+          employeeStatusBefore: user.employeeProfile.status,
+          employeeStatusAfter: nextEmployeeStatus,
+          roleChanged,
+          roleChange,
+          currentProfileTypeReset,
+        };
+      });
+
+      const profile = await getProfile(userId);
+      const notification = await notifyEmployeeModerationResult({ userId, action, reason }).catch((err: any) => {
+        console.warn('[notifications] employee moderation notify failed:', err?.message || err);
+        return { pushSent: false, telegramSent: false, maxSent: false, skipped: ['notification_error'] };
+      });
+
+      return res.json(
+        successResponse(
+          {
+            profile,
+            moderation,
+            notification,
+          },
+          action === 'APPROVE'
+            ? 'Профиль сотрудника подтверждён'
+            : 'Профиль сотрудника отклонён'
+        )
+      );
+    } catch (error: any) {
+      const message = String(error?.message || '');
+      if (message === 'USER_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      if (message === 'EMPLOYEE_PROFILE_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND));
+      }
+      if (message === 'EMPLOYEE_ROLE_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Роль employee не найдена', ErrorCodes.NOT_FOUND));
+      }
+      if (message === 'USER_ROLE_NOT_FOUND') {
+        return res.status(404).json(errorResponse('Роль user не найдена', ErrorCodes.NOT_FOUND));
+      }
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка модерации сотрудника',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? error : undefined
+        )
       );
     }
   }

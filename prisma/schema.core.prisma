@@ -168,6 +168,8 @@ model EmployeeProfile {
   status    ProfileStatus @default(PENDING)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([status, departmentId, userId])
 }
 
 model Department {
@@ -252,6 +254,7 @@ model User {
   appealMutes          AppealMute[]
 
   @@index([email])
+  @@index([currentProfileType, roleId, createdAt])
 }
 
 enum PhoneVerificationStatus {

@@ -14,7 +14,10 @@
     "prisma:seed": "dotenv -e .env.dev -- ts-node --transpile-only src/prisma/seed.ts",
     "postinstall": "prisma generate",
     "test": "cross-env NODE_ENV=test jest --config jest.config.ts",
-    "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts"
+    "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts",
+    "audit:employee-moderation": "node scripts/audit-employee-moderation-consistency.js",
+    "fix:employee-moderation": "node scripts/fix-employee-moderation-consistency.js",
+    "fix:employee-moderation:apply": "node scripts/fix-employee-moderation-consistency.js --apply"
   },
   "keywords": [],
   "author": "",
