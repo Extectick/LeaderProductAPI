@@ -275,6 +275,21 @@ enum PhoneVerificationProvider {
   MAX
 }
 
+enum MessengerQrAuthProvider {
+  TELEGRAM
+  MAX
+}
+
+enum MessengerQrAuthStatus {
+  PENDING
+  AWAITING_CONTACT
+  VERIFIED
+  FAILED
+  EXPIRED
+  CANCELLED
+  CONSUMED
+}
+
 enum EmailChangeSessionStatus {
   PENDING
   VERIFIED
@@ -307,6 +322,27 @@ model PhoneVerificationSession {
   @@index([telegramUserId])
   @@index([maxUserId])
   @@index([maxChatId])
+}
+
+model MessengerQrAuthSession {
+  id                String                  @id @default(cuid())
+  provider          MessengerQrAuthProvider
+  startTokenHash    String                  @unique
+  clientTokenHash   String                  @unique
+  status            MessengerQrAuthStatus   @default(PENDING)
+  messengerUserId   BigInt?
+  messengerChatId   BigInt?
+  messengerUsername String?
+  resolvedUserId    Int?
+  failureReason     String?
+  expiresAt         DateTime
+  verifiedAt        DateTime?
+  consumedAt        DateTime?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  @@index([provider, status, expiresAt])
+  @@index([provider, messengerUserId, status])
 }
 
 model UserPhoneMigrationReport {

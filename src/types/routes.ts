@@ -163,6 +163,43 @@ export type MaxLinkResponse = SuccessResponse<{
   profile: Profile;
 }> | ErrorResponse;
 
+export type MessengerQrAuthProvider = 'TELEGRAM' | 'MAX';
+export type MessengerQrAuthState =
+  | 'PENDING'
+  | 'AWAITING_CONTACT'
+  | 'AUTHORIZED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+  | 'CONSUMED';
+
+export type MessengerQrAuthStartResponse = SuccessResponse<{
+  provider: MessengerQrAuthProvider;
+  sessionToken: string;
+  deepLinkUrl: string;
+  qrPayload: string;
+  expiresAt: Date;
+  pollIntervalSec: number;
+}> | ErrorResponse;
+
+export type MessengerQrAuthStatusResponse = SuccessResponse<{
+  provider: MessengerQrAuthProvider;
+  state: MessengerQrAuthState;
+  failureReason?: string | null;
+  message?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  profile?: Profile | null;
+}> | ErrorResponse;
+
+export type MessengerQrAuthCancelRequest = {
+  sessionToken: string;
+};
+
+export type MessengerQrAuthCancelResponse = SuccessResponse<{
+  cancelled: boolean;
+}> | ErrorResponse;
+
 export type AuthMethodsResponse = SuccessResponse<{
   methods: Array<{
     key: 'password' | 'telegram' | 'max';
