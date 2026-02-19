@@ -137,3 +137,77 @@ export function tplClosureReminder(opts: {
     `Подтвердите или отклоните обращение.`
   );
 }
+
+export function tplAssigneeAssigned(opts: {
+  appealId: number;
+  number: number;
+  changedByName: string;
+  channel?: NotificationTemplateChannel;
+}): string {
+  const channel = opts.channel || 'telegram';
+  return (
+    `👤 Вас назначили исполнителем в ${appealLink(channel, opts.appealId, opts.number)}\n` +
+    `Назначил: ${opts.changedByName}`
+  );
+}
+
+export function tplAssigneeRemoved(opts: {
+  appealId: number;
+  number: number;
+  changedByName: string;
+  channel?: NotificationTemplateChannel;
+}): string {
+  const channel = opts.channel || 'telegram';
+  return (
+    `➖ Вас сняли с исполнения ${appealLink(channel, opts.appealId, opts.number)}\n` +
+    `Изменил: ${opts.changedByName}`
+  );
+}
+
+export function tplTransferRemovedAssignee(opts: {
+  appealId: number;
+  number: number;
+  changedByName: string;
+  fromDepartmentName: string;
+  toDepartmentName: string;
+  channel?: NotificationTemplateChannel;
+}): string {
+  const channel = opts.channel || 'telegram';
+  return (
+    `🔀 ${appealLink(channel, opts.appealId, opts.number)} передано в другой отдел\n` +
+    `<b>${opts.fromDepartmentName}</b> → <b>${opts.toDepartmentName}</b>\n` +
+    `Изменил: ${opts.changedByName}\n` +
+    `Вы больше не исполнитель этого обращения.`
+  );
+}
+
+export function tplTransferAuthor(opts: {
+  appealId: number;
+  number: number;
+  changedByName: string;
+  fromDepartmentName: string;
+  toDepartmentName: string;
+  channel?: NotificationTemplateChannel;
+}): string {
+  const channel = opts.channel || 'telegram';
+  return (
+    `🔀 Отдел ${appealLink(channel, opts.appealId, opts.number)} изменён\n` +
+    `<b>${opts.fromDepartmentName}</b> → <b>${opts.toDepartmentName}</b>\n` +
+    `Изменил: ${opts.changedByName}`
+  );
+}
+
+export function tplTransferToDepartment(opts: {
+  appealId: number;
+  number: number;
+  changedByName: string;
+  toDepartmentName: string;
+  channel?: NotificationTemplateChannel;
+}): string {
+  const channel = opts.channel || 'telegram';
+  return (
+    `📥 В ваш отдел передано ${appealLink(channel, opts.appealId, opts.number)}\n` +
+    `Отдел: <b>${opts.toDepartmentName}</b>\n` +
+    `Передал: ${opts.changedByName}`
+  );
+}

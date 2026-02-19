@@ -3653,13 +3653,34 @@ router.get(
       const isSelf = requestedId === requesterId;
 
       if (!isSelf) {
-        // Только админ может смотреть чужие профили
+        // Чужие профили могут смотреть админ и сотрудники.
+        // Обычные пользователи (client/supplier без employee-контекста) — не могут.
         const requester = await prisma.user.findUnique({
           where: { id: requesterId },
-          include: { role: true },
+          select: {
+            role: { select: { name: true } },
+            currentProfileType: true,
+            employeeProfile: { select: { id: true } },
+            departmentRoles: { select: { id: true }, take: 1 },
+          },
         });
-        const isAdmin = requester?.role?.name === 'admin' || requester?.role?.name === 'administrator';
-        if (!isAdmin) {
+        const roleNameRaw = String(requester?.role?.name || '').trim().toLowerCase();
+        const roleName = roleNameRaw.replace(/[\s_-]+/g, '');
+        const isAdmin = roleName === 'admin' || roleName === 'administrator';
+        const isEmployeeRole = roleName === 'employee' || roleName === 'departmentmanager';
+        const hasEmployeeProfile = Boolean(requester?.employeeProfile);
+        const hasDepartmentRole = (requester?.departmentRoles?.length || 0) > 0;
+        const isEmployeeProfileActive =
+          requester?.currentProfileType === ProfileType.EMPLOYEE;
+
+        const canViewForeignProfile =
+          isAdmin ||
+          isEmployeeRole ||
+          hasEmployeeProfile ||
+          hasDepartmentRole ||
+          isEmployeeProfileActive;
+
+        if (!canViewForeignProfile) {
           return res
             .status(403)
             .json(errorResponse('Недостаточно прав для просмотра профиля', ErrorCodes.FORBIDDEN));

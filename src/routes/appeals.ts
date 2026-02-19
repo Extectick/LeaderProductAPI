@@ -80,6 +80,11 @@ import {
   tplStatusChanged,
   tplDeadlineChanged,
   tplNewMessage,
+  tplAssigneeAssigned,
+  tplAssigneeRemoved,
+  tplTransferRemovedAssignee,
+  tplTransferAuthor,
+  tplTransferToDepartment,
 } from '../services/notificationTemplates';
 
 // минимальный интерфейс БД, который есть и у PrismaClient, и у TransactionClient
@@ -145,10 +150,18 @@ function isAdminRole(user: UserMiniRaw | null) {
 }
 
 function isDepartmentManager(user: UserMiniRaw | null, departmentId?: number | null) {
-  if (!user || !departmentId) return false;
-  return (user.departmentRoles || []).some(
-    (dr) => dr.departmentId === departmentId && dr.role?.name === 'department_manager'
-  );
+  if (!user) return false;
+  const hasDepartmentRole = (user.departmentRoles || []).some((dr) => {
+    if (dr.role?.name !== 'department_manager') return false;
+    if (!departmentId) return true;
+    return dr.departmentId === departmentId;
+  });
+  if (hasDepartmentRole) return true;
+
+  // Fallback: в некоторых профилях manager задается как глобальная роль пользователя.
+  if (user.role?.name !== 'department_manager') return false;
+  if (!departmentId) return true;
+  return user.employeeProfile?.department?.id === departmentId;
 }
 
 async function mapUserMini(user: UserMiniRaw | null) {
@@ -168,9 +181,7 @@ async function mapUserMini(user: UserMiniRaw | null) {
     avatarUrl,
     department: user.employeeProfile?.department ?? null,
     isAdmin: isAdminRole(user),
-    isDepartmentManager: (user.departmentRoles || []).some(
-      (dr) => dr.role?.name === 'department_manager'
-    ),
+    isDepartmentManager: isDepartmentManager(user),
   };
 }
 
@@ -421,6 +432,40 @@ async function createSystemMessage(opts: {
   const recipients = Array.from(new Set(opts.recipients || []));
   recipients.forEach((uid) => opts.io.to(`user:${uid}`).emit('messageAdded', mapped));
   return mapped;
+}
+
+function emitAppealNotify(opts: {
+  io: SocketIOServer;
+  userIds: number[];
+  kind: 'ASSIGNED' | 'UNASSIGNED' | 'TRANSFER_REMOVED' | 'TRANSFER_AUTHOR' | 'TRANSFER_TO_DEPT';
+  appealId: number;
+  appealNumber: number;
+  title: string;
+  message: string;
+  icon?: string;
+  actorId?: number;
+  actorName?: string;
+  dedupeScope?: string;
+}) {
+  const uniqueUserIds = Array.from(
+    new Set(
+      (opts.userIds || []).filter((id) => Number.isFinite(id) && id > 0)
+    )
+  );
+  const dedupeScope = opts.dedupeScope || String(opts.actorId || '0');
+  uniqueUserIds.forEach((uid) => {
+    opts.io.to(`user:${uid}`).emit('appealNotify', {
+      kind: opts.kind,
+      appealId: opts.appealId,
+      appealNumber: opts.appealNumber,
+      title: opts.title,
+      message: opts.message,
+      icon: opts.icon,
+      dedupeKey: `${opts.kind}:${opts.appealId}:${uid}:${dedupeScope}`,
+      actorId: opts.actorId,
+      actorName: opts.actorName,
+    });
+  });
 }
 
 async function rescheduleUnreadReminderIfNeeded(appealId: number): Promise<void> {
@@ -1284,6 +1329,8 @@ router.put(
           .status(404)
           .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
       }
+      const actorId = req.user!.userId;
+      const actorName = getUserDisplayName(actor);
 
       const canAssign = isAdminRole(actor) || isDepartmentManager(actor, appeal.toDepartmentId);
       if (!canAssign) {
@@ -1298,6 +1345,8 @@ router.put(
       const nextSet = new Set(nextAssignees);
       const added = nextAssignees.filter((id) => !prevSet.has(id));
       const removed = prevAssignees.filter((id) => !nextSet.has(id));
+      const addedUsers = added.filter((id) => id !== actorId);
+      const removedUsers = removed.filter((id) => id !== actorId);
 
       const nextStatus =
         nextAssignees.length > 0
@@ -1324,7 +1373,7 @@ router.put(
               appealId,
               oldStatus: appeal.status,
               newStatus: nextStatus,
-              changedById: req.user!.userId,
+              changedById: actorId,
             },
           });
         }
@@ -1354,7 +1403,7 @@ router.put(
         const text = parts.length ? `Исполнители обновлены. ${parts.join('. ')}.` : 'Исполнители обновлены.';
         await createSystemMessage({
           appealId,
-          actorId: req.user!.userId,
+          actorId,
           text,
           systemEvent: { type: 'assignees_changed', added, removed },
           io,
@@ -1366,7 +1415,7 @@ router.put(
       if (nextStatus !== appeal.status) {
         await createSystemMessage({
           appealId,
-          actorId: req.user!.userId,
+          actorId,
           text: `Статус изменён: ${STATUS_LABELS[appeal.status]} → ${STATUS_LABELS[nextStatus]}.`,
           systemEvent: { type: 'status_changed', from: appeal.status, to: nextStatus },
           io,
@@ -1383,6 +1432,101 @@ router.put(
         appealId,
         assigneeIds: nextAssignees,
       });
+
+      void (async () => {
+        try {
+          if (addedUsers.length) {
+            await dispatchNotification({
+              type: 'STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              body: `Вас назначили исполнителем. Назначил: ${actorName}`,
+              telegramText: tplAssigneeAssigned({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                channel: 'telegram',
+              }),
+              maxText: tplAssigneeAssigned({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                channel: 'max',
+              }),
+              channels: ['push', 'telegram', 'max'],
+              recipientUserIds: addedUsers,
+              excludeSenderUserId: actorId,
+              respectMute: true,
+              pushData: {
+                type: 'APPEAL_ASSIGNED',
+                appealId,
+                appealNumber: appeal.number,
+              },
+            });
+            emitAppealNotify({
+              io,
+              userIds: addedUsers,
+              kind: 'ASSIGNED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              message: `Вас назначил(а) ${actorName} исполнителем.`,
+              icon: 'person-add-outline',
+              actorId,
+              actorName,
+              dedupeScope: `assign:add:${nextAssignees.join(',')}`,
+            });
+          }
+
+          if (removedUsers.length) {
+            await dispatchNotification({
+              type: 'STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              body: `Вас сняли с исполнения. Изменил: ${actorName}`,
+              telegramText: tplAssigneeRemoved({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                channel: 'telegram',
+              }),
+              maxText: tplAssigneeRemoved({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                channel: 'max',
+              }),
+              channels: ['push', 'telegram', 'max'],
+              recipientUserIds: removedUsers,
+              excludeSenderUserId: actorId,
+              respectMute: true,
+              pushData: {
+                type: 'APPEAL_UNASSIGNED',
+                appealId,
+                appealNumber: appeal.number,
+              },
+            });
+            emitAppealNotify({
+              io,
+              userIds: removedUsers,
+              kind: 'UNASSIGNED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              message: `Вас снял(а) ${actorName} с исполнения.`,
+              icon: 'person-remove-outline',
+              actorId,
+              actorName,
+              dedupeScope: `assign:remove:${nextAssignees.join(',')}`,
+            });
+          }
+        } catch (err: any) {
+          console.error('[notifications] assignees change error:', err?.message);
+        }
+      })();
+
       await emitAppealUpdated({
         io,
         appealId,
@@ -1604,6 +1748,8 @@ router.put(
           .status(404)
           .json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
       }
+      const actorId = req.user!.userId;
+      const actorName = getUserDisplayName(actor);
 
       const canMove = isAdminRole(actor) || isDepartmentManager(actor, appeal.toDepartmentId);
       if (!canMove) {
@@ -1631,6 +1777,8 @@ router.put(
       const prevAssignees = (appeal.assignees || []).map((a) => a.userId);
       const prevStatus = appeal.status;
       const nextStatus = AppealStatus.OPEN;
+      const fromDepartmentName = appeal.toDepartment?.name ?? `#${appeal.toDepartmentId}`;
+      const toDepartmentName = targetDept.name;
 
       await prisma.$transaction(async (tx) => {
         await tx.appealAssignee.deleteMany({ where: { appealId } });
@@ -1644,7 +1792,7 @@ router.put(
               appealId,
               oldStatus: prevStatus,
               newStatus: nextStatus,
-              changedById: req.user!.userId,
+              changedById: actorId,
             },
           });
         }
@@ -1657,8 +1805,8 @@ router.put(
 
       const deptChangeMessage = await createSystemMessage({
         appealId,
-        actorId: req.user!.userId,
-        text: `Отдел изменён: ${appeal.toDepartment?.name ?? `#${appeal.toDepartmentId}`} → ${targetDept.name}.`,
+        actorId,
+        text: `Отдел изменён: ${fromDepartmentName} → ${toDepartmentName}.`,
         systemEvent: {
           type: 'department_changed',
           fromDepartmentId: appeal.toDepartmentId,
@@ -1676,7 +1824,7 @@ router.put(
       if (prevAssignees.length) {
         await createSystemMessage({
           appealId,
-          actorId: req.user!.userId,
+          actorId,
           text: 'Исполнители сняты из-за смены отдела.',
           systemEvent: { type: 'assignees_changed', added: [], removed: prevAssignees },
           io,
@@ -1688,7 +1836,7 @@ router.put(
       if (prevStatus !== nextStatus) {
         await createSystemMessage({
           appealId,
-          actorId: req.user!.userId,
+          actorId,
           text: `Статус изменён: ${STATUS_LABELS[prevStatus]} → ${STATUS_LABELS[nextStatus]}.`,
           systemEvent: { type: 'status_changed', from: prevStatus, to: nextStatus },
           io,
@@ -1714,6 +1862,179 @@ router.put(
         fromDepartmentId: appeal.toDepartmentId,
         toDepartmentId: departmentId,
       });
+
+      const [targetDeptRoleMembers, targetDeptEmployees] = await Promise.all([
+        prisma.departmentRole.findMany({
+          where: { departmentId },
+          select: { userId: true },
+        }),
+        prisma.employeeProfile.findMany({
+          where: { departmentId },
+          select: { userId: true },
+        }),
+      ]);
+      const targetDepartmentUsers = Array.from(
+        new Set([
+          ...targetDeptRoleMembers.map((row) => row.userId),
+          ...targetDeptEmployees.map((row) => row.userId),
+        ])
+      ).filter((id) => id !== actorId);
+
+      const removedUsers = prevAssignees.filter((id) => id !== actorId);
+      const authorUsers =
+        appeal.createdById && appeal.createdById !== actorId ? [appeal.createdById] : [];
+      const transferAuthorUsers = authorUsers.filter((id) => !removedUsers.includes(id));
+      const blockedUsers = new Set([...removedUsers, ...transferAuthorUsers]);
+      const transferToDeptUsers = targetDepartmentUsers.filter((id) => !blockedUsers.has(id));
+
+      void (async () => {
+        try {
+          if (removedUsers.length) {
+            await dispatchNotification({
+              type: 'STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              body: `Отдел изменён: ${fromDepartmentName} → ${toDepartmentName}. Вы больше не исполнитель.`,
+              telegramText: tplTransferRemovedAssignee({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                fromDepartmentName,
+                toDepartmentName,
+                channel: 'telegram',
+              }),
+              maxText: tplTransferRemovedAssignee({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                fromDepartmentName,
+                toDepartmentName,
+                channel: 'max',
+              }),
+              channels: ['push', 'telegram', 'max'],
+              recipientUserIds: removedUsers,
+              excludeSenderUserId: actorId,
+              respectMute: true,
+              pushData: {
+                type: 'APPEAL_TRANSFERRED',
+                appealId,
+                appealNumber: appeal.number,
+              },
+            });
+            emitAppealNotify({
+              io,
+              userIds: removedUsers,
+              kind: 'TRANSFER_REMOVED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              message: `Отдел изменён: ${fromDepartmentName} → ${toDepartmentName}. Вы больше не исполнитель.`,
+              icon: 'swap-horizontal-outline',
+              actorId,
+              actorName,
+              dedupeScope: `transfer:${appeal.toDepartmentId}->${departmentId}:removed`,
+            });
+          }
+
+          if (transferAuthorUsers.length) {
+            await dispatchNotification({
+              type: 'STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              body: `Обращение передано в отдел ${toDepartmentName}. Изменил: ${actorName}`,
+              telegramText: tplTransferAuthor({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                fromDepartmentName,
+                toDepartmentName,
+                channel: 'telegram',
+              }),
+              maxText: tplTransferAuthor({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                fromDepartmentName,
+                toDepartmentName,
+                channel: 'max',
+              }),
+              channels: ['push', 'telegram', 'max'],
+              recipientUserIds: transferAuthorUsers,
+              excludeSenderUserId: actorId,
+              respectMute: true,
+              pushData: {
+                type: 'APPEAL_TRANSFERRED',
+                appealId,
+                appealNumber: appeal.number,
+              },
+            });
+            emitAppealNotify({
+              io,
+              userIds: transferAuthorUsers,
+              kind: 'TRANSFER_AUTHOR',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              message: `Обращение передано в отдел ${toDepartmentName}. Изменил: ${actorName}`,
+              icon: 'swap-horizontal-outline',
+              actorId,
+              actorName,
+              dedupeScope: `transfer:${appeal.toDepartmentId}->${departmentId}:author`,
+            });
+          }
+
+          if (transferToDeptUsers.length) {
+            await dispatchNotification({
+              type: 'STATUS_CHANGED',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              body: `В ваш отдел передано обращение #${appeal.number}. Передал: ${actorName}`,
+              telegramText: tplTransferToDepartment({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                toDepartmentName,
+                channel: 'telegram',
+              }),
+              maxText: tplTransferToDepartment({
+                appealId,
+                number: appeal.number,
+                changedByName: actorName,
+                toDepartmentName,
+                channel: 'max',
+              }),
+              channels: ['push', 'telegram', 'max'],
+              recipientUserIds: transferToDeptUsers,
+              excludeSenderUserId: actorId,
+              respectMute: true,
+              pushData: {
+                type: 'APPEAL_TRANSFERRED',
+                appealId,
+                appealNumber: appeal.number,
+              },
+            });
+            emitAppealNotify({
+              io,
+              userIds: transferToDeptUsers,
+              kind: 'TRANSFER_TO_DEPT',
+              appealId,
+              appealNumber: appeal.number,
+              title: `Обращение #${appeal.number}`,
+              message: `В ваш отдел передано обращение. Передал: ${actorName}`,
+              icon: 'business-outline',
+              actorId,
+              actorName,
+              dedupeScope: `transfer:${appeal.toDepartmentId}->${departmentId}:target`,
+            });
+          }
+        } catch (err: any) {
+          console.error('[notifications] department transfer error:', err?.message);
+        }
+      })();
+
       await emitAppealUpdated({
         io,
         appealId,
