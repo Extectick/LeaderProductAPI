@@ -12,6 +12,15 @@ import {
 const router = express.Router();
 
 const SNAKE_CASE_RE = /^[a-z0-9_]+$/;
+const SERVICE_KINDS = new Set(['LOCAL', 'CLOUD']);
+
+function normalizeServiceKind(value: unknown): { ok: true; kind: 'LOCAL' | 'CLOUD' } | { ok: false; message: string } {
+  const normalized = String(value || 'CLOUD').trim().toUpperCase();
+  if (!SERVICE_KINDS.has(normalized)) {
+    return { ok: false, message: 'kind должен быть LOCAL или CLOUD' };
+  }
+  return { ok: true, kind: normalized as 'LOCAL' | 'CLOUD' };
+}
 
 function normalizeActionList(value: unknown): { ok: true; actions: string[] } | { ok: false; message: string } {
   const source = Array.isArray(value) ? value : DEFAULT_SERVICE_PERMISSION_ACTIONS;
@@ -127,6 +136,7 @@ router.post(
         description?: string | null;
         gradientStart?: string | null;
         gradientEnd?: string | null;
+        kind?: 'LOCAL' | 'CLOUD';
         isActive?: boolean;
         defaultVisible?: boolean;
         defaultEnabled?: boolean;
@@ -148,6 +158,12 @@ router.post(
         return res
           .status(400)
           .json(errorResponse('Название сервиса обязательно', ErrorCodes.VALIDATION_ERROR));
+      }
+      const normalizedKind = normalizeServiceKind(req.body.kind);
+      if (!normalizedKind.ok) {
+        return res
+          .status(400)
+          .json(errorResponse(normalizedKind.message, ErrorCodes.VALIDATION_ERROR));
       }
 
       const generatePermissionTemplate = req.body.generatePermissionTemplate !== false;
@@ -206,6 +222,7 @@ router.post(
           data: {
             key,
             name,
+            kind: normalizedKind.kind,
             route: req.body.route ?? null,
             icon: req.body.icon ?? null,
             description: req.body.description ?? null,
@@ -316,6 +333,7 @@ router.patch(
       description?: string | null;
       gradientStart?: string | null;
       gradientEnd?: string | null;
+      kind?: 'LOCAL' | 'CLOUD';
       isActive?: boolean;
       defaultVisible?: boolean;
       defaultEnabled?: boolean;
@@ -330,10 +348,19 @@ router.patch(
           .json(errorResponse('Некорректный ID сервиса', ErrorCodes.VALIDATION_ERROR));
       }
 
-      const data = { ...req.body };
+      const data = { ...req.body } as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(req.body, 'kind')) {
+        const normalizedKind = normalizeServiceKind(req.body.kind);
+        if (!normalizedKind.ok) {
+          return res
+            .status(400)
+            .json(errorResponse(normalizedKind.message, ErrorCodes.VALIDATION_ERROR));
+        }
+        data.kind = normalizedKind.kind;
+      }
       const updated = await prisma.service.update({
         where: { id: serviceId },
-        data,
+        data: data as any,
       });
       const full = await prisma.service.findUnique({
         where: { id: updated.id },

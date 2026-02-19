@@ -19,6 +19,7 @@ async function main() {
     {
       key: 'qrcodes',
       name: 'QR генератор и аналитика',
+      kind: 'CLOUD' as const,
       route: '/services/qrcodes',
       icon: 'qr-code-outline',
       description: 'Создание QR-кодов, печать и аналитика по сканам.',
@@ -31,6 +32,7 @@ async function main() {
     {
       key: 'appeals',
       name: 'Обращения',
+      kind: 'CLOUD' as const,
       route: '/services/appeals',
       icon: 'documents',
       description: 'Центр общения с клиентами и партнёрами.',
@@ -43,6 +45,7 @@ async function main() {
     {
       key: 'tracking',
       name: 'Геомаршруты',
+      kind: 'CLOUD' as const,
       route: '/services/tracking',
       icon: 'map-outline',
       description: 'Маршруты, точки и контроль передвижений.',
@@ -55,6 +58,7 @@ async function main() {
     {
       key: 'tasks',
       name: 'Задачи',
+      kind: 'CLOUD' as const,
       route: '/tasks',
       icon: 'list-outline',
       description: 'Постановка и контроль задач команды.',
@@ -67,6 +71,7 @@ async function main() {
     {
       key: 'reports',
       name: 'Отчёты',
+      kind: 'CLOUD' as const,
       route: '/reports',
       icon: 'stats-chart-outline',
       description: 'Визуальные отчёты и показатели (скоро).',
@@ -79,6 +84,7 @@ async function main() {
     {
       key: 'clients',
       name: 'Клиенты',
+      kind: 'CLOUD' as const,
       route: '/clients',
       icon: 'people-outline',
       description: 'Управление клиентской базой (скоро).',

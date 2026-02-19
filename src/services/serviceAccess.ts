@@ -13,6 +13,7 @@ export type ServiceAccessView = {
   id: number;
   key: string;
   name: string;
+  kind: 'LOCAL' | 'CLOUD';
   route: string | null;
   icon: string | null;
   description: string | null;
@@ -26,6 +27,7 @@ export type ServiceAdminView = {
   id: number;
   key: string;
   name: string;
+  kind: 'LOCAL' | 'CLOUD';
   route: string | null;
   icon: string | null;
   description: string | null;
@@ -237,6 +239,7 @@ export async function listServicesForUser(
         id: service.id,
         key: service.key,
         name: service.name,
+        kind: service.kind,
         route: service.route,
         icon: service.icon,
         description: service.description,
@@ -291,6 +294,7 @@ export async function listServicesForUser(
         id: service.id,
         key: service.key,
         name: service.name,
+        kind: service.kind,
         route: service.route,
         icon: service.icon,
         description: service.description,
@@ -317,6 +321,7 @@ export async function listServicesForAdmin(): Promise<ServiceAdminView[]> {
     id: service.id,
     key: service.key,
     name: service.name,
+    kind: service.kind,
     route: service.route,
     icon: service.icon,
     description: service.description,
