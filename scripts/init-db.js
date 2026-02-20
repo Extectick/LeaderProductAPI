@@ -91,13 +91,31 @@ async function main() {
     return;
   }
 
+  async function tableHasRows(tableName) {
+    try {
+      const res = await pool.query(`SELECT EXISTS (SELECT 1 FROM "${tableName}" LIMIT 1) AS present;`);
+      return !!res.rows?.[0]?.present;
+    } catch (error) {
+      // Table might not exist yet (e.g. partially initialized DB).
+      if (error && error.code === '42P01') return false;
+      throw error;
+    }
+  }
+
   try {
-    const res = await pool.query('SELECT 1 FROM "Role" LIMIT 1;');
-    if (!res.rows.length) {
-      console.log('[init] empty DB detected -> running seed');
+    const [hasRoles, hasServices] = await Promise.all([
+      tableHasRows('Role'),
+      tableHasRows('Service'),
+    ]);
+
+    if (!hasRoles || !hasServices) {
+      const reasons = [];
+      if (!hasRoles) reasons.push('roles empty');
+      if (!hasServices) reasons.push('services empty');
+      console.log(`[init] seed required (${reasons.join(', ')}) -> running seed`);
       run('node dist/prisma/seed.js');
     } else {
-      console.log('[init] seed skipped (roles already exist)');
+      console.log('[init] seed skipped (roles and services already exist)');
     }
   } finally {
     await pool.end().catch(() => undefined);
