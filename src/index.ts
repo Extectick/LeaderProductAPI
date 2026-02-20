@@ -244,6 +244,7 @@ const io = new SocketIOServer(server, {
 app.set('io', io);
 
 const userSocketCounts = new Map<number, number>();
+const userFocusedSocketCounts = new Map<number, number>();
 const userPresenceRefreshTimers = new Map<number, ReturnType<typeof setInterval>>();
 const PRESENCE_REFRESH_MS = Math.max(
   15_000,
@@ -290,6 +291,60 @@ function stopPresenceRefresh(userId: number) {
   userPresenceRefreshTimers.delete(userId);
 }
 
+function incrementMapValue(map: Map<number, number>, userId: number) {
+  const next = (map.get(userId) || 0) + 1;
+  map.set(userId, next);
+  return next;
+}
+
+function decrementMapValue(map: Map<number, number>, userId: number) {
+  const next = Math.max(0, (map.get(userId) || 0) - 1);
+  if (next > 0) map.set(userId, next);
+  else map.delete(userId);
+  return next;
+}
+
+function syncFocusedPresence(userId: number, prevFocusedCount: number, nextFocusedCount: number) {
+  if (prevFocusedCount === 0 && nextFocusedCount === 1) {
+    void markUserOnline(userId)
+      .catch((err) => {
+        console.warn('[presence] markUserOnline failed', err?.message || err);
+      })
+      .finally(() => {
+        emitPresenceChanged(userId, true, null);
+      });
+    startPresenceRefresh(userId);
+    return;
+  }
+
+  if (prevFocusedCount > 0 && nextFocusedCount === 0) {
+    stopPresenceRefresh(userId);
+    void markUserOffline(userId)
+      .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
+      .catch((err) => {
+        console.warn('[presence] markUserOffline failed', err?.message || err);
+        emitPresenceChanged(userId, false, new Date());
+      });
+  }
+}
+
+function applyPresenceFocus(
+  socket: any,
+  userId: number,
+  focused: boolean
+) {
+  const normalized = !!focused;
+  const prevFocused = socket?.data?.presenceFocused !== false;
+  if (prevFocused === normalized) return;
+
+  socket.data.presenceFocused = normalized;
+  const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+  const nextFocusedCount = normalized
+    ? incrementMapValue(userFocusedSocketCounts, userId)
+    : decrementMapValue(userFocusedSocketCounts, userId);
+  syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
+}
+
 io.use((socket, next) => {
   const authToken =
     (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
@@ -308,22 +363,21 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   const userId = Number((socket.data as any)?.user?.userId);
   if (Number.isFinite(userId) && userId > 0) {
-    const nextCount = (userSocketCounts.get(userId) || 0) + 1;
-    userSocketCounts.set(userId, nextCount);
-    if (nextCount === 1) {
-      void markUserOnline(userId)
-        .catch((err) => {
-          console.warn('[presence] markUserOnline failed', err?.message || err);
-        })
-        .finally(() => {
-          emitPresenceChanged(userId, true, null);
-        });
-      startPresenceRefresh(userId);
-    }
+    incrementMapValue(userSocketCounts, userId);
+    (socket.data as any).presenceFocused = true;
+    const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+    const nextFocusedCount = incrementMapValue(userFocusedSocketCounts, userId);
+    syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
   }
 
   socket.on('join', (room: string) => { if (room) socket.join(room); });
   socket.on('leave', (room: string) => { if (room) socket.leave(room); });
+  socket.on('presence:focus', (payload: unknown) => {
+    if (!Number.isFinite(userId) || userId <= 0) return;
+    if (!payload || typeof payload !== 'object') return;
+    if (typeof (payload as any).focused !== 'boolean') return;
+    applyPresenceFocus(socket, userId, (payload as any).focused);
+  });
   socket.on('presence:subscribe', (payload: unknown) => {
     const userIds = normalizePresenceUserIds(payload);
     userIds.forEach((id) => socket.join(`presence:${id}`));
@@ -335,20 +389,13 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (!Number.isFinite(userId) || userId <= 0) return;
-    const prevCount = userSocketCounts.get(userId) || 0;
-    const nextCount = Math.max(0, prevCount - 1);
-    if (nextCount > 0) {
-      userSocketCounts.set(userId, nextCount);
-      return;
+    decrementMapValue(userSocketCounts, userId);
+    const wasFocused = (socket.data as any)?.presenceFocused !== false;
+    if (wasFocused) {
+      const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+      const nextFocusedCount = decrementMapValue(userFocusedSocketCounts, userId);
+      syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
     }
-    userSocketCounts.delete(userId);
-    stopPresenceRefresh(userId);
-    void markUserOffline(userId)
-      .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
-      .catch((err) => {
-        console.warn('[presence] markUserOffline failed', err?.message || err);
-        emitPresenceChanged(userId, false, new Date());
-      });
   });
 });
 
