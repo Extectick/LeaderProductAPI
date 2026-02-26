@@ -314,6 +314,35 @@ describe('Appeals CRM flow (claim/assign/department/status/messages)', () => {
     expect(updated?.toDepartmentId).toBe(otherDepartment.id);
   });
 
+  test('Admin can read appeal and messages outside own department', async () => {
+    await prisma.employeeProfile.update({
+      where: { userId: admin.id },
+      data: { departmentId: otherDepartment.id },
+    });
+
+    try {
+      const appealId = await createAppeal('Admin cross-department read', creatorToken, toDepartment.id);
+
+      const detailRes = await request(app)
+        .get(`/appeals/${appealId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(detailRes.status).toBe(200);
+      expect(detailRes.body?.data?.id).toBe(appealId);
+
+      const messagesRes = await request(app)
+        .get(`/appeals/${appealId}/messages`)
+        .query({ limit: 10 })
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(messagesRes.status).toBe(200);
+      expect(Array.isArray(messagesRes.body?.data?.data)).toBe(true);
+    } finally {
+      await prisma.employeeProfile.update({
+        where: { userId: admin.id },
+        data: { departmentId: toDepartment.id },
+      });
+    }
+  });
+
   test('Messages pagination returns latest page and older page', async () => {
     const appealId = await createAppeal('Messages pagination');
 

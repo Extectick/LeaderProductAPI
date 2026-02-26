@@ -42,6 +42,20 @@ enum AppealMessageType {
   SYSTEM
 }
 
+enum AppealLaborPaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  NOT_REQUIRED
+}
+
+enum AppealFinancialFunnelStatus {
+  NOT_PAYABLE
+  TO_PAY
+  PARTIAL
+  PAID
+}
+
 enum RouteStatus {
   ACTIVE
   COMPLETED
@@ -168,6 +182,7 @@ model EmployeeProfile {
   user      User     @relation(fields: [userId], references: [id])
   departmentId Int?
   department Department? @relation(fields: [departmentId], references: [id])
+  appealLaborHourlyRate Decimal? @db.Decimal(8, 2)
   departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
   avatarUrl String?
   status    ProfileStatus @default(PENDING)
@@ -180,9 +195,12 @@ model EmployeeProfile {
 model Department {
   id    Int     @id @default(autoincrement())
   name  String  @unique
+  appealPaymentRequired Boolean @default(true)
+  appealLaborHourlyRate Decimal @default(1.0) @db.Decimal(8, 2)
   departmentRoles DepartmentRole[]
   employeeProfiles EmployeeProfile[]  // Добавлено обратное отношение
   serviceAccesses ServiceDepartmentAccess[]
+  appealAnalyticsThresholds AppealAnalyticsThreshold[]
 
   // Новые связи с обращениями
   appealsFrom   Appeal[] @relation("AppealsFrom")
@@ -252,6 +270,12 @@ model User {
   appealStatusHistory AppealStatusHistory[]
   deviceTokens      DeviceToken[]
   appealMessageReads AppealMessageRead[]
+  appealLaborEntriesAssignee AppealLaborEntry[] @relation("AppealLaborEntryAssignee")
+  appealLaborEntriesPaidBy AppealLaborEntry[] @relation("AppealLaborEntryPaidBy")
+  appealLaborEntriesCreatedBy AppealLaborEntry[] @relation("AppealLaborEntryCreatedBy")
+  appealLaborEntriesUpdatedBy AppealLaborEntry[] @relation("AppealLaborEntryUpdatedBy")
+  appealLaborAuditAssignee AppealLaborAuditLog[]
+  appealLaborAuditChangedBy AppealLaborAuditLog[] @relation("AppealLaborAuditChangedBy")
   updateEvents      AppUpdateEvent[]
   phoneVerificationSessions PhoneVerificationSession[]
   phoneMigrationReports     UserPhoneMigrationReport[]
@@ -678,6 +702,8 @@ model Appeal {
   watchers         AppealWatcher[]
   messages         AppealMessage[]
   statusHistory    AppealStatusHistory[]
+  laborEntries     AppealLaborEntry[]
+  laborAuditLogs   AppealLaborAuditLog[]
   mutes            AppealMute[]
 }
 
@@ -754,6 +780,67 @@ model AppealMessageRead {
   readAt    DateTime       @default(now())
 
   @@unique([messageId, userId])
+}
+
+model AppealLaborEntry {
+  id             Int                      @id @default(autoincrement())
+  appealId       Int
+  assigneeUserId Int
+  hours          Decimal                  @default(0.0) @db.Decimal(8, 2)
+  paidHours      Decimal                  @default(0.0) @db.Decimal(8, 2)
+  effectiveHourlyRateRub Decimal          @default(0.0) @db.Decimal(8, 2)
+  paymentStatus  AppealLaborPaymentStatus @default(UNPAID)
+  paidAt         DateTime?
+  paidById       Int?
+  createdById    Int
+  updatedById    Int
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  appeal         Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  assignee       User   @relation("AppealLaborEntryAssignee", fields: [assigneeUserId], references: [id], onDelete: Cascade)
+  paidBy         User?  @relation("AppealLaborEntryPaidBy", fields: [paidById], references: [id], onDelete: SetNull)
+  createdBy      User   @relation("AppealLaborEntryCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy      User   @relation("AppealLaborEntryUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+
+  @@unique([appealId, assigneeUserId])
+  @@index([assigneeUserId, paymentStatus])
+  @@index([appealId, paymentStatus])
+}
+
+model AppealLaborAuditLog {
+  id               Int                      @id @default(autoincrement())
+  appealId         Int
+  assigneeUserId   Int
+  changedById      Int
+  oldHours         Decimal?                 @db.Decimal(8, 2)
+  newHours         Decimal                  @db.Decimal(8, 2)
+  oldPaidHours     Decimal?                 @db.Decimal(8, 2)
+  newPaidHours     Decimal?                 @db.Decimal(8, 2)
+  oldPaymentStatus AppealLaborPaymentStatus?
+  newPaymentStatus AppealLaborPaymentStatus
+  changedAt        DateTime                 @default(now())
+
+  appeal           Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  assignee         User   @relation(fields: [assigneeUserId], references: [id], onDelete: Cascade)
+  changedBy        User   @relation("AppealLaborAuditChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([appealId, changedAt])
+  @@index([assigneeUserId, changedAt])
+}
+
+model AppealAnalyticsThreshold {
+  id                   Int      @id @default(autoincrement())
+  departmentId         Int
+  openTooLongHours     Int      @default(24)
+  resolvedTooLongHours Int      @default(24)
+  laborMissingDays     Int      @default(3)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  department           Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId])
 }
 
 model DeviceToken {

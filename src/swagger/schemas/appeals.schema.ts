@@ -27,6 +27,16 @@ const AppealMessageTypeEnum = {
   enum: ['USER', 'SYSTEM'],
 } as const;
 
+const AppealLaborPaymentStatusEnum = {
+  type: 'string',
+  enum: ['UNPAID', 'PARTIAL', 'PAID', 'NOT_REQUIRED'],
+} as const;
+
+const AppealFinancialFunnelStatusEnum = {
+  type: 'string',
+  enum: ['NOT_PAYABLE', 'TO_PAY', 'PARTIAL', 'PAID'],
+} as const;
+
 const DepartmentMini = {
   type: 'object',
   required: ['id', 'name'],
@@ -338,6 +348,41 @@ const AppealCountersData = {
   },
 } as const;
 
+const AppealsSlaDashboardData = {
+  type: 'object',
+  properties: {
+    transitions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string' },
+          count: { type: 'integer' },
+          avgMs: { type: 'number', nullable: true },
+          p50Ms: { type: 'number', nullable: true },
+          p90Ms: { type: 'number', nullable: true },
+        },
+      },
+    },
+  },
+} as const;
+
+const AppealsFunnelData = {
+  type: 'object',
+  properties: {
+    byStatus: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          status: AppealFinancialFunnelStatusEnum,
+          count: { type: 'integer' },
+        },
+      },
+    },
+  },
+} as const;
+
 /**
  * Экспортируем как набор компонентов для swagger.components.schemas
  * Пример использования:
@@ -349,6 +394,8 @@ const appealsSchemas = {
   AppealPriorityEnum,
   AttachmentTypeEnum,
   AppealMessageTypeEnum,
+  AppealLaborPaymentStatusEnum,
+  AppealFinancialFunnelStatusEnum,
   UserMini,
   DepartmentMini,
   AppealAttachment,
@@ -369,6 +416,8 @@ const appealsSchemas = {
   AppealEditMessageData,
   AppealDeleteMessageData,
   AppealCountersData,
+  AppealsSlaDashboardData,
+  AppealsFunnelData,
 } as const;
 
 export default appealsSchemas;

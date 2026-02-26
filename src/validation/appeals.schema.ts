@@ -1,6 +1,6 @@
 // src/validation/appeals.schema.ts
 import { z } from 'zod';
-import { AppealPriority, AppealStatus } from '@prisma/client';
+import { AppealLaborPaymentStatus, AppealPriority, AppealStatus } from '@prisma/client';
 
 /**
  * Общие коэрсеры / препроцессоры
@@ -185,6 +185,193 @@ export const ExportQuerySchema = z.object({
   toDate: zISODateString,
 });
 export type ExportQuery = z.infer<typeof ExportQuerySchema>;
+
+/* ===============================
+ *   /appeals/analytics/* (GET)
+ * =============================== */
+export const AnalyticsAppealsQuerySchema = z.object({
+  fromDate: zISODateString,
+  toDate: zISODateString,
+  departmentId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  assigneeUserId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  status: z.nativeEnum(AppealStatus).optional(),
+  search: zOptionalNonEmptyString,
+  limit: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100))
+    .default(20),
+  offset: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0))
+    .default(0),
+});
+
+export const AnalyticsUsersQuerySchema = z.object({
+  fromDate: zISODateString,
+  toDate: zISODateString,
+  departmentId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+});
+
+export const AnalyticsKpiDashboardQuerySchema = z.object({
+  fromDate: zISODateString,
+  toDate: zISODateString,
+  departmentId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  assigneeUserId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  status: z.nativeEnum(AppealStatus).optional(),
+  search: zOptionalNonEmptyString,
+});
+
+/* ===============================
+ *   /appeals/:id/labor (PUT)
+ * =============================== */
+const LaborHoursSchema = z
+  .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().min(0).max(9999))
+  .refine((hours) => Math.abs(hours * 4 - Math.round(hours * 4)) < 1e-9, {
+    message: 'Часы должны быть с шагом 0.25',
+  });
+
+export const AppealLaborUpsertBodySchema = z.object({
+  items: z
+    .array(
+      z.object({
+        assigneeUserId: zNumberId,
+        accruedHours: LaborHoursSchema.optional(),
+        paidHours: LaborHoursSchema.optional(),
+        hours: LaborHoursSchema.optional(),
+        paymentStatus: z.nativeEnum(AppealLaborPaymentStatus).optional(),
+      }).refine((item) => item.accruedHours != null || item.hours != null, {
+        message: 'Нужно передать accruedHours или hours',
+        path: ['accruedHours'],
+      })
+    )
+    .min(1),
+});
+
+export const UserHourlyRateBodySchema = z.object({
+  hourlyRateRub: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().min(0).max(999999))
+    .refine((value) => Math.round(value * 100) / 100 === value, {
+      message: 'Ставка должна быть не более 2 знаков после запятой',
+    }),
+});
+
+export const AnalyticsCommonQuerySchema = z.object({
+  fromDate: zISODateString,
+  toDate: zISODateString,
+  departmentId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  assigneeUserId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+});
+
+export const LaborAuditQuerySchema = AnalyticsCommonQuerySchema.extend({
+  appealId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  limit: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100))
+    .default(30),
+  offset: z
+    .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(0))
+    .default(0),
+});
+
+export const PaymentQueueMarkPaidBodySchema = z.object({
+  items: z
+    .array(
+      z.object({
+        appealId: zNumberId,
+        assigneeUserId: zNumberId,
+      })
+    )
+    .min(1),
+});
+
+export const ForecastQuerySchema = z.object({
+  departmentId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+  horizon: z.enum(['week', 'month']).default('week'),
+});
+
+export const AnalyticsExportQuerySchema = AnalyticsCommonQuerySchema.extend({
+  format: z.enum(['csv', 'xlsx']).default('csv'),
+  status: z.nativeEnum(AppealStatus).optional(),
+  search: zOptionalNonEmptyString,
+  userId: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (typeof v === 'string') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : v;
+      }
+      return v;
+    }, z.number().int().positive().optional()),
+});
 
 /** Короткое сообщение об ошибке Zod */
 export function zodErrorMessage(e: z.ZodError) {

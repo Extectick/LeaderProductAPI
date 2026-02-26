@@ -7,6 +7,8 @@ const CLOSURE_REMINDER_HOURS = Number(process.env.CLOSURE_REMINDER_HOURS || 24);
 const JOB_POLL_INTERVAL_MS   = Number(process.env.JOB_POLL_INTERVAL_MS   || 60_000);
 
 const JOB_QUEUE_KEY = 'jobs:notifications:scheduled';
+const MANAGER_ALERT_CHECK_MS = Number(process.env.MANAGER_ALERT_CHECK_MS || 10 * 60_000);
+const MANAGER_ALERT_LAST_KEY = 'jobs:notifications:manager-alert:last-run';
 
 type JobType = 'UNREAD_REMINDER' | 'CLOSURE_REMINDER';
 
@@ -96,6 +98,96 @@ async function processDueJobs(): Promise<void> {
       await processJob(job);
     } catch (err: any) {
       console.error('[scheduled-jobs] failed to process job', member, err?.message);
+    }
+  }
+
+  await processManagerAnalyticsAlerts();
+}
+
+async function processManagerAnalyticsAlerts(): Promise<void> {
+  const redis = tryGetRedis();
+  if (redis) {
+    const last = await redis.get(MANAGER_ALERT_LAST_KEY);
+    const now = Date.now();
+    if (last && now - Number(last) < MANAGER_ALERT_CHECK_MS) return;
+    await redis.set(MANAGER_ALERT_LAST_KEY, String(now));
+  }
+
+  const thresholds = await (prisma as any).appealAnalyticsThreshold.findMany({
+    include: { department: { select: { id: true, name: true } } },
+  });
+  for (const t of thresholds) {
+    const managerIds = (
+      await prisma.departmentRole.findMany({
+        where: { departmentId: t.departmentId, role: { name: 'department_manager' } },
+        select: { userId: true },
+      })
+    ).map((x) => x.userId);
+    if (!managerIds.length) continue;
+
+    const openBoundary = new Date(Date.now() - t.openTooLongHours * 3600_000);
+    const resolvedBoundary = new Date(Date.now() - t.resolvedTooLongHours * 3600_000);
+    const laborBoundary = new Date(Date.now() - t.laborMissingDays * 24 * 3600_000);
+
+    const staleOpen = await prisma.appeal.findFirst({
+      where: { toDepartmentId: t.departmentId, status: 'OPEN', createdAt: { lte: openBoundary } },
+      select: { id: true, number: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (staleOpen) {
+      await dispatchNotification({
+        type: 'UNREAD_REMINDER',
+        appealId: staleOpen.id,
+        appealNumber: staleOpen.number,
+        title: `Обращение #${staleOpen.number}`,
+        body: `Долго в OPEN (> ${t.openTooLongHours} ч)`,
+        telegramText: `⚠️ Обращение #${staleOpen.number} долго в OPEN (> ${t.openTooLongHours} ч)`,
+        maxText: `⚠️ Обращение #${staleOpen.number} долго в OPEN (> ${t.openTooLongHours} ч)`,
+        channels: ['telegram', 'max'],
+        recipientUserIds: managerIds,
+      });
+    }
+
+    const staleResolved = await prisma.appeal.findFirst({
+      where: { toDepartmentId: t.departmentId, status: 'RESOLVED' },
+      select: { id: true, number: true, statusHistory: { where: { newStatus: 'RESOLVED' }, orderBy: { changedAt: 'asc' }, take: 1 } },
+    });
+    if (staleResolved?.statusHistory?.[0] && staleResolved.statusHistory[0].changedAt <= resolvedBoundary) {
+      await dispatchNotification({
+        type: 'CLOSURE_REMINDER',
+        appealId: staleResolved.id,
+        appealNumber: staleResolved.number,
+        title: `Обращение #${staleResolved.number}`,
+        body: `Долго без закрытия после RESOLVED (> ${t.resolvedTooLongHours} ч)`,
+        telegramText: `⚠️ Обращение #${staleResolved.number} долго без закрытия после RESOLVED (> ${t.resolvedTooLongHours} ч)`,
+        maxText: `⚠️ Обращение #${staleResolved.number} долго без закрытия после RESOLVED (> ${t.resolvedTooLongHours} ч)`,
+        channels: ['telegram', 'max'],
+        recipientUserIds: managerIds,
+      });
+    }
+
+    const laborMissingAppeal = await prisma.appeal.findFirst({
+      where: {
+        toDepartmentId: t.departmentId,
+        createdAt: { lte: laborBoundary },
+        assignees: { some: {} },
+        laborEntries: { none: {} },
+      },
+      select: { id: true, number: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (laborMissingAppeal) {
+      await dispatchNotification({
+        type: 'NEW_APPEAL',
+        appealId: laborMissingAppeal.id,
+        appealNumber: laborMissingAppeal.number,
+        title: `Обращение #${laborMissingAppeal.number}`,
+        body: `Не проставлены часы более ${t.laborMissingDays} дн.`,
+        telegramText: `⚠️ Для обращения #${laborMissingAppeal.number} не проставлены часы более ${t.laborMissingDays} дн.`,
+        maxText: `⚠️ Для обращения #${laborMissingAppeal.number} не проставлены часы более ${t.laborMissingDays} дн.`,
+        channels: ['telegram', 'max'],
+        recipientUserIds: managerIds,
+      });
     }
   }
 }

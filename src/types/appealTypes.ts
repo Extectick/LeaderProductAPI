@@ -5,6 +5,7 @@ import {
   AppealPriority,
   AttachmentType,
   AppealMessageType,
+  AppealLaborPaymentStatus,
 } from '@prisma/client';
 import { SuccessResponse, ErrorResponse } from '../utils/apiResponse';
 
@@ -216,3 +217,306 @@ export interface AppealExportQuery {
   fromDate?: string; // ISO-строка (gte)
   toDate?: string;   // ISO-строка (lte)
 }
+
+export type AppealsAnalyticsMetaResponse = SuccessResponse<{
+  availableDepartments: Array<{
+    id: number;
+    name: string;
+    paymentRequired: boolean;
+    hourlyRateRub: number;
+  }>;
+  availableAssignees: Array<{
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    department: { id: number; name: string } | null;
+    hourlyRateRub: number | null;
+  }>;
+  role: {
+    isAdmin: boolean;
+    isDepartmentManager: boolean;
+  };
+}> | ErrorResponse;
+
+export type AppealLaborEntryDto = {
+  assigneeUserId: number;
+  accruedHours: number;
+  paidHours: number;
+  remainingHours: number;
+  payable: boolean;
+  hourlyRateRub: number | null;
+  effectiveHourlyRateRub: number;
+  amountAccruedRub: number;
+  amountPaidRub: number;
+  amountRemainingRub: number;
+  // alias for backward compatibility
+  hours: number;
+  paymentStatus: AppealLaborPaymentStatus;
+  paidAt: Date | null;
+  paidBy: {
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  } | null;
+  assignee: {
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  updatedAt: Date;
+};
+
+export type AppealsAnalyticsAppealItem = {
+  id: number;
+  number: number;
+  title: string | null;
+  status: AppealStatus;
+  createdAt: Date;
+  deadline: Date | null;
+  completedAt: Date | null;
+  createdBy: {
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  toDepartment: {
+    id: number;
+    name: string;
+    paymentRequired: boolean;
+    hourlyRateRub: number;
+  };
+  assignees: Array<{
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    hourlyRateRub: number | null;
+    effectiveHourlyRateRub: number;
+  }>;
+  sla: {
+    openDurationMs: number;
+    workDurationMs: number;
+    timeToFirstInProgressMs: number | null;
+    timeToFirstResolvedMs: number | null;
+  };
+  allowedStatuses: AppealStatus[];
+  actionPermissions: {
+    canChangeStatus: boolean;
+    canEditDeadline: boolean;
+    canAssign: boolean;
+    canTransfer: boolean;
+    canOpenParticipants: boolean;
+    canSetLabor: boolean;
+    canClaim: boolean;
+  };
+  laborEntries: AppealLaborEntryDto[];
+};
+
+export type AppealsAnalyticsAppealsResponse = SuccessResponse<{
+  data: AppealsAnalyticsAppealItem[];
+  meta: {
+    total: number;
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  };
+}> | ErrorResponse;
+
+export type AppealsAnalyticsUsersSummaryItem = {
+  user: {
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    avatarUrl: string | null;
+    department: { id: number; name: string } | null;
+    hourlyRateRub: number | null;
+    effectiveHourlyRateRub: number;
+  };
+  stats: {
+    appealsCount: number;
+    paidAppealsCount: number;
+    unpaidAppealsCount: number;
+    partialAppealsCount: number;
+    notRequiredAppealsCount: number;
+    accruedHours: number;
+    paidHours: number;
+    remainingHours: number;
+    accruedAmountRub: number;
+    paidAmountRub: number;
+    remainingAmountRub: number;
+  };
+};
+
+export type AppealsAnalyticsUsersResponse = SuccessResponse<{
+  data: AppealsAnalyticsUsersSummaryItem[];
+}> | ErrorResponse;
+
+export type AppealsAnalyticsUserAppealsResponse = SuccessResponse<{
+  user: {
+    id: number;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    avatarUrl: string | null;
+    department: { id: number; name: string } | null;
+  };
+  data: AppealsAnalyticsAppealItem[];
+}> | ErrorResponse;
+
+export interface AppealLaborUpsertRequestItem {
+  assigneeUserId: number;
+  accruedHours?: number;
+  paidHours?: number;
+  hours?: number;
+  paymentStatus?: AppealLaborPaymentStatus;
+}
+
+export interface AppealLaborUpsertRequest {
+  items: AppealLaborUpsertRequestItem[];
+}
+
+export type AppealLaborUpsertResponse = SuccessResponse<{
+  appealId: number;
+  paymentRequired: boolean;
+  currency: 'RUB';
+  laborEntries: AppealLaborEntryDto[];
+}> | ErrorResponse;
+
+export type AppealsKpiDashboardResponse = SuccessResponse<{
+  appeals: {
+    totalCount: number;
+    openCount: number;
+    inProgressCount: number;
+    completedCount: number;
+    resolvedCount: number;
+    declinedCount: number;
+  };
+  timing: {
+    avgTakeMs: number | null;
+    avgExecutionMs: number | null;
+    takeCount: number;
+    executionCount: number;
+  };
+  labor: {
+    totalAccruedHours: number;
+    totalPaidHours: number;
+    totalRemainingHours: number;
+    totalNotRequiredHours: number;
+    totalAccruedAmountRub: number;
+    totalPaidAmountRub: number;
+    totalRemainingAmountRub: number;
+    currency: 'RUB';
+  };
+}> | ErrorResponse;
+
+export type AppealsAnalyticsUpdateHourlyRateResponse = SuccessResponse<{
+  userId: number;
+  hourlyRateRub: number;
+}> | ErrorResponse;
+
+export type AppealsSlaDashboardResponse = SuccessResponse<{
+  transitions: Array<{
+    key: 'OPEN_TO_IN_PROGRESS' | 'IN_PROGRESS_TO_RESOLVED' | 'RESOLVED_TO_COMPLETED';
+    count: number;
+    avgMs: number | null;
+    p50Ms: number | null;
+    p90Ms: number | null;
+  }>;
+}> | ErrorResponse;
+
+export type AppealsPaymentQueueResponse = SuccessResponse<{
+  data: Array<{
+    assignee: {
+      id: number;
+      email: string | null;
+      firstName: string | null;
+      lastName: string | null;
+      department: { id: number; name: string } | null;
+    };
+    departments: Array<{
+      id: number;
+      name: string;
+      items: Array<{
+        appealId: number;
+        appealNumber: number;
+        hours: number;
+        paymentStatus: AppealLaborPaymentStatus;
+        financialStatus: 'NOT_PAYABLE' | 'TO_PAY' | 'PARTIAL' | 'PAID';
+      }>;
+      totalHours: number;
+    }>;
+    totalHours: number;
+  }>;
+  meta: { totalItems: number };
+}> | ErrorResponse;
+
+export type AppealsPaymentQueueMarkPaidResponse = SuccessResponse<{
+  updated: number;
+}> | ErrorResponse;
+
+export type AppealLaborAuditLogResponse = SuccessResponse<{
+  data: Array<{
+    id: number;
+    appealId: number;
+    assigneeUserId: number;
+    changedBy: {
+      id: number;
+      email: string | null;
+      firstName: string | null;
+      lastName: string | null;
+    };
+    oldHours: number | null;
+    newHours: number;
+    oldPaidHours: number | null;
+    newPaidHours: number | null;
+    oldPaymentStatus: AppealLaborPaymentStatus | null;
+    newPaymentStatus: AppealLaborPaymentStatus;
+    changedAt: Date;
+  }>;
+  meta: {
+    total: number;
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  };
+}> | ErrorResponse;
+
+export type AppealsFunnelResponse = SuccessResponse<{
+  byStatus: Array<{ status: 'NOT_PAYABLE' | 'TO_PAY' | 'PARTIAL' | 'PAID'; count: number }>;
+}> | ErrorResponse;
+
+export type AppealsHeatmapResponse = SuccessResponse<{
+  data: Array<{
+    user: {
+      id: number;
+      email: string | null;
+      firstName: string | null;
+      lastName: string | null;
+      department: { id: number; name: string } | null;
+    };
+    cells: Array<{
+      date: string;
+      totalHours: number;
+      appealsCount: number;
+    }>;
+  }>;
+}> | ErrorResponse;
+
+export type AppealsForecastResponse = SuccessResponse<{
+  horizon: 'week' | 'month';
+  generatedAt: Date;
+  lookbackDays: number;
+  remainingDays: number;
+  departments: Array<{
+    id: number;
+    name: string;
+    expectedHours: number;
+    expectedPayout: number;
+    formula: string;
+  }>;
+}> | ErrorResponse;

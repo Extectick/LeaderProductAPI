@@ -3,12 +3,14 @@ import express from 'express';
 
 import multer from 'multer';
 import { Parser } from 'json2csv';
+const XLSX: any = require('xlsx');
 import {
   Prisma,
   AppealStatus,
   AppealPriority,
   AttachmentType,
   AppealMessageType,
+  AppealLaborPaymentStatus,
 } from '@prisma/client';
 import prisma from '../prisma/client';
 import { z } from 'zod';
@@ -42,6 +44,20 @@ import {
   AppealEditMessageResponse,
   AppealClaimResponse,
   AppealDepartmentChangeResponse,
+  AppealsAnalyticsMetaResponse,
+  AppealsAnalyticsAppealsResponse,
+  AppealsAnalyticsUsersResponse,
+  AppealsAnalyticsUserAppealsResponse,
+  AppealLaborUpsertResponse,
+  AppealsSlaDashboardResponse,
+  AppealsKpiDashboardResponse,
+  AppealsPaymentQueueResponse,
+  AppealsPaymentQueueMarkPaidResponse,
+  AppealLaborAuditLogResponse,
+  AppealsFunnelResponse,
+  AppealsHeatmapResponse,
+  AppealsForecastResponse,
+  AppealsAnalyticsUpdateHourlyRateResponse,
 } from '../types/appealTypes';
 
 import { Server as SocketIOServer } from 'socket.io';
@@ -63,6 +79,16 @@ import {
   WatchersBodySchema,
   EditMessageBodySchema,
   ExportQuerySchema,
+  AnalyticsAppealsQuerySchema,
+  AnalyticsUsersQuerySchema,
+  AnalyticsKpiDashboardQuerySchema,
+  AppealLaborUpsertBodySchema,
+  AnalyticsCommonQuerySchema,
+  LaborAuditQuerySchema,
+  PaymentQueueMarkPaidBodySchema,
+  ForecastQuerySchema,
+  AnalyticsExportQuerySchema,
+  UserHourlyRateBodySchema,
 } from '../validation/appeals.schema';
 
 // === импорт облачного хранилища (MinIO / S3-совместимое) ===
@@ -146,7 +172,8 @@ function getUserDisplayName(user: UserMiniRaw | null) {
 }
 
 function isAdminRole(user: UserMiniRaw | null) {
-  return user?.role?.name === 'admin';
+  const roleName = String(user?.role?.name || '').toLowerCase();
+  return roleName === 'admin' || roleName === 'administrator';
 }
 
 function isDepartmentManager(user: UserMiniRaw | null, departmentId?: number | null) {
@@ -183,6 +210,420 @@ async function mapUserMini(user: UserMiniRaw | null) {
     isAdmin: isAdminRole(user),
     isDepartmentManager: isDepartmentManager(user),
   };
+}
+
+function toRoleFlags(user: UserMiniRaw | null) {
+  return {
+    isAdmin: isAdminRole(user),
+    isDepartmentManager: isDepartmentManager(user),
+  };
+}
+
+async function getManagedDepartmentIds(user: UserMiniRaw | null) {
+  if (!user) return [];
+  if (isAdminRole(user)) {
+    const all = await prisma.department.findMany({ select: { id: true } });
+    return all.map((d) => d.id);
+  }
+  const managed = new Set<number>();
+  for (const dr of user.departmentRoles || []) {
+    if (dr.role?.name === 'department_manager') managed.add(dr.departmentId);
+  }
+  if (managed.size === 0 && user.role?.name === 'department_manager' && user.employeeProfile?.department?.id) {
+    managed.add(user.employeeProfile.department.id);
+  }
+  return Array.from(managed);
+}
+
+type SlaMetrics = {
+  openDurationMs: number;
+  workDurationMs: number;
+  timeToFirstInProgressMs: number | null;
+  timeToFirstResolvedMs: number | null;
+};
+
+function calculateAppealSla(
+  appealCreatedAt: Date,
+  currentStatus: AppealStatus,
+  history: Array<{ oldStatus: AppealStatus; newStatus: AppealStatus; changedAt: Date }>,
+  now: Date
+): SlaMetrics {
+  const sorted = [...history].sort((a, b) => a.changedAt.getTime() - b.changedAt.getTime());
+  const points: Array<{ status: AppealStatus; start: Date; end: Date }> = [];
+
+  let cursorStatus: AppealStatus = AppealStatus.OPEN;
+  let cursorStart = appealCreatedAt;
+  for (const h of sorted) {
+    points.push({ status: cursorStatus, start: cursorStart, end: h.changedAt });
+    cursorStatus = h.newStatus;
+    cursorStart = h.changedAt;
+  }
+  points.push({ status: cursorStatus ?? currentStatus, start: cursorStart, end: now });
+
+  const sumByStatus = (status: AppealStatus) =>
+    points
+      .filter((p) => p.status === status)
+      .reduce((acc, p) => acc + Math.max(0, p.end.getTime() - p.start.getTime()), 0);
+
+  const firstInProgress = sorted.find((h) => h.newStatus === AppealStatus.IN_PROGRESS);
+  const firstResolved = sorted.find((h) => h.newStatus === AppealStatus.RESOLVED);
+
+  return {
+    openDurationMs: sumByStatus(AppealStatus.OPEN),
+    workDurationMs: sumByStatus(AppealStatus.IN_PROGRESS),
+    timeToFirstInProgressMs: firstInProgress
+      ? Math.max(0, firstInProgress.changedAt.getTime() - appealCreatedAt.getTime())
+      : null,
+    timeToFirstResolvedMs: firstResolved
+      ? Math.max(0, firstResolved.changedAt.getTime() - appealCreatedAt.getTime())
+      : null,
+  };
+}
+
+function percentile(values: number[], p: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx] ?? null;
+}
+
+function avg(values: number[]): number | null {
+  if (!values.length) return null;
+  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+}
+
+function toIsoDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function round2(value: number): number {
+  return Number(Number.isFinite(value) ? value.toFixed(2) : '0');
+}
+
+function normalizeHourValue(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, round2(value));
+}
+
+function resolveEffectiveHourlyRate(params: {
+  departmentPaymentRequired: boolean;
+  departmentHourlyRate: number;
+  assigneeHourlyRate?: number | null;
+}): number {
+  if (!params.departmentPaymentRequired) return 0;
+  const candidate =
+    params.assigneeHourlyRate == null
+      ? params.departmentHourlyRate
+      : Number(params.assigneeHourlyRate);
+  if (!Number.isFinite(candidate) || candidate <= 0) return 0;
+  return round2(candidate);
+}
+
+function deriveLaborPaymentStatus(params: {
+  payable: boolean;
+  accruedHours: number;
+  paidHours: number;
+}): AppealLaborPaymentStatus {
+  const accrued = normalizeHourValue(params.accruedHours);
+  const paid = normalizeHourValue(params.paidHours);
+  if (!params.payable) return AppealLaborPaymentStatus.NOT_REQUIRED;
+  if (accrued <= 0 || paid <= 0) return AppealLaborPaymentStatus.UNPAID;
+  if (paid < accrued) return AppealLaborPaymentStatus.PARTIAL;
+  return AppealLaborPaymentStatus.PAID;
+}
+
+function resolveLegacyPaidHours(params: {
+  accruedHours: number;
+  paymentStatus?: AppealLaborPaymentStatus;
+  previousPaidHours?: number | null;
+}): number {
+  const accrued = normalizeHourValue(params.accruedHours);
+  if (params.paymentStatus === AppealLaborPaymentStatus.PAID) return accrued;
+  if (params.paymentStatus === AppealLaborPaymentStatus.UNPAID) return 0;
+  if (params.paymentStatus === AppealLaborPaymentStatus.NOT_REQUIRED) return 0;
+  if (params.paymentStatus === AppealLaborPaymentStatus.PARTIAL) {
+    const prev = normalizeHourValue(Number(params.previousPaidHours || 0));
+    return Math.min(prev, accrued);
+  }
+  const fallback = normalizeHourValue(Number(params.previousPaidHours || 0));
+  return Math.min(fallback, accrued);
+}
+
+function mapLaborEntryDto(entry: any, params: {
+  departmentPaymentRequired: boolean;
+  departmentHourlyRate: number;
+}) {
+  const accruedHours = normalizeHourValue(Number(entry.hours || 0));
+  const rawPaidHours = normalizeHourValue(Number(entry.paidHours ?? 0));
+  const assigneeHourlyRate = entry.assignee?.employeeProfile?.appealLaborHourlyRate == null
+    ? null
+    : Number(entry.assignee.employeeProfile.appealLaborHourlyRate);
+  const snapshotRateRaw = Number(entry.effectiveHourlyRateRub);
+  const hasSnapshotRate = Number.isFinite(snapshotRateRaw);
+  const effectiveHourlyRateRub = hasSnapshotRate
+    ? Math.max(0, round2(snapshotRateRaw))
+    : resolveEffectiveHourlyRate({
+        departmentPaymentRequired: params.departmentPaymentRequired,
+        departmentHourlyRate: params.departmentHourlyRate,
+        assigneeHourlyRate,
+      });
+  const payable = effectiveHourlyRateRub > 0;
+  const paidHours = payable ? Math.min(rawPaidHours, accruedHours) : 0;
+  const remainingHours = Math.max(0, round2(accruedHours - paidHours));
+  const paymentStatus = deriveLaborPaymentStatus({
+    payable,
+    accruedHours,
+    paidHours,
+  });
+  return {
+    assigneeUserId: entry.assigneeUserId,
+    accruedHours,
+    paidHours,
+    remainingHours,
+    payable,
+    hourlyRateRub: assigneeHourlyRate == null ? null : round2(assigneeHourlyRate),
+    effectiveHourlyRateRub,
+    amountAccruedRub: round2(accruedHours * effectiveHourlyRateRub),
+    amountPaidRub: round2(paidHours * effectiveHourlyRateRub),
+    amountRemainingRub: round2(remainingHours * effectiveHourlyRateRub),
+    hours: accruedHours,
+    paymentStatus,
+    paidAt: paymentStatus === AppealLaborPaymentStatus.PAID ? entry.paidAt : null,
+    paidBy:
+      paymentStatus === AppealLaborPaymentStatus.PAID && entry.paidBy
+        ? {
+            id: entry.paidBy.id,
+            email: entry.paidBy.email,
+            firstName: entry.paidBy.firstName,
+            lastName: entry.paidBy.lastName,
+          }
+        : null,
+    assignee: {
+      id: entry.assignee.id,
+      email: entry.assignee.email,
+      firstName: entry.assignee.firstName,
+      lastName: entry.assignee.lastName,
+    },
+    updatedAt: entry.updatedAt,
+  };
+}
+
+function resolveFinancialFunnelStatus(paymentRequired: boolean, statuses: AppealLaborPaymentStatus[]) {
+  if (!paymentRequired || statuses.every((s) => s === AppealLaborPaymentStatus.NOT_REQUIRED)) {
+    return 'NOT_PAYABLE' as const;
+  }
+  const paidCount = statuses.filter((s) => s === AppealLaborPaymentStatus.PAID).length;
+  const partialCount = statuses.filter((s) => s === AppealLaborPaymentStatus.PARTIAL).length;
+  const unpaidCount = statuses.filter((s) => s === AppealLaborPaymentStatus.UNPAID).length;
+  if (partialCount > 0) return 'PARTIAL' as const;
+  if (paidCount > 0 && unpaidCount === 0) return 'PAID' as const;
+  if (paidCount > 0 && unpaidCount > 0) return 'PARTIAL' as const;
+  return 'TO_PAY' as const;
+}
+
+function resolveStatusMatchesFromSearch(search: string): AppealStatus[] {
+  const normalized = String(search || '').trim().toLowerCase();
+  if (!normalized) return [];
+  return (Object.entries(STATUS_LABELS) as Array<[AppealStatus, string]>)
+    .filter(([code, label]) => code.toLowerCase().includes(normalized) || label.toLowerCase().includes(normalized))
+    .map(([code]) => code);
+}
+
+function buildAnalyticsAppealsWhere(params: {
+  roleFlags: { isAdmin: boolean; isDepartmentManager: boolean };
+  managedDepartmentIds: number[];
+  departmentId?: number;
+  fromDate?: string;
+  toDate?: string;
+  assigneeUserId?: number;
+  status?: AppealStatus;
+  search?: string;
+}): Prisma.AppealWhereInput {
+  const {
+    roleFlags,
+    managedDepartmentIds,
+    departmentId,
+    fromDate,
+    toDate,
+    assigneeUserId,
+    status,
+    search,
+  } = params;
+  const where: Prisma.AppealWhereInput = {
+    toDepartmentId: roleFlags.isAdmin
+      ? (departmentId ? departmentId : undefined)
+      : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+  };
+
+  if (status) where.status = status;
+  if (assigneeUserId) {
+    where.assignees = { some: { userId: assigneeUserId } };
+  }
+  if (fromDate || toDate) {
+    where.createdAt = {};
+    if (fromDate) where.createdAt.gte = new Date(fromDate);
+    if (toDate) where.createdAt.lte = new Date(toDate);
+  }
+  if (search) {
+    const searchNumber = Number(search);
+    const statusMatches = resolveStatusMatchesFromSearch(search);
+    where.OR = [
+      { title: { contains: search, mode: 'insensitive' } },
+      { toDepartment: { name: { contains: search, mode: 'insensitive' } } },
+      {
+        assignees: {
+          some: {
+            user: {
+              OR: [
+                { firstName: { contains: search, mode: 'insensitive' } },
+                { lastName: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      },
+      ...((Number.isInteger(searchNumber) && searchNumber > 0) ? [{ number: searchNumber }] : []),
+      ...(statusMatches.length ? [{ status: { in: statusMatches } }] : []),
+    ];
+  }
+  return where;
+}
+
+function computeAnalyticsAllowedStatuses(params: {
+  currentStatus: AppealStatus;
+  isAdmin: boolean;
+  isManager: boolean;
+  isCreator: boolean;
+  isAssignee: boolean;
+}): AppealStatus[] {
+  const { currentStatus, isAdmin, isManager, isCreator, isAssignee } = params;
+  const set = new Set<AppealStatus>();
+  if (isAdmin || isManager) {
+    set.add(AppealStatus.OPEN);
+    set.add(AppealStatus.IN_PROGRESS);
+    set.add(AppealStatus.RESOLVED);
+    set.add(AppealStatus.COMPLETED);
+    set.add(AppealStatus.DECLINED);
+  }
+  if (isCreator) {
+    set.add(AppealStatus.COMPLETED);
+    if (currentStatus === AppealStatus.RESOLVED) {
+      set.add(AppealStatus.IN_PROGRESS);
+    }
+  }
+  if (isAssignee) {
+    set.add(AppealStatus.RESOLVED);
+  }
+  return Array.from(set);
+}
+
+function formatHoursByMsForExport(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || Number.isNaN(ms)) return '-';
+  return `${(ms / 3600000).toFixed(2)} ч`;
+}
+
+function formatHoursValueForExport(value: number | null | undefined, withUnit = true): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
+  const normalized = Number(value.toFixed(2));
+  return withUnit ? `${normalized} ч` : `${normalized}`;
+}
+
+function formatRubForExport(value: number | null | undefined): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
+  const normalized = Number(value.toFixed(2));
+  return `${normalized.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+}
+
+function appealStatusLabelForExport(status: AppealStatus): string {
+  if (status === AppealStatus.OPEN) return 'Открыто';
+  if (status === AppealStatus.IN_PROGRESS) return 'В работе';
+  if (status === AppealStatus.RESOLVED) return 'Ожидание подтверждения';
+  if (status === AppealStatus.COMPLETED) return 'Завершено';
+  return 'Отклонено';
+}
+
+function exportPersonName(user: {
+  firstName?: string | null;
+  lastName?: string | null;
+  email?: string | null;
+  id?: number | null;
+}) {
+  const full = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  if (user.email) return user.email;
+  return `Пользователь #${user.id || '-'}`;
+}
+
+function formatAnalyticsDeadlineForExport(params: {
+  status: AppealStatus;
+  deadline: Date | null;
+  completedAt: Date | null;
+  now: Date;
+}) {
+  const { status, deadline, completedAt, now } = params;
+  if (!deadline || !Number.isFinite(deadline.getTime())) return '—';
+  const deadlineText = deadline.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  if (status === AppealStatus.DECLINED) return deadlineText;
+  if (status === AppealStatus.COMPLETED) {
+    if (completedAt && Number.isFinite(completedAt.getTime())) {
+      return completedAt.getTime() > deadline.getTime()
+        ? `${deadlineText} (Просрочено)`
+        : `${deadlineText} (Завершено в срок)`;
+    }
+    return `${deadlineText} (В срок)`;
+  }
+  if (status === AppealStatus.OPEN || status === AppealStatus.IN_PROGRESS || status === AppealStatus.RESOLVED) {
+    const diffMs = deadline.getTime() - now.getTime();
+    if (diffMs < 0) return `${deadlineText} (Просрочено)`;
+    if (diffMs < 24 * 60 * 60 * 1000) return `${deadlineText} (Меньше суток)`;
+    return `${deadlineText} (В срок)`;
+  }
+  return `${deadlineText} (В срок)`;
+}
+
+function formatLaborSummaryForExport(params: {
+  assignees: Array<{ id: number; firstName?: string | null; lastName?: string | null; email?: string | null; effectiveHourlyRateRub: number }>;
+  laborEntries: Array<{
+    assigneeUserId: number;
+    accruedHours: number;
+    paidHours: number;
+    remainingHours: number;
+    payable: boolean;
+    effectiveHourlyRateRub: number;
+  }>;
+}) {
+  const rows = (params.assignees || []).map((assignee) => {
+    const labor = (params.laborEntries || []).find((entry) => entry.assigneeUserId === assignee.id);
+    const accruedHours = labor?.accruedHours ?? 0;
+    const paidHours = labor?.paidHours ?? 0;
+    const remainingHours = labor?.remainingHours ?? Math.max(0, accruedHours - paidHours);
+    const rate = labor?.effectiveHourlyRateRub ?? assignee.effectiveHourlyRateRub ?? 0;
+    if (!labor?.payable) {
+      return `${exportPersonName(assignee)} — ${formatHoursValueForExport(accruedHours)} • Не требуется`;
+    }
+    return `${exportPersonName(assignee)} — начисл. ${formatHoursValueForExport(accruedHours, false)}, выпл. ${formatHoursValueForExport(paidHours, false)}, остаток ${formatHoursValueForExport(remainingHours)} • ${formatRubForExport(rate)}/ч`;
+  });
+  return rows.length ? rows.join('; ') : 'Исполнители не назначены';
+}
+
+function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], footerRow?: Record<string, any>) {
+  if (!XLSX?.utils) {
+    throw new Error('xlsx package is not available');
+  }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  if (footerRow) {
+    XLSX.utils.sheet_add_json(ws, [footerRow], { skipHeader: true, origin: -1 });
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
 const router = express.Router();
@@ -941,6 +1382,1946 @@ router.get(
   }
 );
 
+router.get(
+  '/analytics/meta',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsAnalyticsMetaResponse>, res: express.Response) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!user) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const departments = await prisma.department.findMany({
+        where: roleFlags.isAdmin ? undefined : { id: { in: managedDepartmentIds.length ? managedDepartmentIds : [-1] } },
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true, appealPaymentRequired: true, appealLaborHourlyRate: true },
+      });
+      const availableAssigneesRaw = await prisma.user.findMany({
+        where: {
+          employeeProfile: roleFlags.isAdmin
+            ? { isNot: null }
+            : { departmentId: { in: managedDepartmentIds.length ? managedDepartmentIds : [-1] } },
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          employeeProfile: { select: { appealLaborHourlyRate: true, department: { select: { id: true, name: true } } } },
+        },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { email: 'asc' }],
+      });
+
+      return res.json(
+        successResponse(
+          {
+            availableDepartments: departments.map((d) => ({
+              id: d.id,
+              name: d.name,
+              paymentRequired: d.appealPaymentRequired,
+              hourlyRateRub: round2(Number(d.appealLaborHourlyRate || 0)),
+            })),
+            availableAssignees: availableAssigneesRaw.map((u) => ({
+              id: u.id,
+              email: u.email,
+              firstName: u.firstName,
+              lastName: u.lastName,
+              department: u.employeeProfile?.department ?? null,
+              hourlyRateRub: round2(Number(u.employeeProfile?.appealLaborHourlyRate || 0)),
+            })),
+            role: roleFlags,
+          },
+          'Метаданные аналитики загружены'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/meta:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки метаданных', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/appeals',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsAnalyticsAppealsResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsAppealsQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!user) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, assigneeUserId, status, search, limit, offset } = parsed.data;
+
+      if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
+        return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
+      }
+
+      const where = buildAnalyticsAppealsWhere({
+        roleFlags,
+        managedDepartmentIds,
+        departmentId,
+        fromDate,
+        toDate,
+        assigneeUserId,
+        status,
+        search,
+      });
+
+      const [total, appeals] = await prisma.$transaction([
+        prisma.appeal.count({ where }),
+        prisma.appeal.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip: offset,
+          take: limit,
+          include: {
+            toDepartment: { select: { id: true, name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+            createdBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+            assignees: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    email: true,
+                    firstName: true,
+                    lastName: true,
+                    employeeProfile: { select: { appealLaborHourlyRate: true } },
+                  },
+                },
+              },
+            },
+            statusHistory: { select: { oldStatus: true, newStatus: true, changedAt: true }, orderBy: { changedAt: 'asc' } },
+            laborEntries: {
+              include: {
+                assignee: {
+                  select: {
+                    id: true,
+                    email: true,
+                    firstName: true,
+                    lastName: true,
+                    employeeProfile: { select: { appealLaborHourlyRate: true } },
+                  },
+                },
+                paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+              },
+              orderBy: { assigneeUserId: 'asc' },
+            },
+          },
+        }),
+      ]);
+
+      const now = new Date();
+      const actorUserId = Number((user as UserMiniRaw).id);
+      const actorDepartmentId = Number((user as UserMiniRaw).employeeProfile?.department?.id || 0);
+      const data = appeals.map((appeal) => {
+        const completedAt = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.COMPLETED)?.changedAt ?? null;
+        const sla = calculateAppealSla(
+          appeal.createdAt,
+          appeal.status,
+          appeal.statusHistory.map((h) => ({ oldStatus: h.oldStatus, newStatus: h.newStatus, changedAt: h.changedAt })),
+          now
+        );
+        const isCreator = appeal.createdById === actorUserId;
+        const isAssignee = (appeal.assignees || []).some((a) => a.user.id === actorUserId);
+        const isManager = isDepartmentManager(user as UserMiniRaw, appeal.toDepartmentId);
+        const isClosed = appeal.status === AppealStatus.COMPLETED || appeal.status === AppealStatus.DECLINED;
+        const isDeptMember = actorDepartmentId > 0 && actorDepartmentId === appeal.toDepartmentId;
+        const allowedStatuses = computeAnalyticsAllowedStatuses({
+          currentStatus: appeal.status,
+          isAdmin: roleFlags.isAdmin,
+          isManager,
+          isCreator,
+          isAssignee,
+        });
+        const canClaim = !isClosed && !isCreator && !isAssignee && isDeptMember;
+
+        return {
+          id: appeal.id,
+          number: appeal.number,
+          title: appeal.title ?? null,
+          status: appeal.status,
+          createdAt: appeal.createdAt,
+          deadline: appeal.deadline ?? null,
+          completedAt,
+          createdBy: {
+            id: appeal.createdBy.id,
+            email: appeal.createdBy.email,
+            firstName: appeal.createdBy.firstName,
+            lastName: appeal.createdBy.lastName,
+          },
+          toDepartment: {
+            id: appeal.toDepartment.id,
+            name: appeal.toDepartment.name,
+            paymentRequired: appeal.toDepartment.appealPaymentRequired,
+            hourlyRateRub: round2(Number(appeal.toDepartment.appealLaborHourlyRate || 0)),
+          },
+          assignees: (appeal.assignees || []).map((a) => ({
+            id: a.user.id,
+            email: a.user.email,
+            firstName: a.user.firstName,
+            lastName: a.user.lastName,
+            hourlyRateRub: round2(Number(a.user.employeeProfile?.appealLaborHourlyRate || 0)),
+            effectiveHourlyRateRub: resolveEffectiveHourlyRate({
+              departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+              departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+              assigneeHourlyRate:
+                a.user.employeeProfile?.appealLaborHourlyRate == null
+                  ? null
+                  : Number(a.user.employeeProfile.appealLaborHourlyRate),
+            }),
+          })),
+          sla,
+          allowedStatuses,
+          actionPermissions: {
+            canChangeStatus: allowedStatuses.length > 0,
+            canEditDeadline: roleFlags.isAdmin || isCreator,
+            canAssign: roleFlags.isAdmin || isManager,
+            canTransfer: roleFlags.isAdmin || isManager,
+            canOpenParticipants: true,
+            canSetLabor: roleFlags.isAdmin || isManager,
+            canClaim,
+          },
+          laborEntries: (appeal.laborEntries || []).map((entry) =>
+            mapLaborEntryDto(entry, {
+              departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+              departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+            })
+          ),
+        };
+      });
+
+      return res.json(
+        successResponse(
+          {
+            data,
+            meta: {
+              total,
+              limit,
+              offset,
+              hasMore: offset + data.length < total,
+            },
+          },
+          'Аналитика обращений загружена'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/appeals:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки аналитики обращений', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/users',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsAnalyticsUsersResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsUsersQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!user) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId } = parsed.data;
+      if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
+        return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
+      }
+
+      const accessibleDepartmentIds = roleFlags.isAdmin
+        ? (departmentId ? [departmentId] : undefined)
+        : (departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1]);
+
+      const appeals = await prisma.appeal.findMany({
+        where: {
+          toDepartmentId: roleFlags.isAdmin
+            ? (departmentId ? departmentId : undefined)
+            : { in: accessibleDepartmentIds },
+          ...(fromDate || toDate
+            ? {
+                createdAt: {
+                  ...(fromDate ? { gte: new Date(fromDate) } : {}),
+                  ...(toDate ? { lte: new Date(toDate) } : {}),
+                },
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          toDepartment: { select: { id: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+        },
+      });
+      const appealIds = appeals.map((a) => a.id);
+
+      const usersRaw = await prisma.user.findMany({
+        where: {
+          employeeProfile: roleFlags.isAdmin
+            ? (departmentId ? { departmentId } : { isNot: null })
+            : { departmentId: { in: accessibleDepartmentIds } },
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          avatarUrl: true,
+          employeeProfile: {
+            select: {
+              appealLaborHourlyRate: true,
+              department: {
+                select: {
+                  id: true,
+                  name: true,
+                  appealPaymentRequired: true,
+                  appealLaborHourlyRate: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { email: 'asc' }],
+      });
+
+      const grouped = new Map<
+        number,
+        {
+          appealIds: Set<number>;
+          paidAppeals: Set<number>;
+          unpaidAppeals: Set<number>;
+          partialAppeals: Set<number>;
+          notRequiredAppeals: Set<number>;
+          accruedHours: number;
+          paidHours: number;
+          remainingHours: number;
+          accruedAmountRub: number;
+          paidAmountRub: number;
+          remainingAmountRub: number;
+        }
+      >();
+
+      if (appealIds.length > 0) {
+        const laborEntries = await prisma.appealLaborEntry.findMany({
+          where: { appealId: { in: appealIds } },
+          include: {
+            assignee: {
+              select: {
+                id: true,
+                email: true,
+                firstName: true,
+                lastName: true,
+                employeeProfile: { select: { appealLaborHourlyRate: true } },
+              },
+            },
+            paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+            appeal: { select: { toDepartment: { select: { id: true, appealPaymentRequired: true, appealLaborHourlyRate: true } } } },
+          },
+        });
+
+        for (const entry of laborEntries) {
+          if (!grouped.has(entry.assigneeUserId)) {
+            grouped.set(entry.assigneeUserId, {
+              appealIds: new Set<number>(),
+              paidAppeals: new Set<number>(),
+              unpaidAppeals: new Set<number>(),
+              partialAppeals: new Set<number>(),
+              notRequiredAppeals: new Set<number>(),
+              accruedHours: 0,
+              paidHours: 0,
+              remainingHours: 0,
+              accruedAmountRub: 0,
+              paidAmountRub: 0,
+              remainingAmountRub: 0,
+            });
+          }
+          const row = grouped.get(entry.assigneeUserId)!;
+          const dto = mapLaborEntryDto(entry, {
+            departmentPaymentRequired: entry.appeal.toDepartment.appealPaymentRequired,
+            departmentHourlyRate: Number(entry.appeal.toDepartment.appealLaborHourlyRate || 0),
+          });
+          row.appealIds.add(entry.appealId);
+          if (dto.paymentStatus === AppealLaborPaymentStatus.PAID) row.paidAppeals.add(entry.appealId);
+          if (dto.paymentStatus === AppealLaborPaymentStatus.UNPAID) row.unpaidAppeals.add(entry.appealId);
+          if (dto.paymentStatus === AppealLaborPaymentStatus.PARTIAL) row.partialAppeals.add(entry.appealId);
+          if (dto.paymentStatus === AppealLaborPaymentStatus.NOT_REQUIRED) row.notRequiredAppeals.add(entry.appealId);
+          if (dto.payable) {
+            row.accruedHours += dto.accruedHours;
+            row.paidHours += dto.paidHours;
+            row.remainingHours += dto.remainingHours;
+          }
+          row.accruedAmountRub += dto.amountAccruedRub;
+          row.paidAmountRub += dto.amountPaidRub;
+          row.remainingAmountRub += dto.amountRemainingRub;
+        }
+      }
+
+      const data = usersRaw
+        .map((u) => {
+          const stats = grouped.get(u.id);
+          const userHourlyRate = round2(Number(u.employeeProfile?.appealLaborHourlyRate || 0));
+          const effectiveHourlyRate = resolveEffectiveHourlyRate({
+            departmentPaymentRequired: Boolean(u.employeeProfile?.department?.appealPaymentRequired),
+            departmentHourlyRate: Number(u.employeeProfile?.department?.appealLaborHourlyRate || 0),
+            assigneeHourlyRate: u.employeeProfile?.appealLaborHourlyRate == null
+              ? null
+              : Number(u.employeeProfile.appealLaborHourlyRate),
+          });
+          return {
+            user: {
+              id: u.id,
+              email: u.email,
+              firstName: u.firstName,
+              lastName: u.lastName,
+              avatarUrl: u.avatarUrl ?? null,
+              department: u.employeeProfile?.department
+                ? { id: u.employeeProfile.department.id, name: u.employeeProfile.department.name }
+                : null,
+              hourlyRateRub: userHourlyRate,
+              effectiveHourlyRateRub: effectiveHourlyRate,
+            },
+            stats: {
+              appealsCount: stats?.appealIds.size ?? 0,
+              paidAppealsCount: stats?.paidAppeals.size ?? 0,
+              unpaidAppealsCount: stats?.unpaidAppeals.size ?? 0,
+              partialAppealsCount: stats?.partialAppeals.size ?? 0,
+              notRequiredAppealsCount: stats?.notRequiredAppeals.size ?? 0,
+              accruedHours: round2(stats?.accruedHours ?? 0),
+              paidHours: round2(stats?.paidHours ?? 0),
+              remainingHours: round2(stats?.remainingHours ?? 0),
+              accruedAmountRub: round2(stats?.accruedAmountRub ?? 0),
+              paidAmountRub: round2(stats?.paidAmountRub ?? 0),
+              remainingAmountRub: round2(stats?.remainingAmountRub ?? 0),
+            },
+          };
+        })
+        .sort((a, b) => b.stats.accruedAmountRub - a.stats.accruedAmountRub);
+
+      return res.json(successResponse({ data }, 'Сводка по исполнителям загружена'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/users:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки аналитики по исполнителям', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/users/:userId/appeals',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{ userId: string }, AppealsAnalyticsUserAppealsResponse>, res: express.Response) => {
+    try {
+      const idParsed = IdParamSchema.safeParse({ id: req.params.userId });
+      const queryParsed = AnalyticsUsersQuerySchema.safeParse(req.query);
+      if (!idParsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(idParsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!queryParsed.success) {
+        const zodError = queryParsed.error;
+        return res.status(400).json(errorResponse(zodErrorMessage(zodError), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!user) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId } = queryParsed.data;
+      if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
+        return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
+      }
+
+      const targetUser = await prisma.user.findUnique({
+        where: { id: idParsed.data.id },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          avatarUrl: true,
+          employeeProfile: { select: { department: { select: { id: true, name: true } } } },
+        },
+      });
+      if (!targetUser) {
+        return res.status(404).json(errorResponse('Исполнитель не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const appeals = await prisma.appeal.findMany({
+        where: {
+          toDepartmentId: roleFlags.isAdmin
+            ? (departmentId ? departmentId : undefined)
+            : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+          laborEntries: { some: { assigneeUserId: idParsed.data.id } },
+          ...(fromDate || toDate
+            ? {
+                createdAt: {
+                  ...(fromDate ? { gte: new Date(fromDate) } : {}),
+                  ...(toDate ? { lte: new Date(toDate) } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          toDepartment: { select: { id: true, name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+          createdBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+          assignees: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  email: true,
+                  firstName: true,
+                  lastName: true,
+                  employeeProfile: { select: { appealLaborHourlyRate: true } },
+                },
+              },
+            },
+          },
+          statusHistory: { select: { oldStatus: true, newStatus: true, changedAt: true }, orderBy: { changedAt: 'asc' } },
+          laborEntries: {
+            include: {
+              assignee: {
+                select: {
+                  id: true,
+                  email: true,
+                  firstName: true,
+                  lastName: true,
+                  employeeProfile: { select: { appealLaborHourlyRate: true } },
+                },
+              },
+              paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+            },
+            orderBy: { assigneeUserId: 'asc' },
+          },
+        },
+      });
+
+      const now = new Date();
+      const actorUserId = Number((user as UserMiniRaw).id);
+      const actorDepartmentId = Number((user as UserMiniRaw).employeeProfile?.department?.id || 0);
+      const data = appeals.map((appeal) => {
+        const completedAt = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.COMPLETED)?.changedAt ?? null;
+        const sla = calculateAppealSla(
+          appeal.createdAt,
+          appeal.status,
+          appeal.statusHistory.map((h) => ({ oldStatus: h.oldStatus, newStatus: h.newStatus, changedAt: h.changedAt })),
+          now
+        );
+        const isCreator = appeal.createdById === actorUserId;
+        const isAssignee = (appeal.assignees || []).some((a) => a.user.id === actorUserId);
+        const isManager = isDepartmentManager(user as UserMiniRaw, appeal.toDepartmentId);
+        const isClosed = appeal.status === AppealStatus.COMPLETED || appeal.status === AppealStatus.DECLINED;
+        const isDeptMember = actorDepartmentId > 0 && actorDepartmentId === appeal.toDepartmentId;
+        const allowedStatuses = computeAnalyticsAllowedStatuses({
+          currentStatus: appeal.status,
+          isAdmin: roleFlags.isAdmin,
+          isManager,
+          isCreator,
+          isAssignee,
+        });
+        const canClaim = !isClosed && !isCreator && !isAssignee && isDeptMember;
+
+        return {
+          id: appeal.id,
+          number: appeal.number,
+          title: appeal.title ?? null,
+          status: appeal.status,
+          createdAt: appeal.createdAt,
+          deadline: appeal.deadline ?? null,
+          completedAt,
+          createdBy: {
+            id: appeal.createdBy.id,
+            email: appeal.createdBy.email,
+            firstName: appeal.createdBy.firstName,
+            lastName: appeal.createdBy.lastName,
+          },
+          toDepartment: {
+            id: appeal.toDepartment.id,
+            name: appeal.toDepartment.name,
+            paymentRequired: appeal.toDepartment.appealPaymentRequired,
+            hourlyRateRub: round2(Number(appeal.toDepartment.appealLaborHourlyRate || 0)),
+          },
+          assignees: (appeal.assignees || []).map((a) => ({
+            id: a.user.id,
+            email: a.user.email,
+            firstName: a.user.firstName,
+            lastName: a.user.lastName,
+            hourlyRateRub: round2(Number(a.user.employeeProfile?.appealLaborHourlyRate || 0)),
+            effectiveHourlyRateRub: resolveEffectiveHourlyRate({
+              departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+              departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+              assigneeHourlyRate:
+                a.user.employeeProfile?.appealLaborHourlyRate == null
+                  ? null
+                  : Number(a.user.employeeProfile.appealLaborHourlyRate),
+            }),
+          })),
+          sla,
+          allowedStatuses,
+          actionPermissions: {
+            canChangeStatus: allowedStatuses.length > 0,
+            canEditDeadline: roleFlags.isAdmin || isCreator,
+            canAssign: roleFlags.isAdmin || isManager,
+            canTransfer: roleFlags.isAdmin || isManager,
+            canOpenParticipants: true,
+            canSetLabor: roleFlags.isAdmin || isManager,
+            canClaim,
+          },
+          laborEntries: (appeal.laborEntries || []).map((entry) =>
+            mapLaborEntryDto(entry, {
+              departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+              departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+            })
+          ),
+        };
+      });
+
+      return res.json(
+        successResponse(
+          {
+            user: {
+              id: targetUser.id,
+              email: targetUser.email,
+              firstName: targetUser.firstName,
+              lastName: targetUser.lastName,
+              avatarUrl: targetUser.avatarUrl ?? null,
+              department: targetUser.employeeProfile?.department ?? null,
+            },
+            data,
+          },
+          'Список обращений исполнителя загружен'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/users/:id/appeals:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки обращений исполнителя', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.put(
+  '/analytics/users/:userId/hourly-rate',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['manage_appeal_labor']),
+  async (req: AuthRequest<{ userId: string }, AppealsAnalyticsUpdateHourlyRateResponse>, res: express.Response) => {
+    try {
+      const idParsed = IdParamSchema.safeParse({ id: req.params.userId });
+      if (!idParsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(idParsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const bodyParsed = UserHourlyRateBodySchema.safeParse(req.body);
+      if (!bodyParsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(bodyParsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const actingUser = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!actingUser) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const target = await prisma.user.findUnique({
+        where: { id: idParsed.data.id },
+        select: {
+          id: true,
+          employeeProfile: { select: { departmentId: true } },
+        },
+      });
+      if (!target?.employeeProfile) {
+        return res.status(404).json(errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const canManage =
+        isAdminRole(actingUser as UserMiniRaw) ||
+        isDepartmentManager(actingUser as UserMiniRaw, target.employeeProfile.departmentId);
+      if (!canManage) {
+        return res.status(403).json(errorResponse('Недостаточно прав для изменения ставки', ErrorCodes.FORBIDDEN));
+      }
+
+      const hourlyRateRub = round2(Number(bodyParsed.data.hourlyRateRub));
+      await prisma.employeeProfile.update({
+        where: { userId: target.id },
+        data: { appealLaborHourlyRate: new Prisma.Decimal(hourlyRateRub) },
+      });
+
+      return res.json(
+        successResponse(
+          { userId: target.id, hourlyRateRub },
+          'Ставка исполнителя обновлена'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/users/:userId/hourly-rate:', error);
+      return res.status(500).json(errorResponse('Ошибка обновления ставки исполнителя', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.put(
+  '/:id/labor',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['manage_appeal_labor']),
+  async (req: AuthRequest<{ id: string }, AppealLaborUpsertResponse>, res: express.Response) => {
+    try {
+      const idParsed = IdParamSchema.safeParse(req.params);
+      const bodyParsed = AppealLaborUpsertBodySchema.safeParse(req.body);
+      if (!idParsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(idParsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      if (!bodyParsed.success) {
+        const zodError = bodyParsed.error;
+        return res.status(400).json(errorResponse(zodErrorMessage(zodError), ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const actingUser = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: userMiniSelect,
+      });
+      if (!actingUser) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+
+      const appeal = await prisma.appeal.findUnique({
+        where: { id: idParsed.data.id },
+        include: {
+          toDepartment: { select: { id: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+          assignees: { select: { userId: true } },
+        },
+      });
+      if (!appeal) {
+        return res.status(404).json(errorResponse('Обращение не найдено', ErrorCodes.NOT_FOUND));
+      }
+
+      const canManageAppealLabor = isAdminRole(actingUser as UserMiniRaw) ||
+        isDepartmentManager(actingUser as UserMiniRaw, appeal.toDepartmentId);
+      if (!canManageAppealLabor) {
+        return res.status(403).json(errorResponse('Недостаточно прав для редактирования часов', ErrorCodes.FORBIDDEN));
+      }
+
+      const assigneeSet = new Set<number>((appeal.assignees || []).map((a) => a.userId));
+      const invalidAssignee = bodyParsed.data.items.find((i) => !assigneeSet.has(i.assigneeUserId));
+      if (invalidAssignee) {
+        return res
+          .status(400)
+          .json(errorResponse(`Пользователь ${invalidAssignee.assigneeUserId} не является исполнителем обращения`, ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const assigneeRateRows = await prisma.user.findMany({
+        where: { id: { in: Array.from(assigneeSet) } },
+        select: { id: true, employeeProfile: { select: { appealLaborHourlyRate: true } } },
+      });
+      const assigneeRateMap = new Map<number, number | null>();
+      assigneeRateRows.forEach((row) => {
+        assigneeRateMap.set(
+          row.id,
+          row.employeeProfile?.appealLaborHourlyRate == null
+            ? null
+            : Number(row.employeeProfile.appealLaborHourlyRate)
+        );
+      });
+
+      const departmentHourlyRate = Number(appeal.toDepartment.appealLaborHourlyRate || 0);
+      const paymentRequired = appeal.toDepartment.appealPaymentRequired;
+
+      try {
+        await prisma.$transaction(async (tx) => {
+          for (const item of bodyParsed.data.items) {
+            const accruedHours = normalizeHourValue(
+              Number(item.accruedHours ?? item.hours ?? 0)
+            );
+            const prev = await tx.appealLaborEntry.findUnique({
+              where: {
+                appealId_assigneeUserId: {
+                  appealId: appeal.id,
+                  assigneeUserId: item.assigneeUserId,
+                },
+              },
+            });
+            const previousPaidHours = normalizeHourValue(
+              Number(
+                prev?.paidHours ??
+                  (prev?.paymentStatus === AppealLaborPaymentStatus.PAID ? prev?.hours : 0) ??
+                  0
+              )
+            );
+            let paidHours = item.paidHours != null
+              ? normalizeHourValue(Number(item.paidHours))
+              : resolveLegacyPaidHours({
+                  accruedHours,
+                  paymentStatus: item.paymentStatus,
+                  previousPaidHours,
+                });
+
+            const effectiveHourlyRateRub = resolveEffectiveHourlyRate({
+              departmentPaymentRequired: paymentRequired,
+              departmentHourlyRate,
+              assigneeHourlyRate: assigneeRateMap.get(item.assigneeUserId) ?? null,
+            });
+            const lockedEffectiveHourlyRateRub =
+              prev?.effectiveHourlyRateRub == null
+                ? effectiveHourlyRateRub
+                : round2(Number(prev.effectiveHourlyRateRub));
+            const payable = lockedEffectiveHourlyRateRub > 0;
+
+            if (paidHours > accruedHours) {
+              const err: any = new Error('Оплаченные часы не могут превышать начисленные');
+              err.statusCode = 400;
+              throw err;
+            }
+            paidHours = payable ? paidHours : 0;
+
+            const paymentStatus = deriveLaborPaymentStatus({
+              payable,
+              accruedHours,
+              paidHours,
+            });
+            const paidMeta =
+              paymentStatus === AppealLaborPaymentStatus.PAID
+                ? {
+                    paidAt: prev?.paidAt ?? new Date(),
+                    paidById: prev?.paidById ?? actingUser.id,
+                  }
+                : { paidAt: null, paidById: null as number | null };
+
+            await tx.appealLaborEntry.upsert({
+              where: {
+                appealId_assigneeUserId: {
+                  appealId: appeal.id,
+                  assigneeUserId: item.assigneeUserId,
+                },
+              },
+              update: {
+                hours: new Prisma.Decimal(accruedHours),
+                paidHours: new Prisma.Decimal(paidHours),
+                effectiveHourlyRateRub: new Prisma.Decimal(lockedEffectiveHourlyRateRub),
+                paymentStatus,
+                ...paidMeta,
+                updatedById: actingUser.id,
+              },
+              create: {
+                appealId: appeal.id,
+                assigneeUserId: item.assigneeUserId,
+                hours: new Prisma.Decimal(accruedHours),
+                paidHours: new Prisma.Decimal(paidHours),
+                effectiveHourlyRateRub: new Prisma.Decimal(lockedEffectiveHourlyRateRub),
+                paymentStatus,
+                ...paidMeta,
+                createdById: actingUser.id,
+                updatedById: actingUser.id,
+              },
+            });
+
+            const oldHours = prev ? Number(prev.hours) : null;
+            const oldPaidHours = prev ? Number(prev.paidHours ?? 0) : null;
+            const oldPaymentStatus = prev?.paymentStatus ?? null;
+            if (
+              oldHours !== accruedHours ||
+              oldPaidHours !== paidHours ||
+              oldPaymentStatus !== paymentStatus
+            ) {
+              await (tx as any).appealLaborAuditLog.create({
+                data: {
+                  appealId: appeal.id,
+                  assigneeUserId: item.assigneeUserId,
+                  changedById: actingUser.id,
+                  oldHours: oldHours == null ? null : new Prisma.Decimal(oldHours),
+                  newHours: new Prisma.Decimal(accruedHours),
+                  oldPaidHours: oldPaidHours == null ? null : new Prisma.Decimal(oldPaidHours),
+                  newPaidHours: new Prisma.Decimal(paidHours),
+                  oldPaymentStatus: oldPaymentStatus as any,
+                  newPaymentStatus: paymentStatus,
+                },
+              });
+            }
+          }
+        });
+      } catch (error: any) {
+        if (error?.statusCode === 400) {
+          return res.status(400).json(errorResponse(error.message, ErrorCodes.VALIDATION_ERROR));
+        }
+        throw error;
+      }
+
+      const laborEntries = await prisma.appealLaborEntry.findMany({
+        where: { appealId: appeal.id },
+        include: {
+          assignee: {
+            select: {
+              id: true,
+              email: true,
+              firstName: true,
+              lastName: true,
+              employeeProfile: { select: { appealLaborHourlyRate: true } },
+            },
+          },
+          paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+        },
+        orderBy: { assigneeUserId: 'asc' },
+      });
+
+      return res.json(
+        successResponse(
+          {
+            appealId: appeal.id,
+            paymentRequired,
+            currency: 'RUB' as const,
+            laborEntries: laborEntries.map((entry) =>
+              mapLaborEntryDto(entry, {
+                departmentPaymentRequired: paymentRequired,
+                departmentHourlyRate,
+              })
+            ),
+          },
+          'Часы и статус оплаты обновлены'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/:id/labor:', error);
+      return res.status(500).json(errorResponse('Ошибка сохранения трудозатрат', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/sla-dashboard',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsSlaDashboardResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsCommonQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId } = parsed.data;
+      const where: Prisma.AppealWhereInput = {
+        toDepartmentId: roleFlags.isAdmin
+          ? (departmentId ? departmentId : undefined)
+          : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+      };
+      if (fromDate || toDate) {
+        where.createdAt = {};
+        if (fromDate) where.createdAt.gte = new Date(fromDate);
+        if (toDate) where.createdAt.lte = new Date(toDate);
+      }
+
+      const appeals = await prisma.appeal.findMany({
+        where,
+        select: {
+          id: true,
+          createdAt: true,
+          statusHistory: { orderBy: { changedAt: 'asc' }, select: { newStatus: true, changedAt: true } },
+        },
+      });
+
+      const openToInProgress: number[] = [];
+      const inProgressToResolved: number[] = [];
+      const resolvedToCompleted: number[] = [];
+      for (const appeal of appeals) {
+        const firstInProgress = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.IN_PROGRESS);
+        const firstResolved = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.RESOLVED);
+        const firstCompleted = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.COMPLETED);
+        if (firstInProgress) openToInProgress.push(Math.max(0, firstInProgress.changedAt.getTime() - appeal.createdAt.getTime()));
+        if (firstInProgress && firstResolved) inProgressToResolved.push(Math.max(0, firstResolved.changedAt.getTime() - firstInProgress.changedAt.getTime()));
+        if (firstResolved && firstCompleted) resolvedToCompleted.push(Math.max(0, firstCompleted.changedAt.getTime() - firstResolved.changedAt.getTime()));
+      }
+
+      const pack = (key: 'OPEN_TO_IN_PROGRESS' | 'IN_PROGRESS_TO_RESOLVED' | 'RESOLVED_TO_COMPLETED', values: number[]) => ({
+        key,
+        count: values.length,
+        avgMs: avg(values),
+        p50Ms: percentile(values, 50),
+        p90Ms: percentile(values, 90),
+      });
+
+      return res.json(successResponse({ transitions: [
+        pack('OPEN_TO_IN_PROGRESS', openToInProgress),
+        pack('IN_PROGRESS_TO_RESOLVED', inProgressToResolved),
+        pack('RESOLVED_TO_COMPLETED', resolvedToCompleted),
+      ] }, 'SLA KPI загружены'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/sla-dashboard:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки SLA KPI', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/kpi-dashboard',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsKpiDashboardResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsKpiDashboardQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, assigneeUserId, status, search } = parsed.data;
+      if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
+        return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
+      }
+
+      const where = buildAnalyticsAppealsWhere({
+        roleFlags,
+        managedDepartmentIds,
+        departmentId,
+        fromDate,
+        toDate,
+        assigneeUserId,
+        status,
+        search,
+      });
+
+      const appeals = await prisma.appeal.findMany({
+        where,
+        select: {
+          id: true,
+          status: true,
+          createdAt: true,
+          toDepartment: { select: { appealPaymentRequired: true, appealLaborHourlyRate: true } },
+          statusHistory: { select: { oldStatus: true, newStatus: true, changedAt: true }, orderBy: { changedAt: 'asc' } },
+          laborEntries: {
+            include: {
+              assignee: {
+                select: {
+                  id: true,
+                  email: true,
+                  firstName: true,
+                  lastName: true,
+                  employeeProfile: { select: { appealLaborHourlyRate: true } },
+                },
+              },
+              paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+            },
+          },
+        },
+      });
+
+      let openCount = 0;
+      let inProgressCount = 0;
+      let completedCount = 0;
+      let resolvedCount = 0;
+      let declinedCount = 0;
+
+      const takeValues: number[] = [];
+      const executionValues: number[] = [];
+
+      let totalAccruedHours = 0;
+      let totalPaidHours = 0;
+      let totalRemainingHours = 0;
+      let totalNotRequiredHours = 0;
+      let totalAccruedAmountRub = 0;
+      let totalPaidAmountRub = 0;
+      let totalRemainingAmountRub = 0;
+
+      const now = new Date();
+      for (const appeal of appeals) {
+        if (appeal.status === AppealStatus.OPEN) openCount += 1;
+        if (appeal.status === AppealStatus.IN_PROGRESS) inProgressCount += 1;
+        if (appeal.status === AppealStatus.COMPLETED) completedCount += 1;
+        if (appeal.status === AppealStatus.RESOLVED) resolvedCount += 1;
+        if (appeal.status === AppealStatus.DECLINED) declinedCount += 1;
+
+        const sla = calculateAppealSla(
+          appeal.createdAt,
+          appeal.status,
+          (appeal.statusHistory || []).map((h) => ({
+            oldStatus: h.oldStatus,
+            newStatus: h.newStatus,
+            changedAt: h.changedAt,
+          })),
+          now
+        );
+        if (sla.timeToFirstInProgressMs != null) takeValues.push(sla.timeToFirstInProgressMs);
+        if (sla.workDurationMs > 0) executionValues.push(sla.workDurationMs);
+
+        for (const entry of appeal.laborEntries || []) {
+          const dto = mapLaborEntryDto(entry, {
+            departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+            departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+          });
+          if (dto.payable) {
+            totalAccruedHours += dto.accruedHours;
+            totalPaidHours += dto.paidHours;
+            totalRemainingHours += dto.remainingHours;
+            totalAccruedAmountRub += dto.amountAccruedRub;
+            totalPaidAmountRub += dto.amountPaidRub;
+            totalRemainingAmountRub += dto.amountRemainingRub;
+          } else {
+            totalNotRequiredHours += dto.accruedHours;
+          }
+        }
+      }
+
+      return res.json(
+        successResponse(
+          {
+            appeals: {
+              totalCount: appeals.length,
+              openCount,
+              inProgressCount,
+              completedCount,
+              resolvedCount,
+              declinedCount,
+            },
+            timing: {
+              avgTakeMs: avg(takeValues),
+              avgExecutionMs: avg(executionValues),
+              takeCount: takeValues.length,
+              executionCount: executionValues.length,
+            },
+            labor: {
+              totalAccruedHours: round2(totalAccruedHours),
+              totalPaidHours: round2(totalPaidHours),
+              totalRemainingHours: round2(totalRemainingHours),
+              totalNotRequiredHours: round2(totalNotRequiredHours),
+              totalAccruedAmountRub: round2(totalAccruedAmountRub),
+              totalPaidAmountRub: round2(totalPaidAmountRub),
+              totalRemainingAmountRub: round2(totalRemainingAmountRub),
+              currency: 'RUB' as const,
+            },
+          },
+          'KPI dashboard загружен'
+        )
+      );
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/kpi-dashboard:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки KPI dashboard', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/payment-queue',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsPaymentQueueResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsCommonQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, assigneeUserId } = parsed.data;
+
+      const entries = await prisma.appealLaborEntry.findMany({
+        where: {
+          assigneeUserId: assigneeUserId || undefined,
+          paymentStatus: {
+            in: [
+              AppealLaborPaymentStatus.UNPAID,
+              AppealLaborPaymentStatus.PARTIAL,
+              AppealLaborPaymentStatus.PAID,
+              AppealLaborPaymentStatus.NOT_REQUIRED,
+            ],
+          },
+          appeal: {
+            toDepartmentId: roleFlags.isAdmin
+              ? (departmentId ? departmentId : undefined)
+              : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+            ...(fromDate || toDate
+              ? {
+                  createdAt: {
+                    ...(fromDate ? { gte: new Date(fromDate) } : {}),
+                    ...(toDate ? { lte: new Date(toDate) } : {}),
+                  },
+                }
+              : {}),
+          },
+        },
+        include: {
+          assignee: {
+            select: {
+              id: true, email: true, firstName: true, lastName: true,
+              employeeProfile: { select: { department: { select: { id: true, name: true } } } },
+            },
+          },
+          appeal: {
+            select: {
+              id: true,
+              number: true,
+              toDepartment: { select: { id: true, name: true, appealPaymentRequired: true } },
+              laborEntries: { select: { paymentStatus: true } },
+            },
+          },
+        },
+      });
+
+      const grouped = new Map<number, any>();
+      for (const entry of entries) {
+        const assigneeId = entry.assigneeUserId;
+        if (!grouped.has(assigneeId)) {
+          grouped.set(assigneeId, {
+            assignee: {
+              id: entry.assignee.id,
+              email: entry.assignee.email,
+              firstName: entry.assignee.firstName,
+              lastName: entry.assignee.lastName,
+              department: entry.assignee.employeeProfile?.department ?? null,
+            },
+            departments: new Map<number, any>(),
+            totalHours: 0,
+          });
+        }
+        const row = grouped.get(assigneeId);
+        if (!row.departments.has(entry.appeal.toDepartment.id)) {
+          row.departments.set(entry.appeal.toDepartment.id, {
+            id: entry.appeal.toDepartment.id,
+            name: entry.appeal.toDepartment.name,
+            items: [],
+            totalHours: 0,
+          });
+        }
+        const financialStatus = resolveFinancialFunnelStatus(
+          entry.appeal.toDepartment.appealPaymentRequired,
+          entry.appeal.laborEntries.map((x) => x.paymentStatus)
+        );
+        const dep = row.departments.get(entry.appeal.toDepartment.id);
+        dep.items.push({
+          appealId: entry.appealId,
+          appealNumber: entry.appeal.number,
+          hours: Number(entry.hours),
+          paymentStatus: entry.paymentStatus,
+          financialStatus,
+        });
+        dep.totalHours += Number(entry.hours);
+        row.totalHours += Number(entry.hours);
+      }
+
+      const data = Array.from(grouped.values()).map((row) => ({
+        assignee: row.assignee,
+        departments: Array.from(row.departments.values()),
+        totalHours: Number(row.totalHours.toFixed(2)),
+      }));
+      const totalItems = data.reduce((acc, row) => acc + row.departments.reduce((a: number, d: any) => a + d.items.length, 0), 0);
+      return res.json(successResponse({ data, meta: { totalItems } }, 'Очередь выплат загружена'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/payment-queue:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки очереди выплат', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.put(
+  '/analytics/payment-queue/mark-paid',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['manage_appeal_labor']),
+  async (req: AuthRequest<{}, AppealsPaymentQueueMarkPaidResponse>, res: express.Response) => {
+    try {
+      const parsed = PaymentQueueMarkPaidBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const actingUser = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!actingUser) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+
+      let updated = 0;
+      await prisma.$transaction(async (tx) => {
+        for (const item of parsed.data.items) {
+          const entry = await tx.appealLaborEntry.findUnique({
+            where: { appealId_assigneeUserId: { appealId: item.appealId, assigneeUserId: item.assigneeUserId } },
+            include: { appeal: { include: { toDepartment: true } } },
+          });
+          if (!entry) continue;
+          const canManage = isAdminRole(actingUser as UserMiniRaw) || isDepartmentManager(actingUser as UserMiniRaw, entry.appeal.toDepartmentId);
+          if (!canManage) continue;
+          if (!entry.appeal.toDepartment.appealPaymentRequired || entry.paymentStatus === AppealLaborPaymentStatus.NOT_REQUIRED) continue;
+          if (entry.paymentStatus === AppealLaborPaymentStatus.PAID) continue;
+
+          await tx.appealLaborEntry.update({
+            where: { id: entry.id },
+            data: {
+              paidHours: entry.hours,
+              paymentStatus: AppealLaborPaymentStatus.PAID,
+              paidAt: new Date(),
+              paidById: actingUser.id,
+              updatedById: actingUser.id,
+            },
+          });
+          await (tx as any).appealLaborAuditLog.create({
+            data: {
+              appealId: entry.appealId,
+              assigneeUserId: entry.assigneeUserId,
+              changedById: actingUser.id,
+              oldHours: entry.hours,
+              newHours: entry.hours,
+              oldPaidHours: entry.paidHours,
+              newPaidHours: entry.hours,
+              oldPaymentStatus: entry.paymentStatus,
+              newPaymentStatus: AppealLaborPaymentStatus.PAID,
+            },
+          });
+          updated += 1;
+        }
+      });
+      return res.json(successResponse({ updated }, 'Статусы оплаты обновлены'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/payment-queue/mark-paid:', error);
+      return res.status(500).json(errorResponse('Ошибка массового обновления оплаты', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/labor-audit',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealLaborAuditLogResponse>, res: express.Response) => {
+    try {
+      const parsed = LaborAuditQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, assigneeUserId, appealId, limit, offset } = parsed.data;
+      const where: any = {
+        assigneeUserId: assigneeUserId || undefined,
+        appealId: appealId || undefined,
+        changedAt: fromDate || toDate ? {
+          ...(fromDate ? { gte: new Date(fromDate) } : {}),
+          ...(toDate ? { lte: new Date(toDate) } : {}),
+        } : undefined,
+        appeal: {
+          toDepartmentId: roleFlags.isAdmin
+            ? (departmentId ? departmentId : undefined)
+            : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+        },
+      };
+      const [total, rows] = await prisma.$transaction([
+        (prisma as any).appealLaborAuditLog.count({ where }),
+        (prisma as any).appealLaborAuditLog.findMany({
+          where,
+          orderBy: { changedAt: 'desc' },
+          skip: offset,
+          take: limit,
+          include: {
+            changedBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+          },
+        }),
+      ]);
+      return res.json(successResponse({
+        data: rows.map((r: any) => ({
+          id: r.id,
+          appealId: r.appealId,
+          assigneeUserId: r.assigneeUserId,
+          changedBy: r.changedBy,
+          oldHours: r.oldHours == null ? null : Number(r.oldHours),
+          newHours: Number(r.newHours),
+          oldPaidHours: r.oldPaidHours == null ? null : Number(r.oldPaidHours),
+          newPaidHours: r.newPaidHours == null ? null : Number(r.newPaidHours),
+          oldPaymentStatus: r.oldPaymentStatus,
+          newPaymentStatus: r.newPaymentStatus,
+          changedAt: r.changedAt,
+        })),
+        meta: { total, limit, offset, hasMore: offset + rows.length < total },
+      }, 'История изменений загружена'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/labor-audit:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки истории изменений', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/funnel',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsFunnelResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsCommonQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId } = parsed.data;
+      const appeals = await prisma.appeal.findMany({
+        where: {
+          toDepartmentId: roleFlags.isAdmin
+            ? (departmentId ? departmentId : undefined)
+            : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+          ...(fromDate || toDate
+            ? {
+                createdAt: {
+                  ...(fromDate ? { gte: new Date(fromDate) } : {}),
+                  ...(toDate ? { lte: new Date(toDate) } : {}),
+                },
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          toDepartment: { select: { appealPaymentRequired: true } },
+          laborEntries: { select: { paymentStatus: true } },
+        },
+      });
+      const counts = new Map<string, number>([
+        ['NOT_PAYABLE', 0], ['TO_PAY', 0], ['PARTIAL', 0], ['PAID', 0],
+      ]);
+      for (const a of appeals) {
+        const status = resolveFinancialFunnelStatus(a.toDepartment.appealPaymentRequired, a.laborEntries.map((x) => x.paymentStatus));
+        counts.set(status, (counts.get(status) || 0) + 1);
+      }
+      return res.json(successResponse({
+        byStatus: Array.from(counts.entries()).map(([status, count]) => ({ status: status as any, count })),
+      }, 'Финансовая воронка загружена'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/funnel:', error);
+      return res.status(500).json(errorResponse('Ошибка расчета воронки', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/heatmap',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsHeatmapResponse>, res: express.Response) => {
+    try {
+      const parsed = AnalyticsCommonQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, assigneeUserId } = parsed.data;
+      const laborRows = await prisma.appealLaborEntry.findMany({
+        where: {
+          assigneeUserId: assigneeUserId || undefined,
+          appeal: {
+            toDepartmentId: roleFlags.isAdmin
+              ? (departmentId ? departmentId : undefined)
+              : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+            ...(fromDate || toDate
+              ? {
+                  createdAt: {
+                    ...(fromDate ? { gte: new Date(fromDate) } : {}),
+                    ...(toDate ? { lte: new Date(toDate) } : {}),
+                  },
+                }
+              : {}),
+          },
+        },
+        include: {
+          assignee: {
+            select: {
+              id: true, email: true, firstName: true, lastName: true,
+              employeeProfile: { select: { department: { select: { id: true, name: true } } } },
+            },
+          },
+          appeal: { select: { createdAt: true } },
+        },
+      });
+      const grouped = new Map<number, any>();
+      for (const row of laborRows) {
+        if (!grouped.has(row.assigneeUserId)) {
+          grouped.set(row.assigneeUserId, {
+            user: {
+              id: row.assignee.id,
+              email: row.assignee.email,
+              firstName: row.assignee.firstName,
+              lastName: row.assignee.lastName,
+              department: row.assignee.employeeProfile?.department ?? null,
+            },
+            cells: new Map<string, { date: string; totalHours: number; appealsCount: number }>(),
+          });
+        }
+        const date = toIsoDate(row.appeal.createdAt);
+        const u = grouped.get(row.assigneeUserId);
+        if (!u.cells.has(date)) u.cells.set(date, { date, totalHours: 0, appealsCount: 0 });
+        const cell = u.cells.get(date);
+        cell.totalHours += Number(row.hours);
+        cell.appealsCount += 1;
+      }
+      return res.json(successResponse({
+        data: Array.from(grouped.values()).map((u) => ({
+          user: u.user,
+          cells: Array.from(u.cells.values()).map((c: any) => ({ ...c, totalHours: Number(c.totalHours.toFixed(2)) })),
+        })),
+      }, 'Heatmap загружен'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/heatmap:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки heatmap', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/forecast',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest<{}, AppealsForecastResponse>, res: express.Response) => {
+    try {
+      const parsed = ForecastQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      if (!roleFlags.isAdmin && !roleFlags.isDepartmentManager) {
+        return res.status(403).json(errorResponse('Нет доступа к аналитике', ErrorCodes.FORBIDDEN));
+      }
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const { departmentId, horizon } = parsed.data;
+      const today = new Date();
+      const remainingDays = horizon === 'month'
+        ? new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate() - today.getDate()
+        : (7 - ((today.getDay() + 6) % 7) - 1);
+      const lookbackDays = 30;
+      const lookbackFrom = new Date(Date.now() - lookbackDays * 24 * 3600_000);
+      const departments = await prisma.department.findMany({
+        where: roleFlags.isAdmin
+          ? (departmentId ? { id: departmentId } : undefined)
+          : { id: { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] } },
+        select: { id: true, name: true, appealLaborHourlyRate: true } as any,
+      });
+      const data = [];
+      for (const dep of departments) {
+        const depId = Number((dep as any).id);
+        const rows = await prisma.appealLaborEntry.findMany({
+          where: {
+            appeal: { toDepartmentId: depId, createdAt: { gte: lookbackFrom, lte: today } },
+          },
+          select: { hours: true },
+        });
+        const totalHours = rows.reduce((acc, r) => acc + Number(r.hours), 0);
+        const avgDailyHours = totalHours / lookbackDays;
+        const expectedHours = Number((avgDailyHours * Math.max(0, remainingDays)).toFixed(2));
+        const rate = Number((dep as any).appealLaborHourlyRate ?? 1);
+        const expectedPayout = Number((expectedHours * rate).toFixed(2));
+        data.push({
+          id: depId,
+          name: (dep as any).name,
+          expectedHours,
+          expectedPayout,
+          formula: `expectedHours = (hours_${lookbackDays}d / ${lookbackDays}) * remainingDays; expectedPayout = expectedHours * hourlyRate`,
+        });
+      }
+      return res.json(successResponse({
+        horizon,
+        generatedAt: today,
+        lookbackDays,
+        remainingDays: Math.max(0, remainingDays),
+        departments: data,
+      }, 'Прогноз рассчитан'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/forecast:', error);
+      return res.status(500).json(errorResponse('Ошибка расчета прогноза', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/thresholds',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['view_appeals_analytics']),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const data = await (prisma as any).appealAnalyticsThreshold.findMany({
+        where: isAdminRole(user as UserMiniRaw) ? undefined : { departmentId: { in: managedDepartmentIds.length ? managedDepartmentIds : [-1] } },
+        include: { department: { select: { id: true, name: true } } },
+      });
+      return res.json(successResponse({ data }, 'Пороги уведомлений загружены'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/thresholds:', error);
+      return res.status(500).json(errorResponse('Ошибка загрузки порогов', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.put(
+  '/analytics/thresholds',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['manage_appeal_labor']),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const schema = z.object({
+        departmentId: z.preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().positive()),
+        openTooLongHours: z.number().int().min(1).max(720),
+        resolvedTooLongHours: z.number().int().min(1).max(720),
+        laborMissingDays: z.number().int().min(1).max(90),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      if (!isAdminRole(user as UserMiniRaw) && !isDepartmentManager(user as UserMiniRaw, parsed.data.departmentId)) {
+        return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
+      }
+      const item = await (prisma as any).appealAnalyticsThreshold.upsert({
+        where: { departmentId: parsed.data.departmentId },
+        update: {
+          openTooLongHours: parsed.data.openTooLongHours,
+          resolvedTooLongHours: parsed.data.resolvedTooLongHours,
+          laborMissingDays: parsed.data.laborMissingDays,
+        },
+        create: parsed.data,
+      });
+      return res.json(successResponse({ item }, 'Пороги уведомлений обновлены'));
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/thresholds PUT:', error);
+      return res.status(500).json(errorResponse('Ошибка сохранения порогов', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/export/appeals',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['export_appeals']),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const parsed = AnalyticsExportQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, userId, assigneeUserId, status, search, format } = parsed.data;
+      const effectiveAssigneeId = assigneeUserId || undefined;
+
+      const where: Prisma.AppealWhereInput = buildAnalyticsAppealsWhere({
+        roleFlags,
+        managedDepartmentIds,
+        departmentId,
+        fromDate,
+        toDate,
+        assigneeUserId: effectiveAssigneeId,
+        status,
+        search,
+      });
+      if (!effectiveAssigneeId && userId) {
+        where.laborEntries = { some: { assigneeUserId: userId } };
+      }
+
+      const rows = await prisma.appeal.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          toDepartment: { select: { name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+          assignees: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  email: true,
+                  firstName: true,
+                  lastName: true,
+                  employeeProfile: { select: { appealLaborHourlyRate: true } },
+                },
+              },
+            },
+          },
+          statusHistory: { select: { oldStatus: true, newStatus: true, changedAt: true }, orderBy: { changedAt: 'asc' } },
+          laborEntries: {
+            include: {
+              assignee: {
+                select: {
+                  id: true,
+                  email: true,
+                  firstName: true,
+                  lastName: true,
+                  employeeProfile: { select: { appealLaborHourlyRate: true } },
+                },
+              },
+              paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+            },
+            orderBy: { assigneeUserId: 'asc' },
+          },
+        },
+      });
+      const now = new Date();
+      const flat = rows.map((appeal) => {
+        const completedAt = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.COMPLETED)?.changedAt ?? null;
+        const sla = calculateAppealSla(
+          appeal.createdAt,
+          appeal.status,
+          appeal.statusHistory.map((h) => ({ oldStatus: h.oldStatus, newStatus: h.newStatus, changedAt: h.changedAt })),
+          now
+        );
+        const assignees = (appeal.assignees || []).map((a) => ({
+          id: a.user.id,
+          email: a.user.email,
+          firstName: a.user.firstName,
+          lastName: a.user.lastName,
+          effectiveHourlyRateRub: resolveEffectiveHourlyRate({
+            departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+            departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+            assigneeHourlyRate:
+              a.user.employeeProfile?.appealLaborHourlyRate == null
+                ? null
+                : Number(a.user.employeeProfile.appealLaborHourlyRate),
+          }),
+        }));
+        const laborEntries = (appeal.laborEntries || []).map((entry) =>
+          mapLaborEntryDto(entry, {
+            departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
+            departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+          })
+        );
+        return {
+          '№': `#${appeal.number}`,
+          'Обращение': appeal.title || 'Без названия',
+          'Статус': appealStatusLabelForExport(appeal.status),
+          'Отдел': appeal.toDepartment.name,
+          'Дедлайн': formatAnalyticsDeadlineForExport({
+            status: appeal.status,
+            deadline: appeal.deadline,
+            completedAt,
+            now,
+          }),
+          'Открыто': formatHoursByMsForExport(sla.openDurationMs),
+          'В работе': formatHoursByMsForExport(sla.workDurationMs),
+          'До взятия': formatHoursByMsForExport(sla.timeToFirstInProgressMs),
+          'До решения': formatHoursByMsForExport(sla.timeToFirstResolvedMs),
+          'Исполнители / часы / выплаты': formatLaborSummaryForExport({
+            assignees,
+            laborEntries,
+          }),
+        };
+      });
+      const parser = new Parser({
+        fields: [
+          '№',
+          'Обращение',
+          'Статус',
+          'Отдел',
+          'Дедлайн',
+          'Открыто',
+          'В работе',
+          'До взятия',
+          'До решения',
+          'Исполнители / часы / выплаты',
+        ],
+      });
+      const csv = parser.parse(flat);
+      const ext = format === 'xlsx' ? 'xlsx' : 'csv';
+      res.setHeader('Content-Disposition', `attachment; filename=\"appeals_analytics_${Date.now()}.${ext}\"`);
+      if (format === 'xlsx') {
+        const xlsx = buildXlsxBuffer('Appeals', flat);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        return res.status(200).send(xlsx);
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      return res.status(200).send(csv);
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/export/appeals:', error);
+      return res.status(500).json(errorResponse('Ошибка экспорта по обращениям', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.get(
+  '/analytics/export/users',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('appeals'),
+  authorizePermissions(['export_appeals']),
+  async (req: AuthRequest, res: express.Response) => {
+    try {
+      const parsed = AnalyticsExportQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res.status(400).json(errorResponse(zodErrorMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: userMiniSelect });
+      if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
+      const roleFlags = toRoleFlags(user as UserMiniRaw);
+      const { fromDate, toDate, departmentId, userId, assigneeUserId, status, search, format } = parsed.data;
+      const effectiveAssigneeId = assigneeUserId || userId || undefined;
+      const searchNumber = search ? Number(search) : NaN;
+      const statusMatchesBySearch = search ? resolveStatusMatchesFromSearch(search) : [];
+      const rows = await prisma.appealLaborEntry.findMany({
+        where: {
+          assigneeUserId: effectiveAssigneeId,
+          ...(search
+            ? {
+                OR: [
+                  { assignee: { firstName: { contains: search, mode: 'insensitive' } } },
+                  { assignee: { lastName: { contains: search, mode: 'insensitive' } } },
+                  { assignee: { email: { contains: search, mode: 'insensitive' } } },
+                  ...(Number.isInteger(searchNumber) && searchNumber > 0 ? [{ appeal: { number: searchNumber } }] : []),
+                  { appeal: { title: { contains: search, mode: 'insensitive' } } },
+                  { appeal: { toDepartment: { name: { contains: search, mode: 'insensitive' } } } },
+                  ...(statusMatchesBySearch.length ? [{ appeal: { status: { in: statusMatchesBySearch } } }] : []),
+                ],
+              }
+            : {}),
+          appeal: {
+            toDepartmentId: roleFlags.isAdmin
+              ? (departmentId ? departmentId : undefined)
+              : { in: departmentId ? [departmentId] : managedDepartmentIds.length ? managedDepartmentIds : [-1] },
+            ...(status ? { status } : {}),
+            ...(fromDate || toDate ? { createdAt: { ...(fromDate ? { gte: new Date(fromDate) } : {}), ...(toDate ? { lte: new Date(toDate) } : {}) } } : {}),
+          },
+        },
+        include: {
+          assignee: { select: { id: true, email: true, firstName: true, lastName: true } },
+          appeal: { select: { toDepartment: { select: { name: true } }, number: true } },
+        },
+      });
+      const flat = rows.map((r) => ({
+        userId: r.assignee.id,
+        user: [r.assignee.firstName, r.assignee.lastName].filter(Boolean).join(' ').trim() || r.assignee.email,
+        department: r.appeal.toDepartment.name,
+        appealNumber: r.appeal.number,
+        hours: Number(r.hours),
+        paymentStatus: r.paymentStatus,
+      }));
+      const totalHours = flat.reduce((acc, r) => acc + r.hours, 0);
+      const parser = new Parser({ fields: ['userId', 'user', 'department', 'appealNumber', 'hours', 'paymentStatus'] });
+      const csv = `${parser.parse(flat)}\nTOTAL,,,,${totalHours.toFixed(2)},`;
+      const ext = format === 'xlsx' ? 'xlsx' : 'csv';
+      res.setHeader('Content-Disposition', `attachment; filename=\"users_analytics_${Date.now()}.${ext}\"`);
+      if (format === 'xlsx') {
+        const xlsx = buildXlsxBuffer('Users', flat, {
+          userId: 'TOTAL',
+          user: '',
+          department: '',
+          appealNumber: '',
+          hours: Number(totalHours.toFixed(2)),
+          paymentStatus: '',
+        });
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        return res.status(200).send(xlsx);
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      return res.status(200).send(csv);
+    } catch (error) {
+      console.error('Ошибка /appeals/analytics/export/users:', error);
+      return res.status(500).json(errorResponse('Ошибка экспорта по исполнителям', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
 /**
  * @openapi
  * /appeals/{id}:
@@ -993,13 +3374,18 @@ router.get(
       }
 
       const userId = req.user!.userId;
+      const actor = await loadUserMini(userId);
+      if (!actor) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
       const isCreator = appeal.createdById === userId;
       const isAssignee = appeal.assignees.some((a: any) => a.userId === userId);
+      const isAdmin = isAdminRole(actor as UserMiniRaw);
       const employee = await prisma.employeeProfile.findFirst({
         where: { userId, departmentId: appeal.toDepartmentId },
       });
 
-      if (!isCreator && !isAssignee && !employee) {
+      if (!isCreator && !isAssignee && !employee && !isAdmin) {
         return res
           .status(403)
           .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
@@ -1107,13 +3493,18 @@ router.get(
         }
 
         const userId = req.user!.userId;
+        const actor = await loadUserMini(userId);
+        if (!actor) {
+          return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+        }
         const isCreator = appeal.createdById === userId;
         const isAssignee = appeal.assignees.some((a) => a.userId === userId);
+        const isAdmin = isAdminRole(actor as UserMiniRaw);
         const employee = await prisma.employeeProfile.findFirst({
           where: { userId, departmentId: appeal.toDepartmentId },
         });
 
-        if (!isCreator && !isAssignee && !employee) {
+        if (!isCreator && !isAssignee && !employee && !isAdmin) {
           return res
             .status(403)
             .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
@@ -2791,10 +5182,15 @@ router.post(
 
         const isCreator = appeal.createdById === userId;
         const isAssignee = appeal.assignees.some((a) => a.userId === userId);
+        const actor = await loadUserMini(userId);
+        if (!actor) {
+          return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+        }
+        const isAdmin = isAdminRole(actor as UserMiniRaw);
         const employee = await prisma.employeeProfile.findFirst({
           where: { userId, departmentId: appeal.toDepartmentId },
         });
-        if (!isCreator && !isAssignee && !employee) {
+        if (!isCreator && !isAssignee && !employee && !isAdmin) {
           return res
             .status(403)
             .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
@@ -2934,11 +5330,16 @@ router.post(
       const appeal = message.appeal;
       const isCreator = appeal.createdById === userId;
       const isAssignee = appeal.assignees.some((a) => a.userId === userId);
+      const actor = await loadUserMini(userId);
+      if (!actor) {
+        return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      const isAdmin = isAdminRole(actor as UserMiniRaw);
       const employee = await prisma.employeeProfile.findFirst({
         where: { userId, departmentId: appeal.toDepartmentId },
       });
 
-      if (!isCreator && !isAssignee && !employee) {
+      if (!isCreator && !isAssignee && !employee && !isAdmin) {
         return res
           .status(403)
           .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));

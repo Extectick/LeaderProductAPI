@@ -95,6 +95,8 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { name: 'delete_appeal_message', displayName: 'Удаление сообщений обращения', description: 'Разрешает удалять сообщения в обращении.', groupKey: 'service_appeals' },
   { name: 'manage_appeal_watchers', displayName: 'Управление наблюдателями обращения', description: 'Разрешает изменять список наблюдателей обращения.', groupKey: 'service_appeals' },
   { name: 'export_appeals', displayName: 'Экспорт обращений', description: 'Разрешает экспортировать обращения и отчёты по ним.', groupKey: 'service_appeals' },
+  { name: 'view_appeals_analytics', displayName: 'Просмотр аналитики обращений', description: 'Разрешает просматривать аналитику по обращениям и исполнителям.', groupKey: 'service_appeals' },
+  { name: 'manage_appeal_labor', displayName: 'Управление трудозатратами обращения', description: 'Разрешает проставлять часы и статусы оплаты по исполнителям обращения.', groupKey: 'service_appeals' },
 
   { name: 'create_qr', displayName: 'Создание QR', description: 'Разрешает создавать QR-коды.', groupKey: 'service_qrcodes' },
   { name: 'update_qr', displayName: 'Редактирование QR', description: 'Разрешает изменять QR-коды.', groupKey: 'service_qrcodes' },
@@ -145,5 +147,11 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'delete_appeal_message',
     'manage_appeal_watchers',
   ],
-  department_manager: ['assign_appeal', 'update_appeal_status', 'export_appeals'],
+  department_manager: [
+    'assign_appeal',
+    'update_appeal_status',
+    'export_appeals',
+    'view_appeals_analytics',
+    'manage_appeal_labor',
+  ],
 };
