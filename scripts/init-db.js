@@ -5,6 +5,69 @@ function run(cmd) {
   execSync(cmd, { stdio: 'inherit' });
 }
 
+async function reconcileAppealsAnalyticsRbac(pool) {
+  const permissions = [
+    {
+      name: 'view_appeals_analytics',
+      displayName: 'Просмотр аналитики обращений',
+      description: 'Разрешает просматривать аналитику по обращениям и исполнителям.',
+      groupKey: 'service_appeals',
+    },
+    {
+      name: 'manage_appeal_labor',
+      displayName: 'Управление трудозатратами обращения',
+      description:
+        'Разрешает проставлять часы и статусы оплаты по исполнителям обращения.',
+      groupKey: 'service_appeals',
+    },
+  ];
+
+  for (const perm of permissions) {
+    await pool.query(
+      `
+      WITH target_group AS (
+        SELECT "id"
+        FROM "PermissionGroup"
+        WHERE "key" = $4
+        LIMIT 1
+      ),
+      fallback_group AS (
+        SELECT "id"
+        FROM "PermissionGroup"
+        WHERE "key" = 'core'
+        LIMIT 1
+      ),
+      chosen_group AS (
+        SELECT COALESCE(
+          (SELECT "id" FROM target_group),
+          (SELECT "id" FROM fallback_group)
+        ) AS "id"
+      )
+      INSERT INTO "Permission" ("name", "displayName", "description", "groupId")
+      VALUES ($1, $2, $3, (SELECT "id" FROM chosen_group))
+      ON CONFLICT ("name") DO UPDATE
+      SET
+        "displayName" = EXCLUDED."displayName",
+        "description" = EXCLUDED."description",
+        "groupId" = COALESCE("Permission"."groupId", EXCLUDED."groupId")
+      `,
+      [perm.name, perm.displayName, perm.description, perm.groupKey]
+    );
+  }
+
+  await pool.query(
+    `
+    INSERT INTO "RolePermissions" ("roleId", "permissionId")
+    SELECT r."id", p."id"
+    FROM "Role" r
+    JOIN "Permission" p ON p."name" = ANY($2::text[])
+    WHERE r."name" = ANY($1::text[])
+    ON CONFLICT ("roleId", "permissionId") DO NOTHING
+    `,
+    [['department_manager', 'admin'], permissions.map((perm) => perm.name)]
+  );
+}
+
 async function main() {
   const initMode = process.env.DB_INIT_MODE || 'push'; // push | migrate
   const autoSeed = process.env.DB_AUTO_SEED !== '0';
@@ -85,12 +148,6 @@ async function main() {
     run(pushCmd);
   }
 
-  if (!autoSeed) {
-    console.log('[init] auto seed disabled (DB_AUTO_SEED=0)');
-    await pool.end().catch(() => undefined);
-    return;
-  }
-
   async function tableHasRows(tableName) {
     try {
       const res = await pool.query(`SELECT EXISTS (SELECT 1 FROM "${tableName}" LIMIT 1) AS present;`);
@@ -103,19 +160,36 @@ async function main() {
   }
 
   try {
-    const [hasRoles, hasServices] = await Promise.all([
-      tableHasRows('Role'),
-      tableHasRows('Service'),
-    ]);
-
-    if (!hasRoles || !hasServices) {
-      const reasons = [];
-      if (!hasRoles) reasons.push('roles empty');
-      if (!hasServices) reasons.push('services empty');
-      console.log(`[init] seed required (${reasons.join(', ')}) -> running seed`);
-      run('node dist/prisma/seed.js');
+    if (!autoSeed) {
+      console.log('[init] auto seed disabled (DB_AUTO_SEED=0)');
     } else {
-      console.log('[init] seed skipped (roles and services already exist)');
+      const [hasRoles, hasServices] = await Promise.all([
+        tableHasRows('Role'),
+        tableHasRows('Service'),
+      ]);
+
+      if (!hasRoles || !hasServices) {
+        const reasons = [];
+        if (!hasRoles) reasons.push('roles empty');
+        if (!hasServices) reasons.push('services empty');
+        console.log(`[init] seed required (${reasons.join(', ')}) -> running seed`);
+        run('node dist/prisma/seed.js');
+      } else {
+        console.log('[init] seed skipped (roles and services already exist)');
+      }
+    }
+
+    try {
+      await reconcileAppealsAnalyticsRbac(pool);
+      console.log('[init] RBAC reconcile applied for appeals analytics permissions');
+    } catch (error) {
+      const code = error && error.code;
+      // If schema is not ready yet, do not block app start.
+      if (code === '42P01' || code === '42703') {
+        console.warn('[init] RBAC reconcile skipped: schema objects are not ready yet');
+      } else {
+        throw error;
+      }
     }
   } finally {
     await pool.end().catch(() => undefined);
