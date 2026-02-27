@@ -204,6 +204,141 @@ describe('Appeals analytics + labor', () => {
     expect((res.body?.data?.data || []).some((row: any) => row.id === appeal.id)).toBe(true);
   });
 
+  test('analytics appeals + kpi support paymentState filters', async () => {
+    const baseTitle = `Payment state ${Date.now()}`;
+    const fromDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const toDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    await prisma.department.update({
+      where: { id: managerDepartmentId },
+      data: { appealPaymentRequired: true, appealLaborHourlyRate: 100 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: employeeUser.id },
+      data: { appealLaborHourlyRate: 100 },
+    });
+
+    const paidAppeal = await prisma.appeal.create({
+      data: {
+        number: 920000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title: `${baseTitle} PAID`,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+    const partialAppeal = await prisma.appeal.create({
+      data: {
+        number: 921000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title: `${baseTitle} PARTIAL`,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+    const unsetAppeal = await prisma.appeal.create({
+      data: {
+        number: 922000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title: `${baseTitle} UNSET`,
+        status: AppealStatus.OPEN,
+      },
+    });
+    const notRequiredAppeal = await prisma.appeal.create({
+      data: {
+        number: 923000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title: `${baseTitle} NOT_REQUIRED`,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+
+    for (const appeal of [paidAppeal, partialAppeal, unsetAppeal, notRequiredAppeal]) {
+      await prisma.appealAssignee.create({
+        data: { appealId: appeal.id, userId: employeeUser.id },
+      });
+    }
+
+    const paidLaborRes = await request(app)
+      .put(`/appeals/${paidAppeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 8, paidHours: 8 }],
+      });
+    expect(paidLaborRes.status).toBe(200);
+
+    const partialLaborRes = await request(app)
+      .put(`/appeals/${partialAppeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 8, paidHours: 3 }],
+      });
+    expect(partialLaborRes.status).toBe(200);
+
+    await prisma.employeeProfile.update({
+      where: { userId: employeeUser.id },
+      data: { appealLaborHourlyRate: 0 },
+    });
+    const notRequiredLaborRes = await request(app)
+      .put(`/appeals/${notRequiredAppeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 5, paidHours: 0 }],
+      });
+    expect(notRequiredLaborRes.status).toBe(200);
+    expect(notRequiredLaborRes.body?.data?.laborEntries?.[0]?.paymentStatus).toBe(AppealLaborPaymentStatus.NOT_REQUIRED);
+
+    const paidRes = await request(app)
+      .get('/appeals/analytics/appeals')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'PAID' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(paidRes.status).toBe(200);
+    const paidIds = new Set((paidRes.body?.data?.data || []).map((row: any) => row.id));
+    expect(paidIds.has(paidAppeal.id)).toBe(true);
+    expect(paidIds.has(partialAppeal.id)).toBe(false);
+    expect(paidIds.has(unsetAppeal.id)).toBe(false);
+    expect(paidIds.has(notRequiredAppeal.id)).toBe(false);
+
+    const unpaidRes = await request(app)
+      .get('/appeals/analytics/appeals')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'UNPAID' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(unpaidRes.status).toBe(200);
+    const unpaidIds = new Set((unpaidRes.body?.data?.data || []).map((row: any) => row.id));
+    expect(unpaidIds.has(partialAppeal.id)).toBe(true);
+    expect(unpaidIds.has(paidAppeal.id)).toBe(false);
+
+    const unsetRes = await request(app)
+      .get('/appeals/analytics/appeals')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'UNSET' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(unsetRes.status).toBe(200);
+    const unsetIds = new Set((unsetRes.body?.data?.data || []).map((row: any) => row.id));
+    expect(unsetIds.has(unsetAppeal.id)).toBe(true);
+    expect(unsetIds.has(notRequiredAppeal.id)).toBe(true);
+    expect(unsetIds.has(partialAppeal.id)).toBe(false);
+
+    const allKpiRes = await request(app)
+      .get('/appeals/analytics/kpi-dashboard')
+      .query({ fromDate, toDate, search: baseTitle })
+      .set('Authorization', `Bearer ${managerToken}`);
+    const unpaidKpiRes = await request(app)
+      .get('/appeals/analytics/kpi-dashboard')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'UNPAID' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    const unsetKpiRes = await request(app)
+      .get('/appeals/analytics/kpi-dashboard')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'UNSET' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(allKpiRes.status).toBe(200);
+    expect(unpaidKpiRes.status).toBe(200);
+    expect(unsetKpiRes.status).toBe(200);
+    expect(unpaidKpiRes.body?.data?.appeals?.totalCount).toBeLessThan(allKpiRes.body?.data?.appeals?.totalCount);
+    expect(unsetKpiRes.body?.data?.appeals?.totalCount).toBeGreaterThanOrEqual(1);
+  });
+
   test('labor upsert normalizes paymentStatus to NOT_REQUIRED for no-pay department', async () => {
     const noPayDepartment = await prisma.department.create({
       data: {
@@ -540,5 +675,89 @@ describe('Appeals analytics + labor', () => {
     );
     expect(Buffer.isBuffer(res.body)).toBe(true);
     expect(res.body.slice(0, 2).toString()).toBe('PK');
+  });
+
+  test('analytics export appeals supports selected columns and keeps default full export', async () => {
+    const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const toDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const title = `Export columns ${Date.now()}`;
+
+    await prisma.department.update({
+      where: { id: managerDepartmentId },
+      data: { appealPaymentRequired: true, appealLaborHourlyRate: 100 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: employeeUser.id },
+      data: { appealLaborHourlyRate: 100 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: managerUser.id },
+      data: { departmentId: managerDepartmentId, appealLaborHourlyRate: 120 },
+    });
+
+    const appeal = await prisma.appeal.create({
+      data: {
+        number: 930000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+    await prisma.appealAssignee.createMany({
+      data: [
+        { appealId: appeal.id, userId: employeeUser.id },
+        { appealId: appeal.id, userId: managerUser.id },
+      ],
+      skipDuplicates: true,
+    });
+    const laborRes = await request(app)
+      .put(`/appeals/${appeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        items: [
+          { assigneeUserId: employeeUser.id, accruedHours: 4, paidHours: 2 },
+          { assigneeUserId: managerUser.id, accruedHours: 3, paidHours: 3 },
+        ],
+      });
+    expect(laborRes.status).toBe(200);
+
+    const selectedRes = await request(app)
+      .get('/appeals/analytics/export/appeals')
+      .query({
+        fromDate,
+        toDate,
+        departmentId: managerDepartmentId,
+        search: title,
+        format: 'csv',
+        columns: 'number,title,assignees,hoursAccrued,amountPaid',
+      })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(selectedRes.status).toBe(200);
+    const selectedCsv = String(selectedRes.text || '');
+    const selectedHeader = selectedCsv.split('\n')[0] || '';
+    expect(selectedHeader).toContain('№');
+    expect(selectedHeader).toContain('Обращение');
+    expect(selectedHeader).toContain('Исполнители');
+    expect(selectedHeader).toContain('Часы начислено');
+    expect(selectedHeader).toContain('Сумма оплачено');
+    expect(selectedHeader).not.toContain('Статус');
+    expect(selectedCsv.split('\n').length).toBeGreaterThan(2);
+
+    const defaultRes = await request(app)
+      .get('/appeals/analytics/export/appeals')
+      .query({
+        fromDate,
+        toDate,
+        departmentId: managerDepartmentId,
+        search: title,
+        format: 'csv',
+      })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(defaultRes.status).toBe(200);
+    const defaultHeader = String(defaultRes.text || '').split('\n')[0] || '';
+    expect(defaultHeader).toContain('Статус');
+    expect(defaultHeader).toContain('Ставка ₽/ч');
+    expect(defaultHeader).toContain('Сумма к доплате');
   });
 });

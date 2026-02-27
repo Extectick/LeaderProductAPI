@@ -189,6 +189,27 @@ export type ExportQuery = z.infer<typeof ExportQuerySchema>;
 /* ===============================
  *   /appeals/analytics/* (GET)
  * =============================== */
+const AnalyticsPaymentStateEnum = z.enum(['PAID', 'UNPAID', 'UNSET']);
+const AnalyticsExportColumnEnum = z.enum([
+  'number',
+  'title',
+  'status',
+  'department',
+  'deadline',
+  'slaOpen',
+  'slaWork',
+  'slaToTake',
+  'slaToResolve',
+  'assignees',
+  'hoursAccrued',
+  'hoursPaid',
+  'hoursRemaining',
+  'hourlyRate',
+  'amountAccrued',
+  'amountPaid',
+  'amountRemaining',
+]);
+
 export const AnalyticsAppealsQuerySchema = z.object({
   fromDate: zISODateString,
   toDate: zISODateString,
@@ -211,6 +232,7 @@ export const AnalyticsAppealsQuerySchema = z.object({
       return v;
     }, z.number().int().positive().optional()),
   status: z.nativeEnum(AppealStatus).optional(),
+  paymentState: AnalyticsPaymentStateEnum.optional(),
   search: zOptionalNonEmptyString,
   limit: z
     .preprocess((v) => (typeof v === 'string' ? Number(v) : v), z.number().int().min(1).max(100))
@@ -256,6 +278,7 @@ export const AnalyticsKpiDashboardQuerySchema = z.object({
       return v;
     }, z.number().int().positive().optional()),
   status: z.nativeEnum(AppealStatus).optional(),
+  paymentState: AnalyticsPaymentStateEnum.optional(),
   search: zOptionalNonEmptyString,
 });
 
@@ -361,7 +384,25 @@ export const ForecastQuerySchema = z.object({
 export const AnalyticsExportQuerySchema = AnalyticsCommonQuerySchema.extend({
   format: z.enum(['csv', 'xlsx']).default('csv'),
   status: z.nativeEnum(AppealStatus).optional(),
+  paymentState: AnalyticsPaymentStateEnum.optional(),
   search: zOptionalNonEmptyString,
+  columns: z
+    .preprocess((v) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      if (Array.isArray(v)) {
+        return v
+          .flatMap((item) => String(item || '').split(','))
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+      if (typeof v === 'string') {
+        return v
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+      return v;
+    }, z.array(AnalyticsExportColumnEnum).min(1).optional()),
   userId: z
     .preprocess((v) => {
       if (v === undefined || v === null || v === '') return undefined;

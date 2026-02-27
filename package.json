@@ -41,6 +41,7 @@
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
+    "exceljs": "^4.4.0",
     "expo-server-sdk": "^5.0.0",
     "express": "^5.1.0",
     "geoip-lite": "^1.4.10",

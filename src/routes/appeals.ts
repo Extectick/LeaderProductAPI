@@ -3,7 +3,7 @@ import express from 'express';
 
 import multer from 'multer';
 import { Parser } from 'json2csv';
-const XLSX: any = require('xlsx');
+import ExcelJS from 'exceljs';
 import {
   Prisma,
   AppealStatus,
@@ -164,6 +164,66 @@ const ACTIVE_APPEAL_STATUSES: AppealStatus[] = [
   AppealStatus.IN_PROGRESS,
   AppealStatus.RESOLVED,
 ];
+
+type AnalyticsPaymentState = 'PAID' | 'UNPAID' | 'UNSET';
+type AnalyticsExportColumnKey =
+  | 'number'
+  | 'title'
+  | 'status'
+  | 'department'
+  | 'deadline'
+  | 'slaOpen'
+  | 'slaWork'
+  | 'slaToTake'
+  | 'slaToResolve'
+  | 'assignees'
+  | 'hoursAccrued'
+  | 'hoursPaid'
+  | 'hoursRemaining'
+  | 'hourlyRate'
+  | 'amountAccrued'
+  | 'amountPaid'
+  | 'amountRemaining';
+
+const ANALYTICS_EXPORT_COLUMN_ORDER: AnalyticsExportColumnKey[] = [
+  'number',
+  'title',
+  'status',
+  'department',
+  'deadline',
+  'slaOpen',
+  'slaWork',
+  'slaToTake',
+  'slaToResolve',
+  'assignees',
+  'hoursAccrued',
+  'hoursPaid',
+  'hoursRemaining',
+  'hourlyRate',
+  'amountAccrued',
+  'amountPaid',
+  'amountRemaining',
+];
+
+const ANALYTICS_EXPORT_COLUMN_HEADERS: Record<AnalyticsExportColumnKey, string> = {
+  number: '№',
+  title: 'Обращение',
+  status: 'Статус',
+  department: 'Отдел',
+  deadline: 'Дедлайн',
+  slaOpen: 'Открыто',
+  slaWork: 'В работе',
+  slaToTake: 'До взятия',
+  slaToResolve: 'До решения',
+  assignees: 'Исполнители',
+  hoursAccrued: 'Часы начислено',
+  hoursPaid: 'Часы оплачено',
+  hoursRemaining: 'Часы остаток',
+  hourlyRate: 'Ставка ₽/ч',
+  amountAccrued: 'Сумма начислено',
+  amountPaid: 'Сумма оплачено',
+  amountRemaining: 'Сумма к доплате',
+};
 
 function getUserDisplayName(user: UserMiniRaw | null) {
   if (!user) return 'Пользователь';
@@ -437,6 +497,7 @@ function buildAnalyticsAppealsWhere(params: {
   toDate?: string;
   assigneeUserId?: number;
   status?: AppealStatus;
+  paymentState?: AnalyticsPaymentState;
   search?: string;
 }): Prisma.AppealWhereInput {
   const {
@@ -447,6 +508,7 @@ function buildAnalyticsAppealsWhere(params: {
     toDate,
     assigneeUserId,
     status,
+    paymentState,
     search,
   } = params;
   const where: Prisma.AppealWhereInput = {
@@ -456,6 +518,51 @@ function buildAnalyticsAppealsWhere(params: {
   };
 
   if (status) where.status = status;
+  if (paymentState === 'UNPAID') {
+    where.laborEntries = {
+      some: {
+        hours: { gt: 0 },
+        paymentStatus: { in: [AppealLaborPaymentStatus.UNPAID, AppealLaborPaymentStatus.PARTIAL] },
+      },
+    };
+  } else if (paymentState === 'PAID') {
+    const existingAnd = Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : [];
+    where.AND = [
+      ...existingAnd,
+      {
+        laborEntries: {
+          some: {
+            hours: { gt: 0 },
+            paymentStatus: AppealLaborPaymentStatus.PAID,
+          },
+        },
+      },
+      {
+        NOT: {
+          laborEntries: {
+            some: {
+              hours: { gt: 0 },
+              paymentStatus: { in: [AppealLaborPaymentStatus.UNPAID, AppealLaborPaymentStatus.PARTIAL] },
+            },
+          },
+        },
+      },
+    ];
+  } else if (paymentState === 'UNSET') {
+    where.NOT = [
+      ...(Array.isArray(where.NOT) ? where.NOT : where.NOT ? [where.NOT] : []),
+      {
+        laborEntries: {
+          some: {
+            hours: { gt: 0 },
+            paymentStatus: {
+              in: [AppealLaborPaymentStatus.PAID, AppealLaborPaymentStatus.UNPAID, AppealLaborPaymentStatus.PARTIAL],
+            },
+          },
+        },
+      },
+    ];
+  }
   if (assigneeUserId) {
     where.assignees = { some: { userId: assigneeUserId } };
   }
@@ -588,7 +695,7 @@ function formatAnalyticsDeadlineForExport(params: {
   return `${deadlineText} (В срок)`;
 }
 
-function formatLaborSummaryForExport(params: {
+function buildLaborColumnsForExport(params: {
   assignees: Array<{ id: number; firstName?: string | null; lastName?: string | null; email?: string | null; effectiveHourlyRateRub: number }>;
   laborEntries: Array<{
     assigneeUserId: number;
@@ -597,33 +704,127 @@ function formatLaborSummaryForExport(params: {
     remainingHours: number;
     payable: boolean;
     effectiveHourlyRateRub: number;
+    amountAccruedRub: number;
+    amountPaidRub: number;
+    amountRemainingRub: number;
   }>;
 }) {
-  const rows = (params.assignees || []).map((assignee) => {
+  const assignees = params.assignees || [];
+  if (!assignees.length) {
+    return {
+      assignees: 'Исполнители не назначены',
+      hoursAccrued: '—',
+      hoursPaid: '—',
+      hoursRemaining: '—',
+      hourlyRate: '—',
+      amountAccrued: '—',
+      amountPaid: '—',
+      amountRemaining: '—',
+    };
+  }
+
+  const lines = {
+    assignees: [] as string[],
+    hoursAccrued: [] as string[],
+    hoursPaid: [] as string[],
+    hoursRemaining: [] as string[],
+    hourlyRate: [] as string[],
+    amountAccrued: [] as string[],
+    amountPaid: [] as string[],
+    amountRemaining: [] as string[],
+  };
+
+  for (const assignee of assignees) {
     const labor = (params.laborEntries || []).find((entry) => entry.assigneeUserId === assignee.id);
     const accruedHours = labor?.accruedHours ?? 0;
     const paidHours = labor?.paidHours ?? 0;
     const remainingHours = labor?.remainingHours ?? Math.max(0, accruedHours - paidHours);
-    const rate = labor?.effectiveHourlyRateRub ?? assignee.effectiveHourlyRateRub ?? 0;
-    if (!labor?.payable) {
-      return `${exportPersonName(assignee)} — ${formatHoursValueForExport(accruedHours)} • Не требуется`;
+    lines.assignees.push(exportPersonName(assignee));
+    lines.hoursAccrued.push(formatHoursValueForExport(accruedHours));
+    lines.hoursPaid.push(formatHoursValueForExport(paidHours));
+    lines.hoursRemaining.push(formatHoursValueForExport(remainingHours));
+    if (!labor) {
+      lines.hourlyRate.push('Не установлено');
+    } else if (labor.payable) {
+      lines.hourlyRate.push(`${formatRubForExport(labor.effectiveHourlyRateRub)}/ч`);
+    } else {
+      lines.hourlyRate.push('Не требуется');
     }
-    return `${exportPersonName(assignee)} — начисл. ${formatHoursValueForExport(accruedHours, false)}, выпл. ${formatHoursValueForExport(paidHours, false)}, остаток ${formatHoursValueForExport(remainingHours)} • ${formatRubForExport(rate)}/ч`;
-  });
-  return rows.length ? rows.join('; ') : 'Исполнители не назначены';
+    lines.amountAccrued.push(formatRubForExport(labor?.amountAccruedRub ?? 0));
+    lines.amountPaid.push(formatRubForExport(labor?.amountPaidRub ?? 0));
+    lines.amountRemaining.push(formatRubForExport(labor?.amountRemainingRub ?? 0));
+  }
+
+  return {
+    assignees: lines.assignees.join('\n'),
+    hoursAccrued: lines.hoursAccrued.join('\n'),
+    hoursPaid: lines.hoursPaid.join('\n'),
+    hoursRemaining: lines.hoursRemaining.join('\n'),
+    hourlyRate: lines.hourlyRate.join('\n'),
+    amountAccrued: lines.amountAccrued.join('\n'),
+    amountPaid: lines.amountPaid.join('\n'),
+    amountRemaining: lines.amountRemaining.join('\n'),
+  };
 }
 
-function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], footerRow?: Record<string, any>) {
-  if (!XLSX?.utils) {
-    throw new Error('xlsx package is not available');
+async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], footerRow?: Record<string, any>) {
+  const orderedKeys = Object.keys(rows[0] || footerRow || {});
+  const probeRows = footerRow ? [...rows, footerRow] : rows;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(sheetName);
+
+  sheet.columns = orderedKeys.map((key) => {
+    const headerLen = String(key).length;
+    const maxCellLen = probeRows.reduce((maxLen, row) => {
+      const raw = row?.[key];
+      const value = raw == null ? '' : String(raw);
+      const lineMax = value
+        .split(/\r?\n/)
+        .reduce((lineLen, line) => Math.max(lineLen, line.length), 0);
+      return Math.max(maxLen, lineMax);
+    }, 0);
+    const width = Math.min(80, Math.max(12, Math.max(headerLen, maxCellLen) + 2));
+    return { header: key, key, width };
+  });
+
+  if (orderedKeys.length > 0) {
+    for (const row of rows) {
+      const rowData: Record<string, string> = {};
+      for (const key of orderedKeys) rowData[key] = row?.[key] == null ? '' : String(row[key]);
+      sheet.addRow(rowData);
+    }
+    if (footerRow) {
+      const footerData: Record<string, string> = {};
+      for (const key of orderedKeys) footerData[key] = footerRow?.[key] == null ? '' : String(footerRow[key]);
+      sheet.addRow(footerData);
+    }
   }
-  const ws = XLSX.utils.json_to_sheet(rows);
-  if (footerRow) {
-    XLSX.utils.sheet_add_json(ws, [footerRow], { skipHeader: true, origin: -1 });
+
+  const dataStartRow = 2;
+  for (let rowNum = dataStartRow; rowNum <= sheet.rowCount; rowNum += 1) {
+    const row = sheet.getRow(rowNum);
+    let maxLines = 1;
+    for (let col = 1; col <= orderedKeys.length; col += 1) {
+      const cell = row.getCell(col);
+      const value = cell.value == null ? '' : String(cell.value);
+      const lines = value ? value.split(/\r?\n/).length : 1;
+      maxLines = Math.max(maxLines, lines);
+      cell.alignment = {
+        wrapText: true,
+        vertical: 'top',
+      };
+    }
+    row.height = Math.max(18, maxLines * 18 + 2);
   }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+
+  const headerRow = sheet.getRow(1);
+  headerRow.height = 22;
+  for (let col = 1; col <= orderedKeys.length; col += 1) {
+    headerRow.getCell(col).alignment = { wrapText: true, vertical: 'middle' };
+  }
+
+  const raw = await workbook.xlsx.writeBuffer();
+  return Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
 }
 
 const router = express.Router();
@@ -1481,7 +1682,7 @@ router.get(
       }
 
       const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
-      const { fromDate, toDate, departmentId, assigneeUserId, status, search, limit, offset } = parsed.data;
+      const { fromDate, toDate, departmentId, assigneeUserId, status, paymentState, search, limit, offset } = parsed.data;
 
       if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
         return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
@@ -1495,6 +1696,7 @@ router.get(
         toDate,
         assigneeUserId,
         status,
+        paymentState,
         search,
       });
 
@@ -2436,7 +2638,7 @@ router.get(
       }
 
       const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
-      const { fromDate, toDate, departmentId, assigneeUserId, status, search } = parsed.data;
+      const { fromDate, toDate, departmentId, assigneeUserId, status, paymentState, search } = parsed.data;
       if (!roleFlags.isAdmin && departmentId && !managedDepartmentIds.includes(departmentId)) {
         return res.status(403).json(errorResponse('Нет доступа к отделу', ErrorCodes.FORBIDDEN));
       }
@@ -2449,6 +2651,7 @@ router.get(
         toDate,
         assigneeUserId,
         status,
+        paymentState,
         search,
       });
 
@@ -3105,8 +3308,11 @@ router.get(
       if (!user) return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
       const managedDepartmentIds = await getManagedDepartmentIds(user as UserMiniRaw);
       const roleFlags = toRoleFlags(user as UserMiniRaw);
-      const { fromDate, toDate, departmentId, userId, assigneeUserId, status, search, format } = parsed.data;
+      const { fromDate, toDate, departmentId, userId, assigneeUserId, status, paymentState, search, format, columns } = parsed.data;
       const effectiveAssigneeId = assigneeUserId || undefined;
+      const selectedColumns = columns?.length
+        ? ANALYTICS_EXPORT_COLUMN_ORDER.filter((key) => columns.includes(key))
+        : [...ANALYTICS_EXPORT_COLUMN_ORDER];
 
       const where: Prisma.AppealWhereInput = buildAnalyticsAppealsWhere({
         roleFlags,
@@ -3116,10 +3322,15 @@ router.get(
         toDate,
         assigneeUserId: effectiveAssigneeId,
         status,
+        paymentState,
         search,
       });
       if (!effectiveAssigneeId && userId) {
-        where.laborEntries = { some: { assigneeUserId: userId } };
+        const existingAnd = Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : [];
+        where.AND = [
+          ...existingAnd,
+          { laborEntries: { some: { assigneeUserId: userId } } },
+        ];
       }
 
       const rows = await prisma.appeal.findMany({
@@ -3159,7 +3370,7 @@ router.get(
         },
       });
       const now = new Date();
-      const flat = rows.map((appeal) => {
+      const rawRows = rows.map((appeal) => {
         const completedAt = appeal.statusHistory.find((h) => h.newStatus === AppealStatus.COMPLETED)?.changedAt ?? null;
         const sla = calculateAppealSla(
           appeal.createdAt,
@@ -3187,46 +3398,43 @@ router.get(
             departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
           })
         );
+        const laborColumns = buildLaborColumnsForExport({
+          assignees,
+          laborEntries,
+        });
         return {
-          '№': `#${appeal.number}`,
-          'Обращение': appeal.title || 'Без названия',
-          'Статус': appealStatusLabelForExport(appeal.status),
-          'Отдел': appeal.toDepartment.name,
-          'Дедлайн': formatAnalyticsDeadlineForExport({
+          number: `#${appeal.number}`,
+          title: appeal.title || 'Без названия',
+          status: appealStatusLabelForExport(appeal.status),
+          department: appeal.toDepartment.name,
+          deadline: formatAnalyticsDeadlineForExport({
             status: appeal.status,
             deadline: appeal.deadline,
             completedAt,
             now,
           }),
-          'Открыто': formatHoursByMsForExport(sla.openDurationMs),
-          'В работе': formatHoursByMsForExport(sla.workDurationMs),
-          'До взятия': formatHoursByMsForExport(sla.timeToFirstInProgressMs),
-          'До решения': formatHoursByMsForExport(sla.timeToFirstResolvedMs),
-          'Исполнители / часы / выплаты': formatLaborSummaryForExport({
-            assignees,
-            laborEntries,
-          }),
+          slaOpen: formatHoursByMsForExport(sla.openDurationMs),
+          slaWork: formatHoursByMsForExport(sla.workDurationMs),
+          slaToTake: formatHoursByMsForExport(sla.timeToFirstInProgressMs),
+          slaToResolve: formatHoursByMsForExport(sla.timeToFirstResolvedMs),
+          ...laborColumns,
         };
       });
+      const flat = rawRows.map((row) => {
+        const out: Record<string, string> = {};
+        for (const key of selectedColumns) {
+          out[ANALYTICS_EXPORT_COLUMN_HEADERS[key]] = String((row as any)[key] ?? '');
+        }
+        return out;
+      });
       const parser = new Parser({
-        fields: [
-          '№',
-          'Обращение',
-          'Статус',
-          'Отдел',
-          'Дедлайн',
-          'Открыто',
-          'В работе',
-          'До взятия',
-          'До решения',
-          'Исполнители / часы / выплаты',
-        ],
+        fields: selectedColumns.map((key) => ANALYTICS_EXPORT_COLUMN_HEADERS[key]),
       });
       const csv = parser.parse(flat);
       const ext = format === 'xlsx' ? 'xlsx' : 'csv';
       res.setHeader('Content-Disposition', `attachment; filename=\"appeals_analytics_${Date.now()}.${ext}\"`);
       if (format === 'xlsx') {
-        const xlsx = buildXlsxBuffer('Appeals', flat);
+        const xlsx = await buildXlsxBuffer('Appeals', flat);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         return res.status(200).send(xlsx);
       }
@@ -3302,7 +3510,7 @@ router.get(
       const ext = format === 'xlsx' ? 'xlsx' : 'csv';
       res.setHeader('Content-Disposition', `attachment; filename=\"users_analytics_${Date.now()}.${ext}\"`);
       if (format === 'xlsx') {
-        const xlsx = buildXlsxBuffer('Users', flat, {
+        const xlsx = await buildXlsxBuffer('Users', flat, {
           userId: 'TOTAL',
           user: '',
           department: '',
