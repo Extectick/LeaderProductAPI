@@ -253,6 +253,7 @@ Upsert по паре `(productId, warehouseId)`. Если товар или ск
 Если передан `error`, заказ возвращается в `QUEUED` и ошибка сохраняется. Иначе статус ставится в `SENT_TO_1C` (или в переданный `status`).
 
 ### 3.10 Статусы заказов из 1С
+Note: when `status` is provided on `POST /api/1c/orders/:guid/ack`, it must be `SENT_TO_1C`. Order lifecycle updates from 1C belong to `POST /api/1c/orders/status/batch`.
 `POST /api/1c/orders/status/batch`
 ```json
 {

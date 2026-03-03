@@ -40,7 +40,7 @@ jest.mock('../src/prisma/client', () => ({
 
 import app from '../src/index';
 
-describe('POST /api/1c/nomenclature/batch', () => {
+describe('POST /api/1c/nomenclature/batch (unit)', () => {
   beforeEach(() => {
     process.env.ONEC_SECRET = 'test-secret';
     jest.clearAllMocks();

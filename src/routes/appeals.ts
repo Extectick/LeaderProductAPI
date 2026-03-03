@@ -3,7 +3,6 @@ import express from 'express';
 
 import multer from 'multer';
 import { Parser } from 'json2csv';
-import ExcelJS from 'exceljs';
 import {
   Prisma,
   AppealStatus,
@@ -289,7 +288,7 @@ async function getManagedDepartmentIds(user: UserMiniRaw | null) {
   for (const dr of user.departmentRoles || []) {
     if (dr.role?.name === 'department_manager') managed.add(dr.departmentId);
   }
-  if (managed.size === 0 && user.role?.name === 'department_manager' && user.employeeProfile?.department?.id) {
+  if (user.role?.name === 'department_manager' && user.employeeProfile?.department?.id) {
     managed.add(user.employeeProfile.department.id);
   }
   return Array.from(managed);
@@ -770,7 +769,8 @@ function buildLaborColumnsForExport(params: {
 async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], footerRow?: Record<string, any>) {
   const orderedKeys = Object.keys(rows[0] || footerRow || {});
   const probeRows = footerRow ? [...rows, footerRow] : rows;
-  const workbook = new ExcelJS.Workbook();
+  const { Workbook } = loadExcelJs();
+  const workbook = new Workbook();
   const sheet = workbook.addWorksheet(sheetName);
 
   sheet.columns = orderedKeys.map((key) => {
@@ -825,6 +825,14 @@ async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], f
 
   const raw = await workbook.xlsx.writeBuffer();
   return Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
+}
+
+function loadExcelJs(): { Workbook: new () => any } {
+  try {
+    return require('exceljs') as { Workbook: new () => any };
+  } catch (error) {
+    throw new Error('exceljs is not installed. Install dependencies to use XLSX export endpoints.');
+  }
 }
 
 const router = express.Router();
@@ -3589,11 +3597,12 @@ router.get(
       const isCreator = appeal.createdById === userId;
       const isAssignee = appeal.assignees.some((a: any) => a.userId === userId);
       const isAdmin = isAdminRole(actor as UserMiniRaw);
+      const isManager = isDepartmentManager(actor as UserMiniRaw, appeal.toDepartmentId);
       const employee = await prisma.employeeProfile.findFirst({
         where: { userId, departmentId: appeal.toDepartmentId },
       });
 
-      if (!isCreator && !isAssignee && !employee && !isAdmin) {
+      if (!isCreator && !isAssignee && !employee && !isManager && !isAdmin) {
         return res
           .status(403)
           .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));
@@ -4724,7 +4733,7 @@ router.put(
         where: { userId, departmentId: appeal.toDepartmentId },
       });
 
-      if (!isCreator && !isAssignee && !employee && !isAdmin) {
+      if (!isCreator && !isAssignee && !employee && !isManager && !isAdmin) {
         return res
           .status(403)
           .json(errorResponse('Нет доступа к этому обращению', ErrorCodes.FORBIDDEN));

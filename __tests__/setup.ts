@@ -1,11 +1,9 @@
-import * as path from 'path';
-import dotenv from 'dotenv';
 import { execSync } from 'child_process';
+import { CreateBucketCommand, HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 
 process.env.NODE_ENV = 'test';
 
 // Подхватываем .env.test заранее, чтобы Prisma видел корректный postgres URL
-dotenv.config({ path: path.resolve(process.cwd(), '.env.test') });
 
 // Инициализируем Prisma после загрузки env, чтобы взять правильный DATABASE_URL
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -19,16 +17,68 @@ const {
 } = require('../src/rbac/permissionCatalog') as typeof import('../src/rbac/permissionCatalog');
 
 // Отключаем Redis в тестах, чтобы не было лишних подключений/ошибок
-process.env.REDIS_URL = '';
 
 // Явно требуем DATABASE_URL для postgres; без него тесты не имеют смысла
 if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL is required for tests. Set it in .env.test');
+  throw new Error('DATABASE_URL is required for tests. Set DATABASE_URL or TEST_DATABASE_URL.');
 }
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret';
 process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || process.env.JWT_SECRET;
 process.env.REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'test_refresh_secret';
+
+async function ensureTestS3Bucket() {
+  const endpoint = process.env.S3_ENDPOINT;
+  const bucket = process.env.S3_BUCKET;
+  const accessKeyId = process.env.S3_ACCESS_KEY;
+  const secretAccessKey = process.env.S3_SECRET_KEY;
+
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    return;
+  }
+
+  const client = new S3Client({
+    endpoint,
+    region: process.env.S3_REGION || 'us-east-1',
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId,
+      secretAccessKey,
+    },
+  });
+
+  const deadline = Date.now() + 20_000;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      await client.send(new HeadBucketCommand({ Bucket: bucket }));
+      return;
+    } catch (headError) {
+      lastError = headError;
+
+      try {
+        await client.send(new CreateBucketCommand({ Bucket: bucket }));
+        return;
+      } catch (createError: any) {
+        const status = createError?.$metadata?.httpStatusCode;
+        const name = String(createError?.name || '');
+        if (status === 409 || name === 'BucketAlreadyOwnedByYou' || name === 'BucketAlreadyExists') {
+          return;
+        }
+        lastError = createError;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(
+    `Failed to initialize test S3 bucket ${bucket}: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+}
 
 // Синхронизируем схему с тестовой БД (без миграций, чтобы не требовать history)
 try {
@@ -43,6 +93,8 @@ try {
 }
 
 beforeAll(async () => {
+  await ensureTestS3Bucket();
+
   // Применяем миграции
   // Если ты используешь Prisma Migrate, перед тестами имеет смысл выполнить миграции
   // В CI это можно сделать через shell-скрипт `npx prisma migrate deploy`

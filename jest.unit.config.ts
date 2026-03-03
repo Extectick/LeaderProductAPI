@@ -3,15 +3,16 @@ import type { Config } from 'jest';
 const config: Config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  testMatch: ['**/__tests__/**/*.test.ts'],
-  testPathIgnorePatterns: ['\\.unit\\.test\\.ts$'],
-  setupFiles: ['<rootDir>/__tests__/env.setup.ts'],
-  setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
+  testMatch: ['**/__tests__/**/*.unit.test.ts'],
+  setupFiles: ['<rootDir>/__tests__/env.unit.setup.ts'],
+  moduleNameMapper: {
+    '^exceljs$': '<rootDir>/__tests__/mocks/exceljs.ts',
+  },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'json', 'node'],
-  maxWorkers: 1, // чтобы не было гонок при sqlite
   verbose: true,
   testTimeout: 30000,
   forceExit: true,
   detectOpenHandles: true,
 };
+
 export default config;

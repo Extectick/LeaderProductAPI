@@ -21,6 +21,9 @@ interface ScheduledJob {
 // ---- Helpers для безопасного получения Redis ----
 
 function tryGetRedis() {
+  if (process.env.NODE_ENV === 'test') {
+    return null;
+  }
   try {
     const { getRedis } = require('../lib/redis');
     const r = getRedis();

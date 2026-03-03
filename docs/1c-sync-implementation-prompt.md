@@ -15,8 +15,14 @@
 2. `POST /api/1c/warehouses/batch`
 3. `POST /api/1c/counterparties/batch`
 4. `POST /api/1c/agreements/batch`
-5. `POST /api/1c/special-prices/batch`
-6. `POST /api/1c/stock/batch`
+5. `POST /api/1c/product-prices/batch`
+6. `POST /api/1c/special-prices/batch`
+7. `POST /api/1c/stock/batch`
+8. `GET /api/1c/orders/queued`
+9. `POST /api/1c/orders/:guid/ack`
+10. `POST /api/1c/orders/status/batch`
+11. `GET /api/1c/sync/runs`
+12. `GET /api/1c/sync/runs/:runId`
 
 ### 1.2. Что уже есть в Prisma-схеме под 1С
 

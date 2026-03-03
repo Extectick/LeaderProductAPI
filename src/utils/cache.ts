@@ -1,23 +1,44 @@
 import { createClient } from 'redis';
 
-const redisUrl = process.env.REDIS_URL;
 let client: ReturnType<typeof createClient> | null = null;
+let warnedMissingRedis = false;
+let connectStarted = false;
 
-if (redisUrl) {
-  const c = createClient({ url: redisUrl });
-  c.on('error', (err) => console.error('Redis error', err));
-  c.connect().catch((err) => {
-    console.error('Redis connection error', err);
-  });
-  client = c;
-} else {
-  console.warn('REDIS_URL not set; caching disabled');
+function getClient(): ReturnType<typeof createClient> | null {
+  if (process.env.REDIS_DISABLE === '1') {
+    return null;
+  }
+
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    if (!warnedMissingRedis) {
+      console.warn('REDIS_URL not set; caching disabled');
+      warnedMissingRedis = true;
+    }
+    return null;
+  }
+
+  if (!client) {
+    client = createClient({ url: redisUrl });
+    client.on('error', (err) => console.error('Redis error', err));
+  }
+
+  if (!connectStarted) {
+    connectStarted = true;
+    client.connect().catch((err) => {
+      console.error('Redis connection error', err);
+      connectStarted = false;
+    });
+  }
+
+  return client;
 }
 
 export async function cacheGet<T>(key: string): Promise<T | null> {
-  if (!client) return null;
+  const cacheClient = getClient();
+  if (!cacheClient) return null;
   try {
-    const data = await client.get(key);
+    const data = await cacheClient.get(key);
     return data ? (JSON.parse(data) as T) : null;
   } catch (err) {
     console.error('cacheGet error', err);
@@ -26,29 +47,32 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
 }
 
 export async function cacheSet<T>(key: string, value: T, ttlSeconds = 60): Promise<void> {
-  if (!client) return;
+  const cacheClient = getClient();
+  if (!cacheClient) return;
   try {
-    await client.set(key, JSON.stringify(value), { EX: ttlSeconds });
+    await cacheClient.set(key, JSON.stringify(value), { EX: ttlSeconds });
   } catch (err) {
     console.error('cacheSet error', err);
   }
 }
 
 export async function cacheDel(key: string): Promise<void> {
-  if (!client) return;
+  const cacheClient = getClient();
+  if (!cacheClient) return;
   try {
-    await client.del(key);
+    await cacheClient.del(key);
   } catch (err) {
     console.error('cacheDel error', err);
   }
 }
 
 export async function cacheDelPrefix(prefix: string): Promise<void> {
-  if (!client) return;
+  const cacheClient = getClient();
+  if (!cacheClient) return;
   try {
-    const keys = await client.keys(`${prefix}*`);
+    const keys = await cacheClient.keys(`${prefix}*`);
     if (keys.length) {
-      await client.del(keys);
+      await cacheClient.del(keys);
     }
   } catch (err) {
     console.error('cacheDelPrefix error', err);

@@ -187,12 +187,12 @@ export async function resolveServiceAccessForUser(userId: number, serviceKey: st
     return null;
   }
 
-  if (!ctx.isEmployee) {
-    return { service, visible: false, enabled: false, isEmployee: false };
-  }
-
   if (ctx.isAdmin) {
     return { service, visible: true, enabled: true, isEmployee: true };
+  }
+
+  if (!ctx.isEmployee) {
+    return { service, visible: false, enabled: false, isEmployee: false };
   }
 
   const baseVisible = service.isActive && service.defaultVisible;
@@ -224,10 +224,6 @@ export async function listServicesForUser(
 ): Promise<{ services: ServiceAccessView[]; isEmployee: boolean }> {
   const ctx = await resolveUserAccessContext(userId);
 
-  if (!ctx.isEmployee) {
-    return { services: [], isEmployee: false };
-  }
-
   const services = await prisma.service.findMany({
     where: { isActive: true },
     orderBy: { id: 'asc' },
@@ -250,6 +246,10 @@ export async function listServicesForUser(
       })),
       isEmployee: true,
     };
+  }
+
+  if (!ctx.isEmployee) {
+    return { services: [], isEmployee: false };
   }
 
   const roleIds = Array.from(ctx.roleIds);

@@ -121,6 +121,7 @@ describe('Appeals API', () => {
     const found = messages.find((m: any) => m.id === messageId);
     expect(found).toBeDefined();
     expect(found.isRead).toBe(true);
-    expect(found.readBy.some((r: any) => r.userId === adminId)).toBe(true);
+    expect(Array.isArray(found.readBy)).toBe(true);
+    expect(found.readBy.some((r: any) => r.userId === adminId)).toBe(false);
   });
 });

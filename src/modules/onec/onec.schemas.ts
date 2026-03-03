@@ -209,9 +209,11 @@ export const ordersStatusBatchSchema = z.object({
   items: z.array(orderStatusItemSchema).min(1),
 });
 
+const orderAckStatusSchema = z.literal(OrderStatus.SENT_TO_1C);
+
 export const orderAckSchema = z.object({
   ...envelope,
-  status: z.nativeEnum(OrderStatus).optional(),
+  status: orderAckStatusSchema.optional(),
   number1c: z.string().optional(),
   date1c: nullableDate,
   sentTo1cAt: nullableDate,

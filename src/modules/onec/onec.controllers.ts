@@ -41,6 +41,13 @@ const toSingleString = (value: unknown): string | undefined => {
   if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
   return undefined;
 };
+const toBatchKeyPart = (value: string | Date | null | undefined): string => {
+  if (value === null || value === undefined) return 'null';
+  if (value instanceof Date) return value.toISOString();
+  return value;
+};
+const buildBatchKey = (parts: Array<[string, string | Date | null | undefined]>): string =>
+  parts.map(([label, value]) => `${label}=${toBatchKeyPart(value)}`).join('|');
 
 const mapItemStatus = (status: BatchResult['status']): SyncItemStatus =>
   status === 'ok' ? SyncItemStatus.OK : SyncItemStatus.ERROR;
@@ -856,7 +863,15 @@ export const handleSpecialPricesBatch = async (req: Request, res: Response) => {
       const priceTypeMap = new Map(priceTypes.map((p) => [p.guid, p.id]));
 
       for (const item of parsed.items) {
-        const key = item.guid ?? `${item.productGuid}:${item.counterpartyGuid ?? 'all'}`;
+        const key =
+          item.guid ??
+          buildBatchKey([
+            ['productGuid', item.productGuid],
+            ['counterpartyGuid', item.counterpartyGuid],
+            ['agreementGuid', item.agreementGuid],
+            ['priceTypeGuid', item.priceTypeGuid],
+            ['startDate', item.startDate],
+          ]);
         const productId = productMap.get(item.productGuid);
         if (!productId) {
           results.push({
@@ -994,7 +1009,13 @@ export const handleProductPricesBatch = async (req: Request, res: Response) => {
       const priceTypeMap = new Map(priceTypes.map((p) => [p.guid, p.id]));
 
       for (const item of parsed.items) {
-        const key = item.guid ?? `${item.productGuid}:${item.priceTypeGuid ?? 'base'}`;
+        const key =
+          item.guid ??
+          buildBatchKey([
+            ['productGuid', item.productGuid],
+            ['priceTypeGuid', item.priceTypeGuid],
+            ['startDate', item.startDate],
+          ]);
         const productId = productMap.get(item.productGuid);
         if (!productId) {
           results.push({

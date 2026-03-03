@@ -559,7 +559,7 @@ router.get('/orders/queued', handleOrdersQueued);
  *             required: [secret]
  *             properties:
  *               secret: { type: string }
- *               status: { type: string }
+ *               status: { type: string, enum: [SENT_TO_1C] }
  *               number1c: { type: string, nullable: true }
  *               date1c: { type: string, format: date-time, nullable: true }
  *               sentTo1cAt: { type: string, format: date-time, nullable: true }
