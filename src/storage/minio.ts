@@ -132,9 +132,53 @@ export function buildObjectKey(originalName?: string, keyPrefix = S3_KEY_PREFIX)
 }
 
 function publicUrlOrNull(key: string): string | null {
-  if (!S3_PUBLIC_BASE) return null;
-  const base = S3_PUBLIC_BASE.replace(/\/+$/, "");
+  if (!effectiveS3PublicBase) return null;
+  const base = effectiveS3PublicBase.replace(/\/+$/, "");
   return `${base}/${encodeURI(key)}`;
+}
+
+function isUnsafePublicBase(value?: string | null) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === 'minio'
+    ) {
+      return true;
+    }
+
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      const [a, b] = host.split('.').map(Number);
+      if (a === 10) return true;
+      if (a === 127) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+    }
+
+    // Docker/internal hostnames without dots are not usable from mobile clients.
+    if (!host.includes('.')) return true;
+  } catch {
+    return true;
+  }
+
+  return false;
+}
+
+const effectiveS3PublicBase = isUnsafePublicBase(S3_PUBLIC_BASE)
+  ? null
+  : String(S3_PUBLIC_BASE || '').trim() || null;
+
+if (S3_PUBLIC_BASE && !effectiveS3PublicBase) {
+  console.warn(
+    `[minio] Ignoring unsafe S3_PUBLIC_BASE="${S3_PUBLIC_BASE}". Falling back to FILES_BASE_URL/DOMEN_URL.`
+  );
 }
 
 function encodeKeyForPath(key: string) {
@@ -207,8 +251,8 @@ export async function resolveObjectUrl(value?: string | null): Promise<string | 
   const key = raw.startsWith('http') ? extractKeyFromUrl(raw) : raw;
   if (!key) return raw;
 
-  if (S3_PUBLIC_BASE) {
-    const base = S3_PUBLIC_BASE.replace(/\/+$/, '');
+  if (effectiveS3PublicBase) {
+    const base = effectiveS3PublicBase.replace(/\/+$/, '');
     return `${base}/${encodeURI(key)}`;
   }
 
