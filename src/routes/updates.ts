@@ -15,7 +15,13 @@ import {
   ErrorCodes,
   successResponse,
 } from '../utils/apiResponse';
-import { buildObjectKey, deleteObject, presignGet, presignPut, uploadMulterFile } from '../storage/minio';
+import {
+  buildObjectKey,
+  deleteObject,
+  presignPut,
+  resolveObjectUrl,
+  uploadMulterFile,
+} from '../storage/minio';
 import {
   CreateUpdateRequest,
   CreateUpdateResponse,
@@ -332,10 +338,9 @@ router.get(
 
       if (needsFreshUrl && latest.apkKey) {
         try {
-          const presigned = await presignGet(latest.apkKey);
-          payload.downloadUrl = presigned.url;
+          payload.downloadUrl = await resolveObjectUrl(latest.apkKey);
         } catch (e) {
-          console.warn('[updates] presignGet failed', e);
+          console.warn('[updates] resolveObjectUrl failed', e);
         }
       }
 
