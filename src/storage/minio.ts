@@ -144,6 +144,22 @@ function encodeKeyForPath(key: string) {
     .join('/');
 }
 
+export function buildFileAccessUrl(
+  key: string,
+  baseUrl: string,
+  includeToken = FILES_REQUIRE_TOKEN === '1'
+) {
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return null;
+
+  const path = `${base}/${encodeKeyForPath(key)}`;
+  if (!includeToken) return path;
+
+  const ttl = Number(FILES_TOKEN_TTL || 600);
+  const token = signFileToken(key, ttl);
+  return `${path}?token=${encodeURIComponent(token)}`;
+}
+
 /** Presign PUT — клиент грузит напрямую в MinIO */
 export async function presignPut(
   key: string,
@@ -198,13 +214,7 @@ export async function resolveObjectUrl(value?: string | null): Promise<string | 
 
   const filesBase = (FILES_BASE_URL || DOMEN_URL || '').trim().replace(/\/+$/, '');
   if (filesBase) {
-    const path = `${filesBase}/files/${encodeKeyForPath(key)}`;
-    if (FILES_REQUIRE_TOKEN === '1') {
-      const ttl = Number(FILES_TOKEN_TTL || 600);
-      const token = signFileToken(key, ttl);
-      return `${path}?token=${encodeURIComponent(token)}`;
-    }
-    return path;
+    return buildFileAccessUrl(key, `${filesBase}/files`);
   }
 
   const presigned = await presignGet(key);

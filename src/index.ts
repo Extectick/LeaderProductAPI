@@ -128,6 +128,7 @@ app.use('/tracking', trackingRouter);
 app.use('/services', servicesRouter);
 app.use('/home', homeRouter);
 app.use('/updates', updatesRouter);
+app.use('/update-files', filesRouter);
 app.use('/files', filesRouter);
 app.use('/notifications', notificationsRouter);
 app.use('/api/1c', onecRouter);

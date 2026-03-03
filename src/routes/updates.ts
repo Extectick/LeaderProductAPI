@@ -16,6 +16,7 @@ import {
   successResponse,
 } from '../utils/apiResponse';
 import {
+  buildFileAccessUrl,
   buildObjectKey,
   deleteObject,
   presignPut,
@@ -39,6 +40,7 @@ const accessTokenSecret = process.env.ACCESS_TOKEN_SECRET || 'youraccesstokensec
 const UPDATE_PRESIGN_TTL = Number(process.env.UPDATE_PRESIGN_PUT_TTL || process.env.PRESIGN_PUT_TTL || 600);
 const UPDATE_MAX_FILESIZE = 300 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = Number(process.env.UPDATE_UPLOAD_TIMEOUT_MS || 20 * 60 * 1000);
+const UPDATE_PUBLIC_BASE_URL = String(process.env.UPDATE_PUBLIC_BASE_URL || '').trim();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -197,6 +199,15 @@ function computeEtag(payload: unknown) {
   return `W/"${digest}"`;
 }
 
+async function resolveUpdateDownloadUrl(key: string) {
+  if (UPDATE_PUBLIC_BASE_URL) {
+    const directUrl = buildFileAccessUrl(key, UPDATE_PUBLIC_BASE_URL);
+    if (directUrl) return directUrl;
+  }
+
+  return resolveObjectUrl(key);
+}
+
 function getUserIdFromAuthHeader(authHeader?: string): number | undefined {
   if (!authHeader) return undefined;
   const parts = authHeader.split(' ');
@@ -338,9 +349,9 @@ router.get(
 
       if (needsFreshUrl && latest.apkKey) {
         try {
-          payload.downloadUrl = await resolveObjectUrl(latest.apkKey);
+          payload.downloadUrl = await resolveUpdateDownloadUrl(latest.apkKey);
         } catch (e) {
-          console.warn('[updates] resolveObjectUrl failed', e);
+          console.warn('[updates] resolveUpdateDownloadUrl failed', e);
         }
       }
 
