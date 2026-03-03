@@ -19,6 +19,7 @@ import {
   buildFileAccessUrl,
   buildObjectKey,
   deleteObject,
+  presignGet,
   presignPut,
   resolveObjectUrl,
   uploadMulterFile,
@@ -41,6 +42,7 @@ const UPDATE_PRESIGN_TTL = Number(process.env.UPDATE_PRESIGN_PUT_TTL || process.
 const UPDATE_MAX_FILESIZE = 300 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = Number(process.env.UPDATE_UPLOAD_TIMEOUT_MS || 20 * 60 * 1000);
 const UPDATE_PUBLIC_BASE_URL = String(process.env.UPDATE_PUBLIC_BASE_URL || '').trim();
+const HAS_EXTERNAL_PRESIGN_ENDPOINT = Boolean(String(process.env.S3_PRESIGN_ENDPOINT || '').trim());
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -200,6 +202,11 @@ function computeEtag(payload: unknown) {
 }
 
 async function resolveUpdateDownloadUrl(key: string) {
+  if (HAS_EXTERNAL_PRESIGN_ENDPOINT) {
+    const presigned = await presignGet(key);
+    if (presigned?.url) return presigned.url;
+  }
+
   if (UPDATE_PUBLIC_BASE_URL) {
     const directUrl = buildFileAccessUrl(key, UPDATE_PUBLIC_BASE_URL);
     if (directUrl) return directUrl;
