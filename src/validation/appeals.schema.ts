@@ -189,12 +189,14 @@ export type ExportQuery = z.infer<typeof ExportQuerySchema>;
 /* ===============================
  *   /appeals/analytics/* (GET)
  * =============================== */
-const AnalyticsPaymentStateEnum = z.enum(['PAID', 'UNPAID', 'UNSET']);
+const AnalyticsPaymentStateEnum = z.enum(['PAID', 'UNPAID', 'UNSET', 'NOT_REQUIRED']);
 const AnalyticsExportColumnEnum = z.enum([
   'number',
   'title',
+  'createdBy',
   'status',
   'department',
+  'departmentRoute',
   'deadline',
   'slaOpen',
   'slaWork',
@@ -292,6 +294,7 @@ const LaborHoursSchema = z
   });
 
 export const AppealLaborUpsertBodySchema = z.object({
+  laborNotRequired: z.boolean().default(false),
   items: z
     .array(
       z.object({
@@ -305,7 +308,7 @@ export const AppealLaborUpsertBodySchema = z.object({
         path: ['accruedHours'],
       })
     )
-    .min(1),
+    .default([]),
 });
 
 export const UserHourlyRateBodySchema = z.object({

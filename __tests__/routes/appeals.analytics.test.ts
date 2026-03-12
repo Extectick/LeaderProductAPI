@@ -277,17 +277,15 @@ describe('Appeals analytics + labor', () => {
       });
     expect(partialLaborRes.status).toBe(200);
 
-    await prisma.employeeProfile.update({
-      where: { userId: employeeUser.id },
-      data: { appealLaborHourlyRate: 0 },
-    });
     const notRequiredLaborRes = await request(app)
       .put(`/appeals/${notRequiredAppeal.id}/labor`)
       .set('Authorization', `Bearer ${managerToken}`)
       .send({
-        items: [{ assigneeUserId: employeeUser.id, accruedHours: 5, paidHours: 0 }],
+        laborNotRequired: true,
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 0, paidHours: 0 }],
       });
     expect(notRequiredLaborRes.status).toBe(200);
+    expect(notRequiredLaborRes.body?.data?.laborNotRequired).toBe(true);
     expect(notRequiredLaborRes.body?.data?.laborEntries?.[0]?.paymentStatus).toBe(AppealLaborPaymentStatus.NOT_REQUIRED);
 
     const paidRes = await request(app)
@@ -310,6 +308,15 @@ describe('Appeals analytics + labor', () => {
     expect(unpaidIds.has(partialAppeal.id)).toBe(true);
     expect(unpaidIds.has(paidAppeal.id)).toBe(false);
 
+    const notRequiredRes = await request(app)
+      .get('/appeals/analytics/appeals')
+      .query({ fromDate, toDate, search: baseTitle, paymentState: 'NOT_REQUIRED' })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(notRequiredRes.status).toBe(200);
+    const notRequiredIds = new Set((notRequiredRes.body?.data?.data || []).map((row: any) => row.id));
+    expect(notRequiredIds.has(notRequiredAppeal.id)).toBe(true);
+    expect(notRequiredIds.has(unsetAppeal.id)).toBe(false);
+
     const unsetRes = await request(app)
       .get('/appeals/analytics/appeals')
       .query({ fromDate, toDate, search: baseTitle, paymentState: 'UNSET' })
@@ -317,7 +324,7 @@ describe('Appeals analytics + labor', () => {
     expect(unsetRes.status).toBe(200);
     const unsetIds = new Set((unsetRes.body?.data?.data || []).map((row: any) => row.id));
     expect(unsetIds.has(unsetAppeal.id)).toBe(true);
-    expect(unsetIds.has(notRequiredAppeal.id)).toBe(true);
+    expect(unsetIds.has(notRequiredAppeal.id)).toBe(false);
     expect(unsetIds.has(partialAppeal.id)).toBe(false);
 
     const allKpiRes = await request(app)
@@ -337,6 +344,66 @@ describe('Appeals analytics + labor', () => {
     expect(unsetKpiRes.status).toBe(200);
     expect(unpaidKpiRes.body?.data?.appeals?.totalCount).toBeLessThan(allKpiRes.body?.data?.appeals?.totalCount);
     expect(unsetKpiRes.body?.data?.appeals?.totalCount).toBeGreaterThanOrEqual(1);
+  });
+
+  test('explicit laborNotRequired can be reverted back to unset state', async () => {
+    await prisma.department.update({
+      where: { id: managerDepartmentId },
+      data: { appealPaymentRequired: true, appealLaborHourlyRate: 120 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: employeeUser.id },
+      data: { appealLaborHourlyRate: 120 },
+    });
+
+    const appeal = await prisma.appeal.create({
+      data: {
+        number: 924000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title: `Explicit not required ${Date.now()}`,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+
+    await prisma.appealAssignee.create({
+      data: { appealId: appeal.id, userId: employeeUser.id },
+    });
+
+    const enableRes = await request(app)
+      .put(`/appeals/${appeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        laborNotRequired: true,
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 0, paidHours: 0 }],
+      });
+    expect(enableRes.status).toBe(200);
+    expect(enableRes.body?.data?.laborNotRequired).toBe(true);
+    expect(enableRes.body?.data?.laborEntries?.[0]?.paymentStatus).toBe(AppealLaborPaymentStatus.NOT_REQUIRED);
+
+    const disableRes = await request(app)
+      .put(`/appeals/${appeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        laborNotRequired: false,
+        items: [{ assigneeUserId: employeeUser.id, accruedHours: 0, paidHours: 0 }],
+      });
+    expect(disableRes.status).toBe(200);
+    expect(disableRes.body?.data?.laborNotRequired).toBe(false);
+    expect(disableRes.body?.data?.laborEntries || []).toHaveLength(0);
+
+    const unsetRes = await request(app)
+      .get('/appeals/analytics/appeals')
+      .query({
+        fromDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        toDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        search: appeal.title,
+        paymentState: 'UNSET',
+      })
+      .set('Authorization', `Bearer ${managerToken}`);
+    expect(unsetRes.status).toBe(200);
+    const unsetIds = new Set((unsetRes.body?.data?.data || []).map((row: any) => row.id));
+    expect(unsetIds.has(appeal.id)).toBe(true);
   });
 
   test('labor upsert normalizes paymentStatus to NOT_REQUIRED for no-pay department', async () => {

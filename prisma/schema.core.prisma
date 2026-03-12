@@ -692,6 +692,7 @@ model Appeal {
   priority         AppealPriority @default(MEDIUM)
   deadline         DateTime?
   title            String?
+  laborNotRequired Boolean        @default(false)
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 

@@ -164,12 +164,14 @@ const ACTIVE_APPEAL_STATUSES: AppealStatus[] = [
   AppealStatus.RESOLVED,
 ];
 
-type AnalyticsPaymentState = 'PAID' | 'UNPAID' | 'UNSET';
+type AnalyticsPaymentState = 'PAID' | 'UNPAID' | 'UNSET' | 'NOT_REQUIRED';
 type AnalyticsExportColumnKey =
   | 'number'
   | 'title'
+  | 'createdBy'
   | 'status'
   | 'department'
+  | 'departmentRoute'
   | 'deadline'
   | 'slaOpen'
   | 'slaWork'
@@ -187,8 +189,10 @@ type AnalyticsExportColumnKey =
 const ANALYTICS_EXPORT_COLUMN_ORDER: AnalyticsExportColumnKey[] = [
   'number',
   'title',
+  'createdBy',
   'status',
   'department',
+  'departmentRoute',
   'deadline',
   'slaOpen',
   'slaWork',
@@ -207,8 +211,10 @@ const ANALYTICS_EXPORT_COLUMN_ORDER: AnalyticsExportColumnKey[] = [
 const ANALYTICS_EXPORT_COLUMN_HEADERS: Record<AnalyticsExportColumnKey, string> = {
   number: '№',
   title: 'Обращение',
+  createdBy: 'Создал',
   status: 'Статус',
   department: 'Отдел',
+  departmentRoute: 'Маршрут отдела',
   deadline: 'Дедлайн',
   slaOpen: 'Открыто',
   slaWork: 'В работе',
@@ -411,6 +417,7 @@ function resolveLegacyPaidHours(params: {
 function mapLaborEntryDto(entry: any, params: {
   departmentPaymentRequired: boolean;
   departmentHourlyRate: number;
+  appealLaborNotRequired?: boolean;
 }) {
   const accruedHours = normalizeHourValue(Number(entry.hours || 0));
   const rawPaidHours = normalizeHourValue(Number(entry.paidHours ?? 0));
@@ -419,21 +426,25 @@ function mapLaborEntryDto(entry: any, params: {
     : Number(entry.assignee.employeeProfile.appealLaborHourlyRate);
   const snapshotRateRaw = Number(entry.effectiveHourlyRateRub);
   const hasSnapshotRate = Number.isFinite(snapshotRateRaw);
-  const effectiveHourlyRateRub = hasSnapshotRate
-    ? Math.max(0, round2(snapshotRateRaw))
-    : resolveEffectiveHourlyRate({
-        departmentPaymentRequired: params.departmentPaymentRequired,
-        departmentHourlyRate: params.departmentHourlyRate,
-        assigneeHourlyRate,
-      });
-  const payable = effectiveHourlyRateRub > 0;
+  const effectiveHourlyRateRub = params.appealLaborNotRequired
+    ? 0
+    : hasSnapshotRate
+      ? Math.max(0, round2(snapshotRateRaw))
+      : resolveEffectiveHourlyRate({
+          departmentPaymentRequired: params.departmentPaymentRequired,
+          departmentHourlyRate: params.departmentHourlyRate,
+          assigneeHourlyRate,
+        });
+  const payable = !params.appealLaborNotRequired && effectiveHourlyRateRub > 0;
   const paidHours = payable ? Math.min(rawPaidHours, accruedHours) : 0;
   const remainingHours = Math.max(0, round2(accruedHours - paidHours));
-  const paymentStatus = deriveLaborPaymentStatus({
-    payable,
-    accruedHours,
-    paidHours,
-  });
+  const paymentStatus = params.appealLaborNotRequired
+    ? AppealLaborPaymentStatus.NOT_REQUIRED
+    : deriveLaborPaymentStatus({
+        payable,
+        accruedHours,
+        paidHours,
+      });
   return {
     assigneeUserId: entry.assigneeUserId,
     accruedHours,
@@ -467,13 +478,22 @@ function mapLaborEntryDto(entry: any, params: {
   };
 }
 
-function resolveFinancialFunnelStatus(paymentRequired: boolean, statuses: AppealLaborPaymentStatus[]) {
-  if (!paymentRequired || statuses.every((s) => s === AppealLaborPaymentStatus.NOT_REQUIRED)) {
+function resolveFinancialFunnelStatus(params: {
+  paymentRequired: boolean;
+  laborNotRequired: boolean;
+  statuses: AppealLaborPaymentStatus[];
+}) {
+  if (
+    params.laborNotRequired ||
+    !params.paymentRequired ||
+    (params.statuses.length > 0 && params.statuses.every((s) => s === AppealLaborPaymentStatus.NOT_REQUIRED))
+  ) {
     return 'NOT_PAYABLE' as const;
   }
-  const paidCount = statuses.filter((s) => s === AppealLaborPaymentStatus.PAID).length;
-  const partialCount = statuses.filter((s) => s === AppealLaborPaymentStatus.PARTIAL).length;
-  const unpaidCount = statuses.filter((s) => s === AppealLaborPaymentStatus.UNPAID).length;
+  if (!params.statuses.length) return 'TO_PAY' as const;
+  const paidCount = params.statuses.filter((s) => s === AppealLaborPaymentStatus.PAID).length;
+  const partialCount = params.statuses.filter((s) => s === AppealLaborPaymentStatus.PARTIAL).length;
+  const unpaidCount = params.statuses.filter((s) => s === AppealLaborPaymentStatus.UNPAID).length;
   if (partialCount > 0) return 'PARTIAL' as const;
   if (paidCount > 0 && unpaidCount === 0) return 'PAID' as const;
   if (paidCount > 0 && unpaidCount > 0) return 'PARTIAL' as const;
@@ -547,15 +567,53 @@ function buildAnalyticsAppealsWhere(params: {
         },
       },
     ];
-  } else if (paymentState === 'UNSET') {
-    where.NOT = [
-      ...(Array.isArray(where.NOT) ? where.NOT : where.NOT ? [where.NOT] : []),
+  } else if (paymentState === 'NOT_REQUIRED') {
+    const existingAnd = Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : [];
+    where.AND = [
+      ...existingAnd,
       {
-        laborEntries: {
-          some: {
-            hours: { gt: 0 },
-            paymentStatus: {
-              in: [AppealLaborPaymentStatus.PAID, AppealLaborPaymentStatus.UNPAID, AppealLaborPaymentStatus.PARTIAL],
+        OR: [
+          { laborNotRequired: true },
+          {
+            AND: [
+              { laborEntries: { some: { paymentStatus: AppealLaborPaymentStatus.NOT_REQUIRED } } },
+              {
+                NOT: {
+                  laborEntries: {
+                    some: {
+                      paymentStatus: {
+                        in: [
+                          AppealLaborPaymentStatus.PAID,
+                          AppealLaborPaymentStatus.UNPAID,
+                          AppealLaborPaymentStatus.PARTIAL,
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+  } else if (paymentState === 'UNSET') {
+    const existingAnd = Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : [];
+    where.AND = [
+      ...existingAnd,
+      { laborNotRequired: false },
+      {
+        NOT: {
+          laborEntries: {
+            some: {
+              paymentStatus: {
+                in: [
+                  AppealLaborPaymentStatus.PAID,
+                  AppealLaborPaymentStatus.UNPAID,
+                  AppealLaborPaymentStatus.PARTIAL,
+                  AppealLaborPaymentStatus.NOT_REQUIRED,
+                ],
+              },
             },
           },
         },
@@ -575,7 +633,17 @@ function buildAnalyticsAppealsWhere(params: {
     const statusMatches = resolveStatusMatchesFromSearch(search);
     where.OR = [
       { title: { contains: search, mode: 'insensitive' } },
+      { fromDepartment: { name: { contains: search, mode: 'insensitive' } } },
       { toDepartment: { name: { contains: search, mode: 'insensitive' } } },
+      {
+        createdBy: {
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' } },
+            { lastName: { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+          ],
+        },
+      },
       {
         assignees: {
           some: {
@@ -696,6 +764,7 @@ function formatAnalyticsDeadlineForExport(params: {
 
 function buildLaborColumnsForExport(params: {
   assignees: Array<{ id: number; firstName?: string | null; lastName?: string | null; email?: string | null; effectiveHourlyRateRub: number }>;
+  laborNotRequired?: boolean;
   laborEntries: Array<{
     assigneeUserId: number;
     accruedHours: number;
@@ -711,11 +780,11 @@ function buildLaborColumnsForExport(params: {
   const assignees = params.assignees || [];
   if (!assignees.length) {
     return {
-      assignees: 'Исполнители не назначены',
+      assignees: params.laborNotRequired ? 'Не требуется' : 'Исполнители не назначены',
       hoursAccrued: '—',
       hoursPaid: '—',
       hoursRemaining: '—',
-      hourlyRate: '—',
+      hourlyRate: params.laborNotRequired ? 'Не требуется' : '—',
       amountAccrued: '—',
       amountPaid: '—',
       amountRemaining: '—',
@@ -738,20 +807,21 @@ function buildLaborColumnsForExport(params: {
     const accruedHours = labor?.accruedHours ?? 0;
     const paidHours = labor?.paidHours ?? 0;
     const remainingHours = labor?.remainingHours ?? Math.max(0, accruedHours - paidHours);
+    const isNotRequired = Boolean(params.laborNotRequired || (labor && !labor.payable));
     lines.assignees.push(exportPersonName(assignee));
-    lines.hoursAccrued.push(formatHoursValueForExport(accruedHours));
-    lines.hoursPaid.push(formatHoursValueForExport(paidHours));
-    lines.hoursRemaining.push(formatHoursValueForExport(remainingHours));
+    lines.hoursAccrued.push(isNotRequired ? '—' : formatHoursValueForExport(accruedHours));
+    lines.hoursPaid.push(isNotRequired ? '—' : formatHoursValueForExport(paidHours));
+    lines.hoursRemaining.push(isNotRequired ? '—' : formatHoursValueForExport(remainingHours));
     if (!labor) {
-      lines.hourlyRate.push('Не установлено');
-    } else if (labor.payable) {
+      lines.hourlyRate.push(params.laborNotRequired ? 'Не требуется' : 'Не установлено');
+    } else if (labor.payable && !params.laborNotRequired) {
       lines.hourlyRate.push(`${formatRubForExport(labor.effectiveHourlyRateRub)}/ч`);
     } else {
       lines.hourlyRate.push('Не требуется');
     }
-    lines.amountAccrued.push(formatRubForExport(labor?.amountAccruedRub ?? 0));
-    lines.amountPaid.push(formatRubForExport(labor?.amountPaidRub ?? 0));
-    lines.amountRemaining.push(formatRubForExport(labor?.amountRemainingRub ?? 0));
+    lines.amountAccrued.push(isNotRequired ? '—' : formatRubForExport(labor?.amountAccruedRub ?? 0));
+    lines.amountPaid.push(isNotRequired ? '—' : formatRubForExport(labor?.amountPaidRub ?? 0));
+    lines.amountRemaining.push(isNotRequired ? '—' : formatRubForExport(labor?.amountRemainingRub ?? 0));
   }
 
   return {
@@ -1716,6 +1786,7 @@ router.get(
           skip: offset,
           take: limit,
           include: {
+            fromDepartment: { select: { id: true, name: true } },
             toDepartment: { select: { id: true, name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
             createdBy: { select: { id: true, email: true, firstName: true, lastName: true } },
             assignees: {
@@ -1781,6 +1852,7 @@ router.get(
           number: appeal.number,
           title: appeal.title ?? null,
           status: appeal.status,
+          laborNotRequired: appeal.laborNotRequired,
           createdAt: appeal.createdAt,
           deadline: appeal.deadline ?? null,
           completedAt,
@@ -1790,6 +1862,12 @@ router.get(
             firstName: appeal.createdBy.firstName,
             lastName: appeal.createdBy.lastName,
           },
+          fromDepartment: appeal.fromDepartment
+            ? {
+                id: appeal.fromDepartment.id,
+                name: appeal.fromDepartment.name,
+              }
+            : null,
           toDepartment: {
             id: appeal.toDepartment.id,
             name: appeal.toDepartment.name,
@@ -1826,6 +1904,7 @@ router.get(
             mapLaborEntryDto(entry, {
               departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
               departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+              appealLaborNotRequired: appeal.laborNotRequired,
             })
           ),
         };
@@ -1969,7 +2048,12 @@ router.get(
               },
             },
             paidBy: { select: { id: true, email: true, firstName: true, lastName: true } },
-            appeal: { select: { toDepartment: { select: { id: true, appealPaymentRequired: true, appealLaborHourlyRate: true } } } },
+            appeal: {
+              select: {
+                laborNotRequired: true,
+                toDepartment: { select: { id: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
+              },
+            },
           },
         });
 
@@ -1993,6 +2077,7 @@ router.get(
           const dto = mapLaborEntryDto(entry, {
             departmentPaymentRequired: entry.appeal.toDepartment.appealPaymentRequired,
             departmentHourlyRate: Number(entry.appeal.toDepartment.appealLaborHourlyRate || 0),
+            appealLaborNotRequired: entry.appeal.laborNotRequired,
           });
           row.appealIds.add(entry.appealId);
           if (dto.paymentStatus === AppealLaborPaymentStatus.PAID) row.paidAppeals.add(entry.appealId);
@@ -2128,6 +2213,7 @@ router.get(
         },
         orderBy: { createdAt: 'desc' },
         include: {
+          fromDepartment: { select: { id: true, name: true } },
           toDepartment: { select: { id: true, name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
           createdBy: { select: { id: true, email: true, firstName: true, lastName: true } },
           assignees: {
@@ -2192,6 +2278,7 @@ router.get(
           number: appeal.number,
           title: appeal.title ?? null,
           status: appeal.status,
+          laborNotRequired: appeal.laborNotRequired,
           createdAt: appeal.createdAt,
           deadline: appeal.deadline ?? null,
           completedAt,
@@ -2201,6 +2288,12 @@ router.get(
             firstName: appeal.createdBy.firstName,
             lastName: appeal.createdBy.lastName,
           },
+          fromDepartment: appeal.fromDepartment
+            ? {
+                id: appeal.fromDepartment.id,
+                name: appeal.fromDepartment.name,
+              }
+            : null,
           toDepartment: {
             id: appeal.toDepartment.id,
             name: appeal.toDepartment.name,
@@ -2237,6 +2330,7 @@ router.get(
             mapLaborEntryDto(entry, {
               departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
               departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+              appealLaborNotRequired: appeal.laborNotRequired,
             })
           ),
         };
@@ -2394,21 +2488,114 @@ router.put(
 
       const departmentHourlyRate = Number(appeal.toDepartment.appealLaborHourlyRate || 0);
       const paymentRequired = appeal.toDepartment.appealPaymentRequired;
+      const laborNotRequired = bodyParsed.data.laborNotRequired === true;
+
+      const writeLaborAuditLog = async (
+        tx: Prisma.TransactionClient,
+        assigneeUserId: number,
+        oldHours: number | null,
+        newHours: number,
+        oldPaidHours: number | null,
+        newPaidHours: number,
+        oldPaymentStatus: AppealLaborPaymentStatus | null,
+        newPaymentStatus: AppealLaborPaymentStatus
+      ) => {
+        if (
+          oldHours === newHours &&
+          oldPaidHours === newPaidHours &&
+          oldPaymentStatus === newPaymentStatus
+        ) {
+          return;
+        }
+        await (tx as any).appealLaborAuditLog.create({
+          data: {
+            appealId: appeal.id,
+            assigneeUserId,
+            changedById: actingUser.id,
+            oldHours: oldHours == null ? null : new Prisma.Decimal(oldHours),
+            newHours: new Prisma.Decimal(newHours),
+            oldPaidHours: oldPaidHours == null ? null : new Prisma.Decimal(oldPaidHours),
+            newPaidHours: new Prisma.Decimal(newPaidHours),
+            oldPaymentStatus: oldPaymentStatus as any,
+            newPaymentStatus,
+          },
+        });
+      };
 
       try {
         await prisma.$transaction(async (tx) => {
+          await tx.appeal.update({
+            where: { id: appeal.id },
+            data: { laborNotRequired },
+          });
+
+          const currentEntries = await tx.appealLaborEntry.findMany({
+            where: { appealId: appeal.id },
+          });
+          const prevByAssignee = new Map<number, (typeof currentEntries)[number]>();
+          currentEntries.forEach((entry) => prevByAssignee.set(entry.assigneeUserId, entry));
+
+          if (laborNotRequired) {
+            const targetAssigneeIds = Array.from(
+              new Set<number>([
+                ...Array.from(assigneeSet),
+                ...currentEntries.map((entry) => entry.assigneeUserId),
+              ])
+            );
+
+            for (const assigneeUserId of targetAssigneeIds) {
+              const prev = prevByAssignee.get(assigneeUserId) ?? null;
+              await tx.appealLaborEntry.upsert({
+                where: {
+                  appealId_assigneeUserId: {
+                    appealId: appeal.id,
+                    assigneeUserId,
+                  },
+                },
+                update: {
+                  hours: new Prisma.Decimal(0),
+                  paidHours: new Prisma.Decimal(0),
+                  effectiveHourlyRateRub: new Prisma.Decimal(0),
+                  paymentStatus: AppealLaborPaymentStatus.NOT_REQUIRED,
+                  paidAt: null,
+                  paidById: null,
+                  updatedById: actingUser.id,
+                },
+                create: {
+                  appealId: appeal.id,
+                  assigneeUserId,
+                  hours: new Prisma.Decimal(0),
+                  paidHours: new Prisma.Decimal(0),
+                  effectiveHourlyRateRub: new Prisma.Decimal(0),
+                  paymentStatus: AppealLaborPaymentStatus.NOT_REQUIRED,
+                  paidAt: null,
+                  paidById: null,
+                  createdById: actingUser.id,
+                  updatedById: actingUser.id,
+                },
+              });
+
+              await writeLaborAuditLog(
+                tx,
+                assigneeUserId,
+                prev ? Number(prev.hours) : null,
+                0,
+                prev ? Number(prev.paidHours ?? 0) : null,
+                0,
+                prev?.paymentStatus ?? null,
+                AppealLaborPaymentStatus.NOT_REQUIRED
+              );
+            }
+            return;
+          }
+
+          const processedAssigneeIds = new Set<number>();
           for (const item of bodyParsed.data.items) {
+            processedAssigneeIds.add(item.assigneeUserId);
             const accruedHours = normalizeHourValue(
               Number(item.accruedHours ?? item.hours ?? 0)
             );
-            const prev = await tx.appealLaborEntry.findUnique({
-              where: {
-                appealId_assigneeUserId: {
-                  appealId: appeal.id,
-                  assigneeUserId: item.assigneeUserId,
-                },
-              },
-            });
+            const prev = prevByAssignee.get(item.assigneeUserId) ?? null;
             const previousPaidHours = normalizeHourValue(
               Number(
                 prev?.paidHours ??
@@ -2430,7 +2617,7 @@ router.put(
               assigneeHourlyRate: assigneeRateMap.get(item.assigneeUserId) ?? null,
             });
             const lockedEffectiveHourlyRateRub =
-              prev?.effectiveHourlyRateRub == null
+              prev?.effectiveHourlyRateRub == null || appeal.laborNotRequired
                 ? effectiveHourlyRateRub
                 : round2(Number(prev.effectiveHourlyRateRub));
             const payable = lockedEffectiveHourlyRateRub > 0;
@@ -2441,6 +2628,30 @@ router.put(
               throw err;
             }
             paidHours = payable ? paidHours : 0;
+
+            if (accruedHours <= 0 && paidHours <= 0) {
+              if (prev) {
+                await tx.appealLaborEntry.delete({
+                  where: {
+                    appealId_assigneeUserId: {
+                      appealId: appeal.id,
+                      assigneeUserId: item.assigneeUserId,
+                    },
+                  },
+                });
+              }
+              await writeLaborAuditLog(
+                tx,
+                item.assigneeUserId,
+                prev ? Number(prev.hours) : null,
+                0,
+                prev ? Number(prev.paidHours ?? 0) : null,
+                0,
+                prev?.paymentStatus ?? null,
+                AppealLaborPaymentStatus.UNPAID
+              );
+              continue;
+            }
 
             const paymentStatus = deriveLaborPaymentStatus({
               payable,
@@ -2483,28 +2694,38 @@ router.put(
               },
             });
 
-            const oldHours = prev ? Number(prev.hours) : null;
-            const oldPaidHours = prev ? Number(prev.paidHours ?? 0) : null;
-            const oldPaymentStatus = prev?.paymentStatus ?? null;
-            if (
-              oldHours !== accruedHours ||
-              oldPaidHours !== paidHours ||
-              oldPaymentStatus !== paymentStatus
-            ) {
-              await (tx as any).appealLaborAuditLog.create({
-                data: {
+            await writeLaborAuditLog(
+              tx,
+              item.assigneeUserId,
+              prev ? Number(prev.hours) : null,
+              accruedHours,
+              prev ? Number(prev.paidHours ?? 0) : null,
+              paidHours,
+              prev?.paymentStatus ?? null,
+              paymentStatus
+            );
+          }
+
+          for (const prev of currentEntries) {
+            if (processedAssigneeIds.has(prev.assigneeUserId)) continue;
+            await tx.appealLaborEntry.delete({
+              where: {
+                appealId_assigneeUserId: {
                   appealId: appeal.id,
-                  assigneeUserId: item.assigneeUserId,
-                  changedById: actingUser.id,
-                  oldHours: oldHours == null ? null : new Prisma.Decimal(oldHours),
-                  newHours: new Prisma.Decimal(accruedHours),
-                  oldPaidHours: oldPaidHours == null ? null : new Prisma.Decimal(oldPaidHours),
-                  newPaidHours: new Prisma.Decimal(paidHours),
-                  oldPaymentStatus: oldPaymentStatus as any,
-                  newPaymentStatus: paymentStatus,
+                  assigneeUserId: prev.assigneeUserId,
                 },
-              });
-            }
+              },
+            });
+            await writeLaborAuditLog(
+              tx,
+              prev.assigneeUserId,
+              Number(prev.hours),
+              0,
+              Number(prev.paidHours ?? 0),
+              0,
+              prev.paymentStatus,
+              AppealLaborPaymentStatus.UNPAID
+            );
           }
         });
       } catch (error: any) {
@@ -2536,11 +2757,13 @@ router.put(
           {
             appealId: appeal.id,
             paymentRequired,
+            laborNotRequired,
             currency: 'RUB' as const,
             laborEntries: laborEntries.map((entry) =>
               mapLaborEntryDto(entry, {
                 departmentPaymentRequired: paymentRequired,
                 departmentHourlyRate,
+                appealLaborNotRequired: laborNotRequired,
               })
             ),
           },
@@ -2668,6 +2891,7 @@ router.get(
         select: {
           id: true,
           status: true,
+          laborNotRequired: true,
           createdAt: true,
           toDepartment: { select: { appealPaymentRequired: true, appealLaborHourlyRate: true } },
           statusHistory: { select: { oldStatus: true, newStatus: true, changedAt: true }, orderBy: { changedAt: 'asc' } },
@@ -2730,6 +2954,7 @@ router.get(
           const dto = mapLaborEntryDto(entry, {
             departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
             departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+            appealLaborNotRequired: appeal.laborNotRequired,
           });
           if (dto.payable) {
             totalAccruedHours += dto.accruedHours;
@@ -2811,7 +3036,6 @@ router.get(
               AppealLaborPaymentStatus.UNPAID,
               AppealLaborPaymentStatus.PARTIAL,
               AppealLaborPaymentStatus.PAID,
-              AppealLaborPaymentStatus.NOT_REQUIRED,
             ],
           },
           appeal: {
@@ -2839,6 +3063,7 @@ router.get(
             select: {
               id: true,
               number: true,
+              laborNotRequired: true,
               toDepartment: { select: { id: true, name: true, appealPaymentRequired: true } },
               laborEntries: { select: { paymentStatus: true } },
             },
@@ -2871,10 +3096,11 @@ router.get(
             totalHours: 0,
           });
         }
-        const financialStatus = resolveFinancialFunnelStatus(
-          entry.appeal.toDepartment.appealPaymentRequired,
-          entry.appeal.laborEntries.map((x) => x.paymentStatus)
-        );
+        const financialStatus = resolveFinancialFunnelStatus({
+          paymentRequired: entry.appeal.toDepartment.appealPaymentRequired,
+          laborNotRequired: entry.appeal.laborNotRequired,
+          statuses: entry.appeal.laborEntries.map((x) => x.paymentStatus),
+        });
         const dep = row.departments.get(entry.appeal.toDepartment.id);
         dep.items.push({
           appealId: entry.appealId,
@@ -3067,6 +3293,7 @@ router.get(
         },
         select: {
           id: true,
+          laborNotRequired: true,
           toDepartment: { select: { appealPaymentRequired: true } },
           laborEntries: { select: { paymentStatus: true } },
         },
@@ -3075,7 +3302,11 @@ router.get(
         ['NOT_PAYABLE', 0], ['TO_PAY', 0], ['PARTIAL', 0], ['PAID', 0],
       ]);
       for (const a of appeals) {
-        const status = resolveFinancialFunnelStatus(a.toDepartment.appealPaymentRequired, a.laborEntries.map((x) => x.paymentStatus));
+        const status = resolveFinancialFunnelStatus({
+          paymentRequired: a.toDepartment.appealPaymentRequired,
+          laborNotRequired: a.laborNotRequired,
+          statuses: a.laborEntries.map((x) => x.paymentStatus),
+        });
         counts.set(status, (counts.get(status) || 0) + 1);
       }
       return res.json(successResponse({
@@ -3345,6 +3576,8 @@ router.get(
         where,
         orderBy: { createdAt: 'desc' },
         include: {
+          createdBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+          fromDepartment: { select: { id: true, name: true } },
           toDepartment: { select: { name: true, appealPaymentRequired: true, appealLaborHourlyRate: true } },
           assignees: {
             include: {
@@ -3404,17 +3637,21 @@ router.get(
           mapLaborEntryDto(entry, {
             departmentPaymentRequired: appeal.toDepartment.appealPaymentRequired,
             departmentHourlyRate: Number(appeal.toDepartment.appealLaborHourlyRate || 0),
+            appealLaborNotRequired: appeal.laborNotRequired,
           })
         );
         const laborColumns = buildLaborColumnsForExport({
           assignees,
+          laborNotRequired: appeal.laborNotRequired,
           laborEntries,
         });
         return {
           number: `#${appeal.number}`,
           title: appeal.title || 'Без названия',
+          createdBy: getUserDisplayName(appeal.createdBy as UserMiniRaw | null),
           status: appealStatusLabelForExport(appeal.status),
           department: appeal.toDepartment.name,
+          departmentRoute: `${appeal.fromDepartment?.name || 'Без отдела'} -> ${appeal.toDepartment.name}`,
           deadline: formatAnalyticsDeadlineForExport({
             status: appeal.status,
             deadline: appeal.deadline,

@@ -1,0 +1,2 @@
+ALTER TABLE "Appeal"
+ADD COLUMN "laborNotRequired" BOOLEAN NOT NULL DEFAULT false;

@@ -274,6 +274,7 @@ export type AppealsAnalyticsAppealItem = {
   number: number;
   title: string | null;
   status: AppealStatus;
+  laborNotRequired: boolean;
   createdAt: Date;
   deadline: Date | null;
   completedAt: Date | null;
@@ -283,6 +284,10 @@ export type AppealsAnalyticsAppealItem = {
     firstName: string | null;
     lastName: string | null;
   };
+  fromDepartment: {
+    id: number;
+    name: string;
+  } | null;
   toDepartment: {
     id: number;
     name: string;
@@ -377,12 +382,14 @@ export interface AppealLaborUpsertRequestItem {
 }
 
 export interface AppealLaborUpsertRequest {
+  laborNotRequired?: boolean;
   items: AppealLaborUpsertRequestItem[];
 }
 
 export type AppealLaborUpsertResponse = SuccessResponse<{
   appealId: number;
   paymentRequired: boolean;
+  laborNotRequired: boolean;
   currency: 'RUB';
   laborEntries: AppealLaborEntryDto[];
 }> | ErrorResponse;
