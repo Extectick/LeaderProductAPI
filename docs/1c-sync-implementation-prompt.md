@@ -11,18 +11,23 @@
 См. `docs/1c-import-guide.md` и `src/modules/onec/onec.routes.ts`.
 
 Уже реализовано:
-1. `POST /api/1c/nomenclature/batch`
-2. `POST /api/1c/warehouses/batch`
-3. `POST /api/1c/counterparties/batch`
-4. `POST /api/1c/agreements/batch`
-5. `POST /api/1c/product-prices/batch`
-6. `POST /api/1c/special-prices/batch`
-7. `POST /api/1c/stock/batch`
-8. `GET /api/1c/orders/queued`
-9. `POST /api/1c/orders/:guid/ack`
-10. `POST /api/1c/orders/status/batch`
-11. `GET /api/1c/sync/runs`
-12. `GET /api/1c/sync/runs/:runId`
+1. `GET /api/1c/schema`
+2. `POST /api/1c/nomenclature/batch`
+3. `POST /api/1c/warehouses/batch`
+4. `POST /api/1c/counterparties/batch`
+5. `POST /api/1c/agreements/batch`
+6. `POST /api/1c/product-prices/batch`
+7. `POST /api/1c/special-prices/batch`
+8. `POST /api/1c/stock/batch`
+9. `GET /api/1c/orders/queued`
+10. `POST /api/1c/orders/:guid/ack`
+11. `POST /api/1c/orders/status/batch`
+12. `GET /api/1c/sync/runs`
+13. `GET /api/1c/sync/runs/:runId`
+
+Дополнительно:
+1. Для 1С-конфигуратора сопоставления канонический источник схемы теперь `GET /api/1c/schema?secret=...`.
+2. В v1 схема не должна собираться из общего `docs.json`.
 
 ### 1.2. Что уже есть в Prisma-схеме под 1С
 

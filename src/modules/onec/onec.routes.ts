@@ -7,6 +7,7 @@ import {
   handleOrdersQueued,
   handleOrdersStatusBatch,
   handleProductPricesBatch,
+  handleSchema,
   handleSpecialPricesBatch,
   handleSyncRunDetail,
   handleSyncRunsList,
@@ -18,6 +19,40 @@ import {
 const router = Router();
 
 router.use(onecAuthMiddleware);
+
+/**
+ * @openapi
+ * /api/1c/schema:
+ *   get:
+ *     tags: [1C]
+ *     summary: Машиночитаемая схема интеграции для 1С
+ *     description: Возвращает фиксированную схему доступных import-batch сущностей и полей для настройки сопоставления в 1С.
+ *     parameters:
+ *       - in: query
+ *         name: secret
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Схема интеграции
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 version: { type: string }
+ *                 entities:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       401:
+ *         description: Неверный secret
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ */
+router.get('/schema', handleSchema);
 
 /**
  * @openapi

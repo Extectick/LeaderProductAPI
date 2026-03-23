@@ -16,6 +16,7 @@
 7) Остатки
 
 Эндпоинты:
+- `GET /api/1c/schema?secret=...`
 - `POST /api/1c/nomenclature/batch`
 - `POST /api/1c/warehouses/batch`
 - `POST /api/1c/counterparties/batch`
@@ -28,6 +29,53 @@
 - `POST /api/1c/orders/status/batch`
 - `GET /api/1c/sync/runs?secret=...`
 - `GET /api/1c/sync/runs/:runId?secret=...`
+
+## 2.1. Каноническая схема для конфигуратора 1С
+`GET /api/1c/schema?secret=...`
+
+Этот маршрут предназначен для 1С-обработки настройки сопоставления метаданных. В v1 именно он является каноническим источником схемы, а не общий `docs.json`.
+
+Формат ответа:
+```json
+{
+  "success": true,
+  "version": "1.0.0",
+  "entities": [
+    {
+      "code": "nomenclature",
+      "title": "Номенклатура",
+      "method": "POST",
+      "path": "/api/1c/nomenclature/batch",
+      "wrapper": "items",
+      "sections": [
+        {
+          "code": "product",
+          "title": "Товар",
+          "multiple": false,
+          "fields": [
+            {
+              "code": "guid",
+              "title": "GUID",
+              "type": "string",
+              "required": true,
+              "nullable": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Схема включает только v1 batch-сущности:
+- `nomenclature`
+- `warehouses`
+- `counterparties`
+- `agreements`
+- `product-prices`
+- `special-prices`
+- `stock`
 
 ## 3. Форматы тел запросов
 

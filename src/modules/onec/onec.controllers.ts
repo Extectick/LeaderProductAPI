@@ -22,6 +22,7 @@ import {
   stockBatchSchema,
   warehousesBatchSchema,
 } from './onec.schemas';
+import { onecSchemaResponse } from './onec.schema.response';
 
 type BatchResult = { key: string; status: 'ok' | 'error'; error?: string };
 
@@ -160,6 +161,10 @@ export const onecAuthMiddleware = (req: Request, res: Response, next: NextFuncti
     return res.status(401).json({ error: 'Unauthorized' });
   }
   return next();
+};
+
+export const handleSchema = async (_req: Request, res: Response) => {
+  return res.status(200).json(onecSchemaResponse);
 };
 
 export const handleNomenclatureBatch = async (req: Request, res: Response) => {
