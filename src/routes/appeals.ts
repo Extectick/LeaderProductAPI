@@ -230,6 +230,40 @@ const ANALYTICS_EXPORT_COLUMN_HEADERS: Record<AnalyticsExportColumnKey, string> 
   amountRemaining: 'Сумма к доплате',
 };
 
+type ExportCellValue = string | number | null;
+type ExportColumnFormat = 'text' | 'number' | 'currency';
+
+const APPEALS_EXPORT_COLUMN_FORMATS: Record<AnalyticsExportColumnKey, ExportColumnFormat> = {
+  number: 'text',
+  title: 'text',
+  createdBy: 'text',
+  status: 'text',
+  department: 'text',
+  departmentRoute: 'text',
+  deadline: 'text',
+  slaOpen: 'number',
+  slaWork: 'number',
+  slaToTake: 'number',
+  slaToResolve: 'number',
+  assignees: 'text',
+  hoursAccrued: 'number',
+  hoursPaid: 'number',
+  hoursRemaining: 'number',
+  hourlyRate: 'text',
+  amountAccrued: 'currency',
+  amountPaid: 'currency',
+  amountRemaining: 'currency',
+};
+
+const USERS_EXPORT_COLUMN_FORMATS: Record<string, ExportColumnFormat> = {
+  userId: 'text',
+  user: 'text',
+  department: 'text',
+  appealNumber: 'text',
+  hours: 'number',
+  paymentStatus: 'text',
+};
+
 function getUserDisplayName(user: UserMiniRaw | null) {
   if (!user) return 'Пользователь';
   const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
@@ -709,6 +743,24 @@ function formatRubForExport(value: number | null | undefined): string {
   return `${normalized.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
+function roundExportNumberValue(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || Number.isNaN(value)) return null;
+  return Number(value.toFixed(2));
+}
+
+function formatHoursByMsForExcelExport(ms: number | null | undefined): number | null {
+  if (typeof ms !== 'number' || Number.isNaN(ms)) return null;
+  return roundExportNumberValue(ms / 3600000);
+}
+
+function formatHoursValueForExcelExport(value: number | null | undefined): number | null {
+  return roundExportNumberValue(value);
+}
+
+function formatRubForExcelExport(value: number | null | undefined): number | null {
+  return roundExportNumberValue(value);
+}
+
 function appealStatusLabelForExport(status: AppealStatus): string {
   if (status === AppealStatus.OPEN) return 'Открыто';
   if (status === AppealStatus.IN_PROGRESS) return 'В работе';
@@ -836,7 +888,87 @@ function buildLaborColumnsForExport(params: {
   };
 }
 
-async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], footerRow?: Record<string, any>) {
+function buildLaborColumnsForExcelFriendlyExport(params: {
+  assignees: Array<{ id: number; firstName?: string | null; lastName?: string | null; email?: string | null; effectiveHourlyRateRub: number }>;
+  laborNotRequired?: boolean;
+  laborEntries: Array<{
+    assigneeUserId: number;
+    accruedHours: number;
+    paidHours: number;
+    remainingHours: number;
+    payable: boolean;
+    effectiveHourlyRateRub: number;
+    amountAccruedRub: number;
+    amountPaidRub: number;
+    amountRemainingRub: number;
+  }>;
+}) {
+  const sumNumeric = (values: Array<number | null | undefined>) =>
+    roundExportNumberValue(values.reduce<number>((acc, value) => acc + (typeof value === 'number' && !Number.isNaN(value) ? value : 0), 0));
+
+  const assignees = params.assignees || [];
+  if (!assignees.length) {
+    return {
+      assignees: params.laborNotRequired ? 'РќРµ С‚СЂРµР±СѓРµС‚СЃСЏ' : 'РСЃРїРѕР»РЅРёС‚РµР»Рё РЅРµ РЅР°Р·РЅР°С‡РµРЅС‹',
+      hoursAccrued: null,
+      hoursPaid: null,
+      hoursRemaining: null,
+      hourlyRate: params.laborNotRequired ? 'РќРµ С‚СЂРµР±СѓРµС‚СЃСЏ' : 'вЂ”',
+      amountAccrued: null,
+      amountPaid: null,
+      amountRemaining: null,
+    };
+  }
+
+  const hourlyRates: string[] = [];
+  const hoursAccrued: Array<number | null> = [];
+  const hoursPaid: Array<number | null> = [];
+  const hoursRemaining: Array<number | null> = [];
+  const amountAccrued: Array<number | null> = [];
+  const amountPaid: Array<number | null> = [];
+  const amountRemaining: Array<number | null> = [];
+
+  for (const assignee of assignees) {
+    const labor = (params.laborEntries || []).find((entry) => entry.assigneeUserId === assignee.id);
+    const accruedHours = labor?.accruedHours ?? 0;
+    const paidHours = labor?.paidHours ?? 0;
+    const remainingHours = labor?.remainingHours ?? Math.max(0, accruedHours - paidHours);
+    const isNotRequired = Boolean(params.laborNotRequired || (labor && !labor.payable));
+
+    if (!labor) {
+      hourlyRates.push(params.laborNotRequired ? 'РќРµ С‚СЂРµР±СѓРµС‚СЃСЏ' : 'РќРµ СѓСЃС‚Р°РЅРѕРІР»РµРЅРѕ');
+    } else if (labor.payable && !params.laborNotRequired) {
+      hourlyRates.push(String(formatRubForExcelExport(labor.effectiveHourlyRateRub) ?? ''));
+    } else {
+      hourlyRates.push('РќРµ С‚СЂРµР±СѓРµС‚СЃСЏ');
+    }
+
+    hoursAccrued.push(isNotRequired ? null : formatHoursValueForExcelExport(accruedHours));
+    hoursPaid.push(isNotRequired ? null : formatHoursValueForExcelExport(paidHours));
+    hoursRemaining.push(isNotRequired ? null : formatHoursValueForExcelExport(remainingHours));
+    amountAccrued.push(isNotRequired ? null : formatRubForExcelExport(labor?.amountAccruedRub ?? 0));
+    amountPaid.push(isNotRequired ? null : formatRubForExcelExport(labor?.amountPaidRub ?? 0));
+    amountRemaining.push(isNotRequired ? null : formatRubForExcelExport(labor?.amountRemainingRub ?? 0));
+  }
+
+  return {
+    assignees: assignees.map((assignee) => exportPersonName(assignee)).join('\n'),
+    hoursAccrued: sumNumeric(hoursAccrued),
+    hoursPaid: sumNumeric(hoursPaid),
+    hoursRemaining: sumNumeric(hoursRemaining),
+    hourlyRate: hourlyRates.join('\n'),
+    amountAccrued: sumNumeric(amountAccrued),
+    amountPaid: sumNumeric(amountPaid),
+    amountRemaining: sumNumeric(amountRemaining),
+  };
+}
+
+async function buildXlsxBuffer(
+  sheetName: string,
+  rows: Record<string, ExportCellValue>[],
+  footerRow?: Record<string, ExportCellValue>,
+  columnFormats?: Record<string, ExportColumnFormat>
+) {
   const orderedKeys = Object.keys(rows[0] || footerRow || {});
   const probeRows = footerRow ? [...rows, footerRow] : rows;
   const { Workbook } = loadExcelJs();
@@ -859,13 +991,13 @@ async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], f
 
   if (orderedKeys.length > 0) {
     for (const row of rows) {
-      const rowData: Record<string, string> = {};
-      for (const key of orderedKeys) rowData[key] = row?.[key] == null ? '' : String(row[key]);
+      const rowData: Record<string, ExportCellValue> = {};
+      for (const key of orderedKeys) rowData[key] = row?.[key] == null ? '' : row[key];
       sheet.addRow(rowData);
     }
     if (footerRow) {
-      const footerData: Record<string, string> = {};
-      for (const key of orderedKeys) footerData[key] = footerRow?.[key] == null ? '' : String(footerRow[key]);
+      const footerData: Record<string, ExportCellValue> = {};
+      for (const key of orderedKeys) footerData[key] = footerRow?.[key] == null ? '' : footerRow[key];
       sheet.addRow(footerData);
     }
   }
@@ -876,13 +1008,18 @@ async function buildXlsxBuffer(sheetName: string, rows: Record<string, any>[], f
     let maxLines = 1;
     for (let col = 1; col <= orderedKeys.length; col += 1) {
       const cell = row.getCell(col);
+      const columnKey = orderedKeys[col - 1];
       const value = cell.value == null ? '' : String(cell.value);
       const lines = value ? value.split(/\r?\n/).length : 1;
       maxLines = Math.max(maxLines, lines);
+      const format = columnFormats?.[columnKey] ?? 'text';
       cell.alignment = {
         wrapText: true,
         vertical: 'top',
+        horizontal: format === 'text' ? 'left' : 'right',
       };
+      if (format === 'number') cell.numFmt = '0.00';
+      if (format === 'currency') cell.numFmt = '#,##0.00 [$₽-ru-RU]';
     }
     row.height = Math.max(18, maxLines * 18 + 2);
   }
@@ -3640,7 +3777,7 @@ router.get(
             appealLaborNotRequired: appeal.laborNotRequired,
           })
         );
-        const laborColumns = buildLaborColumnsForExport({
+        const laborColumns = buildLaborColumnsForExcelFriendlyExport({
           assignees,
           laborNotRequired: appeal.laborNotRequired,
           laborEntries,
@@ -3658,17 +3795,17 @@ router.get(
             completedAt,
             now,
           }),
-          slaOpen: formatHoursByMsForExport(sla.openDurationMs),
-          slaWork: formatHoursByMsForExport(sla.workDurationMs),
-          slaToTake: formatHoursByMsForExport(sla.timeToFirstInProgressMs),
-          slaToResolve: formatHoursByMsForExport(sla.timeToFirstResolvedMs),
+          slaOpen: formatHoursByMsForExcelExport(sla.openDurationMs),
+          slaWork: formatHoursByMsForExcelExport(sla.workDurationMs),
+          slaToTake: formatHoursByMsForExcelExport(sla.timeToFirstInProgressMs),
+          slaToResolve: formatHoursByMsForExcelExport(sla.timeToFirstResolvedMs),
           ...laborColumns,
         };
       });
       const flat = rawRows.map((row) => {
-        const out: Record<string, string> = {};
+        const out: Record<string, ExportCellValue> = {};
         for (const key of selectedColumns) {
-          out[ANALYTICS_EXPORT_COLUMN_HEADERS[key]] = String((row as any)[key] ?? '');
+          out[ANALYTICS_EXPORT_COLUMN_HEADERS[key]] = (row as any)[key] ?? '';
         }
         return out;
       });
@@ -3679,7 +3816,14 @@ router.get(
       const ext = format === 'xlsx' ? 'xlsx' : 'csv';
       res.setHeader('Content-Disposition', `attachment; filename=\"appeals_analytics_${Date.now()}.${ext}\"`);
       if (format === 'xlsx') {
-        const xlsx = await buildXlsxBuffer('Appeals', flat);
+        const xlsx = await buildXlsxBuffer(
+          'Appeals',
+          flat,
+          undefined,
+          Object.fromEntries(
+            selectedColumns.map((key) => [ANALYTICS_EXPORT_COLUMN_HEADERS[key], APPEALS_EXPORT_COLUMN_FORMATS[key]])
+          )
+        );
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         return res.status(200).send(xlsx);
       }
@@ -3762,7 +3906,7 @@ router.get(
           appealNumber: '',
           hours: Number(totalHours.toFixed(2)),
           paymentStatus: '',
-        });
+        }, USERS_EXPORT_COLUMN_FORMATS);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         return res.status(200).send(xlsx);
       }

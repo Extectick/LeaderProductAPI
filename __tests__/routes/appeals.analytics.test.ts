@@ -827,4 +827,83 @@ describe('Appeals analytics + labor', () => {
     expect(defaultHeader).toContain('Ставка ₽/ч');
     expect(defaultHeader).toContain('Сумма к доплате');
   });
+  test('analytics export appeals writes numeric hours and currency amounts to xlsx cells', async () => {
+    const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const toDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const title = `Export xlsx numeric ${Date.now()}`;
+
+    await prisma.department.update({
+      where: { id: managerDepartmentId },
+      data: { appealPaymentRequired: true, appealLaborHourlyRate: 100 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: employeeUser.id },
+      data: { appealLaborHourlyRate: 100 },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: managerUser.id },
+      data: { departmentId: managerDepartmentId, appealLaborHourlyRate: 120 },
+    });
+
+    const appeal = await prisma.appeal.create({
+      data: {
+        number: 940000 + Math.floor(Math.random() * 1000),
+        toDepartmentId: managerDepartmentId,
+        createdById: employeeUser.id,
+        title,
+        status: AppealStatus.IN_PROGRESS,
+      },
+    });
+
+    await prisma.appealAssignee.createMany({
+      data: [
+        { appealId: appeal.id, userId: employeeUser.id },
+        { appealId: appeal.id, userId: managerUser.id },
+      ],
+      skipDuplicates: true,
+    });
+
+    const laborRes = await request(app)
+      .put(`/appeals/${appeal.id}/labor`)
+      .set('Authorization', `Bearer ${managerToken}`)
+      .send({
+        items: [
+          { assigneeUserId: employeeUser.id, accruedHours: 4, paidHours: 2 },
+          { assigneeUserId: managerUser.id, accruedHours: 3, paidHours: 3 },
+        ],
+      });
+    expect(laborRes.status).toBe(200);
+
+    const res = await request(app)
+      .get('/appeals/analytics/export/appeals')
+      .query({
+        fromDate,
+        toDate,
+        departmentId: managerDepartmentId,
+        search: title,
+        format: 'xlsx',
+        columns: 'title,hoursAccrued,amountPaid',
+      })
+      .set('Authorization', `Bearer ${managerToken}`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+
+    expect(res.status).toBe(200);
+
+    const { Workbook } = require('exceljs') as { Workbook: new () => any };
+    const workbook = new Workbook();
+    await workbook.xlsx.load(res.body);
+    const sheet = workbook.getWorksheet('Appeals');
+
+    expect(sheet).toBeTruthy();
+    expect(sheet.getCell('A2').value).toBe(title);
+    expect(sheet.getCell('B2').value).toBe(7);
+    expect(sheet.getCell('B2').numFmt).toBe('0.00');
+    expect(sheet.getCell('C2').value).toBe(560);
+    expect(String(sheet.getCell('C2').numFmt || '')).toContain('₽');
+  });
 });
