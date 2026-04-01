@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 const envelope = {
   secret: z.string().min(1, 'secret is required'),
+  sessionId: z.string().min(1).optional(),
 };
 
 const nullableDate = z.preprocess(
@@ -44,6 +45,7 @@ const nomenclatureItemSchema = z.object({
   packages: z.array(packageSchema).optional(),
   sourceUpdatedAt: nullableDate,
 });
+export type NomenclatureItem = z.infer<typeof nomenclatureItemSchema>;
 
 export const nomenclatureBatchSchema = z.object({
   ...envelope,
@@ -53,10 +55,16 @@ export const nomenclatureBatchSchema = z.object({
 const stockItemSchema = z.object({
   productGuid: z.string().min(1),
   warehouseGuid: z.string().min(1),
+  organizationGuid: z.string().min(1),
   quantity: z.number(),
   reserved: z.number().optional(),
-  updatedAt: z.coerce.date(),
+  updatedAt: nullableDate,
+  seriesGuid: z.string().optional(),
+  seriesNumber: z.string().optional(),
+  seriesProductionDate: nullableDate,
+  seriesExpiresAt: nullableDate,
 });
+export type StockItem = z.infer<typeof stockItemSchema>;
 
 export const stockBatchSchema = z.object({
   ...envelope,
@@ -90,6 +98,7 @@ const counterpartySchema = z.object({
   addresses: z.array(addressSchema).optional(),
   sourceUpdatedAt: nullableDate,
 });
+export type CounterpartyItem = z.infer<typeof counterpartySchema>;
 
 export const counterpartiesBatchSchema = z.object({
   ...envelope,
@@ -106,10 +115,25 @@ const warehouseSchema = z.object({
   address: z.string().nullable().optional(),
   sourceUpdatedAt: nullableDate,
 });
+export type WarehouseItem = z.infer<typeof warehouseSchema>;
 
 export const warehousesBatchSchema = z.object({
   ...envelope,
   items: z.array(warehouseSchema).min(1),
+});
+
+const organizationSchema = z.object({
+  guid: z.string().min(1),
+  name: z.string().min(1),
+  code: z.string().optional(),
+  isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
+});
+export type OrganizationItem = z.infer<typeof organizationSchema>;
+
+export const organizationsBatchSchema = z.object({
+  ...envelope,
+  items: z.array(organizationSchema).min(1),
 });
 
 const priceTypeSchema = z.object({
@@ -146,9 +170,10 @@ const agreementSchema = z.object({
 
 const agreementItemSchema = z.object({
   priceType: priceTypeSchema.optional(),
-  contract: contractSchema,
+  contract: contractSchema.optional(),
   agreement: agreementSchema,
 });
+export type AgreementItem = z.infer<typeof agreementItemSchema>;
 
 export const agreementsBatchSchema = z.object({
   ...envelope,
@@ -169,6 +194,7 @@ const specialPriceItemSchema = z.object({
   isActive: z.boolean().optional(),
   sourceUpdatedAt: nullableDate,
 });
+export type SpecialPriceItem = z.infer<typeof specialPriceItemSchema>;
 
 export const specialPricesBatchSchema = z.object({
   ...envelope,
@@ -187,6 +213,7 @@ const productPriceItemSchema = z.object({
   isActive: z.boolean().optional(),
   sourceUpdatedAt: nullableDate,
 });
+export type ProductPriceItem = z.infer<typeof productPriceItemSchema>;
 
 export const productPricesBatchSchema = z.object({
   ...envelope,
@@ -221,5 +248,18 @@ export const orderAckSchema = z.object({
   error: z.string().optional(),
 });
 
+export const sessionStartSchema = z.object({
+  secret: z.string().min(1, 'secret is required'),
+  selectedEntities: z.array(z.string().min(1)).optional(),
+  replaceMode: z.boolean().optional(),
+});
+
+export const sessionCompleteSchema = z.object({
+  secret: z.string().min(1, 'secret is required'),
+  sessionId: z.string().min(1),
+});
+
 export type OrdersStatusBatch = z.infer<typeof ordersStatusBatchSchema>;
 export type OrderAckBody = z.infer<typeof orderAckSchema>;
+export type SessionStartBody = z.infer<typeof sessionStartSchema>;
+export type SessionCompleteBody = z.infer<typeof sessionCompleteSchema>;

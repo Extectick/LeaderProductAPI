@@ -77,7 +77,7 @@ const dateTimeField = (
   nullable: options?.nullable ?? false,
 });
 
-export const ONEC_SCHEMA_VERSION = '1.0.0';
+export const ONEC_SCHEMA_VERSION = '1.1.0';
 
 export const onecSchemaEntities: OneCSchemaEntity[] = [
   {
@@ -171,6 +171,27 @@ export const onecSchemaEntities: OneCSchemaEntity[] = [
           booleanField('isDefault', 'По умолчанию'),
           booleanField('isPickup', 'Самовывоз'),
           stringField('address', 'Адрес', { nullable: true }),
+          dateTimeField('sourceUpdatedAt', 'Дата изменения в 1С'),
+        ],
+      },
+    ],
+  },
+  {
+    code: 'organizations',
+    title: 'Организации',
+    method: 'POST',
+    path: '/api/1c/organizations/batch',
+    wrapper: 'items',
+    sections: [
+      {
+        code: 'item',
+        title: 'Организация',
+        multiple: true,
+        fields: [
+          stringField('guid', 'GUID', { required: true }),
+          stringField('name', 'Наименование', { required: true }),
+          stringField('code', 'Код'),
+          booleanField('isActive', 'Активна'),
           dateTimeField('sourceUpdatedAt', 'Дата изменения в 1С'),
         ],
       },
@@ -341,8 +362,13 @@ export const onecSchemaEntities: OneCSchemaEntity[] = [
         fields: [
           stringField('productGuid', 'GUID товара', { required: true }),
           stringField('warehouseGuid', 'GUID склада', { required: true }),
+          stringField('organizationGuid', 'GUID организации', { required: true }),
           numberField('quantity', 'Количество', { required: true }),
           numberField('reserved', 'Резерв'),
+          stringField('seriesGuid', 'GUID серии'),
+          stringField('seriesNumber', 'Номер серии'),
+          dateTimeField('seriesProductionDate', 'Дата производства'),
+          dateTimeField('seriesExpiresAt', 'Годен до'),
           dateTimeField('updatedAt', 'Дата обновления', { required: true }),
         ],
       },

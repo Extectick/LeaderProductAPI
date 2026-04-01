@@ -49,12 +49,12 @@ const apiResponse_1 = require("../utils/apiResponse");
 const telegramAuthService_1 = require("../services/telegramAuthService");
 const maxAuthService_1 = require("../services/maxAuthService");
 const phoneVerificationService_1 = require("../services/phoneVerificationService");
+const messengerQrAuthSessionService_1 = require("../services/messengerQrAuthSessionService");
 const authMethodRegistry_1 = require("../services/authMethodRegistry");
 const telegramBotService_1 = require("../services/telegramBotService");
 const maxBotService_1 = require("../services/maxBotService");
 const userService_1 = require("../services/userService");
 const phone_1 = require("../utils/phone");
-const redis_1 = require("../lib/redis");
 const router = express_1.default.Router();
 /**
  * @openapi
@@ -80,20 +80,6 @@ const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
 const MAX_WEBHOOK_SECRET = process.env.MAX_WEBHOOK_SECRET || '';
 const TELEGRAM_RATE_LIMIT = (0, rateLimit_1.rateLimit)({ windowSec: 60, limit: 60 });
 const MAX_RATE_LIMIT = (0, rateLimit_1.rateLimit)({ windowSec: 60, limit: 60 });
-const WELCOME_ONCE_TTL_SEC = Number(process.env.BOT_WELCOME_ONCE_TTL_SEC || 365 * 24 * 60 * 60);
-async function shouldSendWelcomeOnce(provider, userId) {
-    const key = `bot:welcome:${provider}:${userId}`;
-    try {
-        const redis = (0, redis_1.getRedis)();
-        if (!redis.isOpen)
-            return true;
-        const result = await redis.set(key, '1', { NX: true, EX: WELCOME_ONCE_TTL_SEC });
-        return result === 'OK';
-    }
-    catch {
-        return true;
-    }
-}
 function tgLog(stage, payload) {
     if (process.env.NODE_ENV === 'production')
         return;
@@ -109,6 +95,33 @@ function maxLog(stage, payload) {
         console.log('[max-auth]', stage, payload);
     else
         console.log('[max-auth]', stage);
+}
+function isQrConfigError(message) {
+    return (/TELEGRAM_QR_AUTH_NOT_CONFIGURED/i.test(message) ||
+        /MAX_QR_AUTH_NOT_CONFIGURED/i.test(message));
+}
+function isQrDeepLinkError(message) {
+    return (/TELEGRAM_QR_DEEP_LINK_UNAVAILABLE/i.test(message) ||
+        /MAX_QR_DEEP_LINK_UNAVAILABLE/i.test(message));
+}
+function mapQrSessionState(status) {
+    if (status === 'AWAITING_CONTACT')
+        return 'AWAITING_CONTACT';
+    if (status === 'FAILED')
+        return 'FAILED';
+    if (status === 'EXPIRED')
+        return 'EXPIRED';
+    if (status === 'CANCELLED')
+        return 'CANCELLED';
+    if (status === 'CONSUMED')
+        return 'CONSUMED';
+    return 'PENDING';
+}
+function parseTelegramQrStartTokenFromPayload(payloadRaw) {
+    const payload = String(payloadRaw || '').trim();
+    if (!payload.startsWith('auth_qr_'))
+        return '';
+    return payload.slice('auth_qr_'.length);
 }
 function normalizeEmail(email) {
     return email.trim().toLowerCase();
@@ -363,6 +376,172 @@ function parseMaxSession(maxSessionToken) {
         lastName: parsed.lastName ?? null,
     };
 }
+function qrProviderLabel(provider) {
+    return provider === 'MAX' ? 'MAX' : 'Telegram';
+}
+function qrConflictMessage(provider) {
+    return `Этот ${qrProviderLabel(provider)}-аккаунт связан с другим профилем. Войдите по email/паролю и привяжите ${qrProviderLabel(provider)} в профиле.`;
+}
+function qrGenericFailureMessage(provider) {
+    return `Не удалось подтвердить вход через ${qrProviderLabel(provider)}. Повторите попытку.`;
+}
+async function resolveTelegramQrSessionByContact(params) {
+    const active = await (0, messengerQrAuthSessionService_1.getLatestActiveMessengerQrAuthSessionByMessengerUser)({
+        provider: 'TELEGRAM',
+        messengerUserId: params.telegramUserId,
+    });
+    if (!active) {
+        return { handled: false };
+    }
+    const normalizedPhone = (0, telegramAuthService_1.normalizePhoneE164)(params.phoneRaw);
+    if (!normalizedPhone) {
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'TELEGRAM',
+            messengerUserId: params.telegramUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'INVALID_PHONE',
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'INVALID_PHONE' };
+    }
+    try {
+        const resolved = await resolveTelegramUserState({
+            telegramId: params.telegramUserId,
+            username: params.username ?? null,
+            firstName: null,
+            lastName: null,
+        }, normalizedPhone);
+        if (resolved.state === 'READY' && resolved.userId) {
+            await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionVerified)({
+                provider: 'TELEGRAM',
+                messengerUserId: params.telegramUserId,
+                resolvedUserId: resolved.userId,
+                messengerUsername: params.username ?? null,
+            });
+            return { handled: true, state: 'VERIFIED' };
+        }
+        if (resolved.state === 'NEED_LINK') {
+            await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+                provider: 'TELEGRAM',
+                messengerUserId: params.telegramUserId,
+                messengerUsername: params.username || null,
+                failureReason: 'ACCOUNT_CONFLICT',
+            });
+            return { handled: true, state: 'FAILED', failureReason: 'ACCOUNT_CONFLICT' };
+        }
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'TELEGRAM',
+            messengerUserId: params.telegramUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'USER_RESOLVE_FAILED',
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'USER_RESOLVE_FAILED' };
+    }
+    catch (error) {
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'TELEGRAM',
+            messengerUserId: params.telegramUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'USER_RESOLVE_FAILED',
+        });
+        tgLog('qr_contact_resolve_failed', {
+            telegramUserId: params.telegramUserId,
+            message: String(error?.message || error),
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'USER_RESOLVE_FAILED' };
+    }
+}
+async function resolveMaxQrSessionByContact(params) {
+    const active = await (0, messengerQrAuthSessionService_1.getLatestActiveMessengerQrAuthSessionByMessengerUser)({
+        provider: 'MAX',
+        messengerUserId: params.maxUserId,
+    });
+    if (!active) {
+        return { handled: false };
+    }
+    const normalizedPhone = (0, telegramAuthService_1.normalizePhoneE164)(params.phoneRaw);
+    if (!normalizedPhone) {
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'MAX',
+            messengerUserId: params.maxUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'INVALID_PHONE',
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'INVALID_PHONE' };
+    }
+    try {
+        const resolved = await resolveMaxUserState({
+            maxId: params.maxUserId,
+            username: params.username ?? null,
+            firstName: null,
+            lastName: null,
+        }, normalizedPhone);
+        if (resolved.state === 'READY' && resolved.userId) {
+            await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionVerified)({
+                provider: 'MAX',
+                messengerUserId: params.maxUserId,
+                resolvedUserId: resolved.userId,
+                messengerUsername: params.username ?? null,
+            });
+            return { handled: true, state: 'VERIFIED' };
+        }
+        if (resolved.state === 'NEED_LINK') {
+            await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+                provider: 'MAX',
+                messengerUserId: params.maxUserId,
+                messengerUsername: params.username || null,
+                failureReason: 'ACCOUNT_CONFLICT',
+            });
+            return { handled: true, state: 'FAILED', failureReason: 'ACCOUNT_CONFLICT' };
+        }
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'MAX',
+            messengerUserId: params.maxUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'USER_RESOLVE_FAILED',
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'USER_RESOLVE_FAILED' };
+    }
+    catch (error) {
+        await (0, messengerQrAuthSessionService_1.markLatestMessengerQrAuthSessionFailed)({
+            provider: 'MAX',
+            messengerUserId: params.maxUserId,
+            messengerUsername: params.username || null,
+            failureReason: 'USER_RESOLVE_FAILED',
+        });
+        maxLog('qr_contact_resolve_failed', {
+            maxUserId: params.maxUserId,
+            message: String(error?.message || error),
+        });
+        return { handled: true, state: 'FAILED', failureReason: 'USER_RESOLVE_FAILED' };
+    }
+}
+async function handleQrAuthStatus(provider, sessionToken, res) {
+    const session = await (0, messengerQrAuthSessionService_1.getMessengerQrAuthSessionByClientToken)(provider, sessionToken);
+    if (!session) {
+        return res.status(404).json((0, apiResponse_1.errorResponse)('QR-сессия не найдена', apiResponse_1.ErrorCodes.NOT_FOUND));
+    }
+    if (session.status === 'VERIFIED') {
+        if (!session.resolvedUserId) {
+            return res.status(401).json((0, apiResponse_1.errorResponse)('Пользователь не определён для QR-сессии', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+        }
+        const authPayload = await issueAuthTokensForUser(session.resolvedUserId);
+        await (0, messengerQrAuthSessionService_1.consumeMessengerQrAuthSession)(session.id).catch(() => undefined);
+        return res.json((0, apiResponse_1.successResponse)({
+            provider,
+            state: 'AUTHORIZED',
+            accessToken: authPayload.accessToken,
+            refreshToken: authPayload.refreshToken,
+            profile: authPayload.profile,
+            message: `Вход через ${qrProviderLabel(provider)} успешен`,
+        }));
+    }
+    return res.json((0, apiResponse_1.successResponse)({
+        provider,
+        state: mapQrSessionState(session.status),
+        failureReason: session.failureReason ?? null,
+        message: undefined,
+    }));
+}
 function generateAccessToken(user) {
     const payload = {
         userId: user.id,
@@ -614,6 +793,88 @@ router.post('/resend', async (req, res) => {
 });
 router.get('/methods', async (_req, res) => {
     return res.json((0, apiResponse_1.successResponse)({ methods: (0, authMethodRegistry_1.getAuthMethodDescriptors)() }));
+});
+router.post('/telegram/qr/start', TELEGRAM_RATE_LIMIT, async (_req, res) => {
+    try {
+        const started = await (0, messengerQrAuthSessionService_1.startMessengerQrAuthSession)('TELEGRAM');
+        return res.json((0, apiResponse_1.successResponse)(started));
+    }
+    catch (error) {
+        const message = String(error?.message || 'Не удалось запустить QR-вход через Telegram');
+        if (isQrConfigError(message) || isQrDeepLinkError(message)) {
+            return res.status(503).json((0, apiResponse_1.errorResponse)('QR-вход через Telegram временно недоступен. Проверьте настройки TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME.', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
+        }
+        return res.status(500).json((0, apiResponse_1.errorResponse)(message, apiResponse_1.ErrorCodes.INTERNAL_ERROR));
+    }
+});
+router.get('/telegram/qr/status', TELEGRAM_RATE_LIMIT, async (req, res) => {
+    try {
+        const sessionToken = String(req.query?.sessionToken || '').trim();
+        if (!sessionToken) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Требуется sessionToken', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        return await handleQrAuthStatus('TELEGRAM', sessionToken, res);
+    }
+    catch (error) {
+        return res.status(401).json((0, apiResponse_1.errorResponse)(error?.message || 'Не удалось проверить QR-сессию Telegram', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+    }
+});
+router.post('/telegram/qr/cancel', TELEGRAM_RATE_LIMIT, async (req, res) => {
+    try {
+        const sessionToken = String(req.body?.sessionToken || '').trim();
+        if (!sessionToken) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Требуется sessionToken', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        const result = await (0, messengerQrAuthSessionService_1.cancelMessengerQrAuthSessionByClientToken)('TELEGRAM', sessionToken);
+        if (!result.session) {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('QR-сессия не найдена', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        return res.json((0, apiResponse_1.successResponse)({ cancelled: result.cancelled }));
+    }
+    catch (error) {
+        return res.status(401).json((0, apiResponse_1.errorResponse)(error?.message || 'Не удалось отменить QR-сессию Telegram', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+    }
+});
+router.post('/max/qr/start', MAX_RATE_LIMIT, async (_req, res) => {
+    try {
+        const started = await (0, messengerQrAuthSessionService_1.startMessengerQrAuthSession)('MAX');
+        return res.json((0, apiResponse_1.successResponse)(started));
+    }
+    catch (error) {
+        const message = String(error?.message || 'Не удалось запустить QR-вход через MAX');
+        if (isQrConfigError(message) || isQrDeepLinkError(message)) {
+            return res.status(503).json((0, apiResponse_1.errorResponse)('QR-вход через MAX временно недоступен. Проверьте настройки MAX_BOT_TOKEN и MAX_BOT_USERNAME.', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
+        }
+        return res.status(500).json((0, apiResponse_1.errorResponse)(message, apiResponse_1.ErrorCodes.INTERNAL_ERROR));
+    }
+});
+router.get('/max/qr/status', MAX_RATE_LIMIT, async (req, res) => {
+    try {
+        const sessionToken = String(req.query?.sessionToken || '').trim();
+        if (!sessionToken) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Требуется sessionToken', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        return await handleQrAuthStatus('MAX', sessionToken, res);
+    }
+    catch (error) {
+        return res.status(401).json((0, apiResponse_1.errorResponse)(error?.message || 'Не удалось проверить QR-сессию MAX', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+    }
+});
+router.post('/max/qr/cancel', MAX_RATE_LIMIT, async (req, res) => {
+    try {
+        const sessionToken = String(req.body?.sessionToken || '').trim();
+        if (!sessionToken) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Требуется sessionToken', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        const result = await (0, messengerQrAuthSessionService_1.cancelMessengerQrAuthSessionByClientToken)('MAX', sessionToken);
+        if (!result.session) {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('QR-сессия не найдена', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        return res.json((0, apiResponse_1.successResponse)({ cancelled: result.cancelled }));
+    }
+    catch (error) {
+        return res.status(401).json((0, apiResponse_1.errorResponse)(error?.message || 'Не удалось отменить QR-сессию MAX', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+    }
 });
 router.post('/telegram/init', TELEGRAM_RATE_LIMIT, async (req, res) => {
     try {
@@ -968,8 +1229,51 @@ async function processTelegramPhoneVerificationUpdate(update) {
     const textRaw = String(message?.text || '').trim();
     if (fromIdRaw && textRaw.startsWith('/start')) {
         const payload = textRaw.split(/\s+/, 2)[1] || '';
+        const qrToken = parseTelegramQrStartTokenFromPayload(payload);
         const token = payload.startsWith('verify_phone_') ? payload.slice('verify_phone_'.length) : '';
-        if (token) {
+        if (qrToken) {
+            tgLog('qr_auth_start_received', {
+                fromIdRaw: String(fromIdRaw),
+                hasChatId: chatIdRaw !== null && chatIdRaw !== undefined,
+            });
+            const qrSession = await (0, messengerQrAuthSessionService_1.bindMessengerQrAuthSessionByStartToken)({
+                provider: 'TELEGRAM',
+                startToken: qrToken,
+                messengerUserId: String(fromIdRaw),
+                messengerChatId: chatIdRaw !== null && chatIdRaw !== undefined ? String(chatIdRaw) : null,
+                messengerUsername: username,
+            });
+            if (chatIdRaw !== null && chatIdRaw !== undefined) {
+                const chatId = String(chatIdRaw);
+                if (!qrSession) {
+                    await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                        chatId,
+                        text: 'QR-сессия входа недействительна или истекла. Запустите вход заново на сайте.',
+                        removeKeyboard: true,
+                    }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_start_invalid', error: String(e?.message || e) }));
+                }
+                else if (qrSession.status === 'AWAITING_CONTACT' || qrSession.status === 'PENDING') {
+                    await (0, telegramBotService_1.sendPhoneContactRequestMessage)({
+                        chatId,
+                    }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_start_pending', error: String(e?.message || e) }));
+                }
+                else if (qrSession.status === 'EXPIRED') {
+                    await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                        chatId,
+                        text: 'QR-сессия входа истекла. Запустите вход заново на сайте.',
+                        removeKeyboard: true,
+                    }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_start_expired', error: String(e?.message || e) }));
+                }
+                else {
+                    await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                        chatId,
+                        text: 'Эта QR-сессия уже завершена.',
+                        removeKeyboard: true,
+                    }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_start_finished', error: String(e?.message || e) }));
+                }
+            }
+        }
+        else if (token) {
             tgLog('phone_verify_start_received', { fromIdRaw: String(fromIdRaw), hasChatId: chatIdRaw !== null && chatIdRaw !== undefined });
             const session = await (0, phoneVerificationService_1.bindTelegramToPhoneVerificationByStartToken)({
                 token,
@@ -1013,13 +1317,10 @@ async function processTelegramPhoneVerificationUpdate(update) {
             }
         }
         else if (chatIdRaw !== null && chatIdRaw !== undefined) {
-            const shouldSend = await shouldSendWelcomeOnce('telegram', String(fromIdRaw));
-            if (shouldSend) {
-                await (0, telegramBotService_1.sendTelegramWelcomeMessage)({
-                    chatId: String(chatIdRaw),
-                    startParam: 'home',
-                }).catch((e) => tgLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
-            }
+            await (0, telegramBotService_1.sendTelegramWelcomeMessage)({
+                chatId: String(chatIdRaw),
+                startParam: 'home',
+            }).catch((e) => tgLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
         }
     }
     const phoneRaw = message?.contact?.phone_number ?? null;
@@ -1030,18 +1331,46 @@ async function processTelegramPhoneVerificationUpdate(update) {
     if (!normalized)
         return;
     await (0, telegramAuthService_1.setTelegramContactPhone)(String(fromIdRaw), normalized);
+    const qrResolved = await resolveTelegramQrSessionByContact({
+        telegramUserId: String(fromIdRaw),
+        chatId: chatIdRaw !== null && chatIdRaw !== undefined ? String(chatIdRaw) : null,
+        username,
+        phoneRaw: String(phoneRaw),
+    });
     const verification = await (0, phoneVerificationService_1.verifyPhoneByTelegramContact)({
         telegramUserId: String(fromIdRaw),
         phoneRaw: String(phoneRaw),
         username,
     });
-    if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND') {
+    if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND' && !qrResolved.handled) {
         tgLog('contact_without_session', { telegramUserId: String(fromIdRaw) });
         return;
     }
     if (chatIdRaw !== null && chatIdRaw !== undefined) {
         const chatId = String(chatIdRaw);
-        if (verification.ok) {
+        if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND' && qrResolved.handled) {
+            if (qrResolved.state === 'VERIFIED') {
+                await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                    chatId,
+                    text: 'Вход в веб-версию подтверждён. Вернитесь к компьютеру.',
+                    removeKeyboard: true,
+                }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_verified', error: String(e?.message || e) }));
+            }
+            else if (qrResolved.failureReason === 'ACCOUNT_CONFLICT') {
+                await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                    chatId,
+                    text: qrConflictMessage('TELEGRAM'),
+                    removeKeyboard: true,
+                }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_account_conflict', error: String(e?.message || e) }));
+            }
+            else if (qrResolved.state === 'FAILED') {
+                await (0, telegramBotService_1.sendTelegramInfoMessage)({
+                    chatId,
+                    text: qrGenericFailureMessage('TELEGRAM'),
+                }).catch((e) => tgLog('bot_send_failed', { stage: 'qr_failed', error: String(e?.message || e) }));
+            }
+        }
+        else if (verification.ok) {
             await (0, telegramBotService_1.sendTelegramInfoMessage)({
                 chatId,
                 text: 'Номер телефона подтверждён. Можно вернуться в приложение.',
@@ -1130,8 +1459,11 @@ function parseMaxUpdatePayload(update) {
     else if (textRaw.startsWith('/start')) {
         startPayload = textRaw.split(/\s+/, 2)[1] || '';
     }
-    const startToken = startPayload.startsWith('verify_phone_')
+    const phoneVerifyStartToken = startPayload.startsWith('verify_phone_')
         ? startPayload.slice('verify_phone_'.length)
+        : '';
+    const qrAuthStartToken = startPayload.startsWith('auth_qr_')
+        ? startPayload.slice('auth_qr_'.length)
         : '';
     let phoneRaw = null;
     const attachments = Array.isArray(message?.body?.attachments) ? message.body.attachments : [];
@@ -1144,7 +1476,7 @@ function parseMaxUpdatePayload(update) {
             break;
         }
     }
-    return { fromIdRaw, chatIdRaw, username, startToken, phoneRaw };
+    return { fromIdRaw, chatIdRaw, username, phoneVerifyStartToken, qrAuthStartToken, phoneRaw };
 }
 async function processMaxPhoneVerificationUpdate(update) {
     const parsed = parseMaxUpdatePayload(update);
@@ -1153,13 +1485,52 @@ async function processMaxPhoneVerificationUpdate(update) {
     const targetChatId = parsed.fromIdRaw ?? null;
     const isStartEvent = String(update?.update_type || '').trim().toLowerCase() === 'bot_started' ||
         String(update?.message?.body?.text || '').trim().startsWith('/start');
-    if (fromIdRaw && parsed.startToken) {
+    if (fromIdRaw && parsed.qrAuthStartToken) {
+        maxLog('qr_auth_start_received', {
+            fromIdRaw: String(fromIdRaw),
+            hasChatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined,
+        });
+        const qrSession = await (0, messengerQrAuthSessionService_1.bindMessengerQrAuthSessionByStartToken)({
+            provider: 'MAX',
+            startToken: parsed.qrAuthStartToken,
+            messengerUserId: String(fromIdRaw),
+            messengerChatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined ? String(parsed.chatIdRaw) : null,
+            messengerUsername: username,
+        });
+        if (targetChatId !== null && targetChatId !== undefined) {
+            const chatId = String(targetChatId);
+            if (!qrSession) {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: 'QR-сессия входа недействительна или истекла. Запустите вход заново на сайте.',
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_start_invalid', error: String(e?.message || e) }));
+            }
+            else if (qrSession.status === 'AWAITING_CONTACT' || qrSession.status === 'PENDING') {
+                await (0, maxBotService_1.sendMaxPhoneContactRequestMessage)({
+                    chatId,
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_start_pending', error: String(e?.message || e) }));
+            }
+            else if (qrSession.status === 'EXPIRED') {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: 'QR-сессия входа истекла. Запустите вход заново на сайте.',
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_start_expired', error: String(e?.message || e) }));
+            }
+            else {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: 'Эта QR-сессия уже завершена.',
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_start_finished', error: String(e?.message || e) }));
+            }
+        }
+    }
+    else if (fromIdRaw && parsed.phoneVerifyStartToken) {
         maxLog('phone_verify_start_received', {
             fromIdRaw: String(fromIdRaw),
             hasChatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined,
         });
         const session = await (0, phoneVerificationService_1.bindMaxToPhoneVerificationByStartToken)({
-            token: parsed.startToken,
+            token: parsed.phoneVerifyStartToken,
             maxUserId: String(fromIdRaw),
             chatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined ? String(parsed.chatIdRaw) : null,
             username,
@@ -1197,13 +1568,10 @@ async function processMaxPhoneVerificationUpdate(update) {
         }
     }
     else if (fromIdRaw && isStartEvent) {
-        const shouldSend = await shouldSendWelcomeOnce('max', String(fromIdRaw));
-        if (shouldSend) {
-            await (0, maxBotService_1.sendMaxWelcomeMessage)({
-                chatId: String(targetChatId),
-                startParam: 'home',
-            }).catch((e) => maxLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
-        }
+        await (0, maxBotService_1.sendMaxWelcomeMessage)({
+            chatId: String(targetChatId),
+            startParam: 'home',
+        }).catch((e) => maxLog('bot_send_failed', { stage: 'start_welcome', error: String(e?.message || e) }));
     }
     if (!fromIdRaw || !parsed.phoneRaw)
         return;
@@ -1211,18 +1579,44 @@ async function processMaxPhoneVerificationUpdate(update) {
     if (!normalized)
         return;
     await (0, maxAuthService_1.setMaxContactPhone)(String(fromIdRaw), normalized);
+    const qrResolved = await resolveMaxQrSessionByContact({
+        maxUserId: String(fromIdRaw),
+        chatId: parsed.chatIdRaw !== null && parsed.chatIdRaw !== undefined ? String(parsed.chatIdRaw) : null,
+        username,
+        phoneRaw: String(parsed.phoneRaw),
+    });
     const verification = await (0, phoneVerificationService_1.verifyPhoneByMaxContact)({
         maxUserId: String(fromIdRaw),
         phoneRaw: String(parsed.phoneRaw),
         username,
     });
-    if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND') {
+    if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND' && !qrResolved.handled) {
         maxLog('contact_without_session', { maxUserId: String(fromIdRaw) });
         return;
     }
     if (targetChatId !== null && targetChatId !== undefined) {
         const chatId = String(targetChatId);
-        if (verification.ok) {
+        if (!verification.ok && verification.reason === 'SESSION_NOT_FOUND' && qrResolved.handled) {
+            if (qrResolved.state === 'VERIFIED') {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: 'Вход в веб-версию подтверждён. Вернитесь к компьютеру.',
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_verified', error: String(e?.message || e) }));
+            }
+            else if (qrResolved.failureReason === 'ACCOUNT_CONFLICT') {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: qrConflictMessage('MAX'),
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_account_conflict', error: String(e?.message || e) }));
+            }
+            else if (qrResolved.state === 'FAILED') {
+                await (0, maxBotService_1.sendMaxInfoMessage)({
+                    chatId,
+                    text: qrGenericFailureMessage('MAX'),
+                }).catch((e) => maxLog('bot_send_failed', { stage: 'qr_failed', error: String(e?.message || e) }));
+            }
+        }
+        else if (verification.ok) {
             await (0, maxBotService_1.sendMaxInfoMessage)({
                 chatId,
                 text: 'Номер телефона подтверждён. Можно вернуться в приложение.',

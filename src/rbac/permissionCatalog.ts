@@ -34,7 +34,7 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
   {
     key: 'finance',
     displayName: 'Финансы',
-    description: 'Права, связанные с финансовыми операциями и отчетностью.',
+    description: 'Права, связанные с финансовыми операциями и отчётностью.',
     sortOrder: 30,
     isSystem: true,
     serviceKey: null,
@@ -62,6 +62,14 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
     sortOrder: 110,
     isSystem: true,
     serviceKey: 'qrcodes',
+  },
+  {
+    key: 'service_stock_balances',
+    displayName: 'Сервис: Остатки по складам',
+    description: 'Права доступа к просмотру остатков по складам.',
+    sortOrder: 120,
+    isSystem: true,
+    serviceKey: 'stock_balances',
   },
 ];
 
@@ -106,6 +114,8 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { name: 'view_qr_analytics', displayName: 'Просмотр аналитики QR', description: 'Разрешает смотреть аналитику по сканам QR-кодов.', groupKey: 'service_qrcodes' },
   { name: 'view_qr_stats', displayName: 'Просмотр статистики QR', description: 'Разрешает просматривать статистические сводки QR.', groupKey: 'service_qrcodes' },
   { name: 'export_qr', displayName: 'Экспорт QR', description: 'Разрешает экспортировать данные по QR-кодам.', groupKey: 'service_qrcodes' },
+
+  { name: 'view_stock_balances', displayName: 'Просмотр остатков по складам', description: 'Разрешает просматривать остатки по складам, организациям и сериям.', groupKey: 'service_stock_balances' },
 ];
 
 export const PERMISSION_CATALOG_BY_NAME = new Map(
@@ -146,6 +156,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'edit_appeal_message',
     'delete_appeal_message',
     'manage_appeal_watchers',
+    'view_stock_balances',
   ],
   department_manager: [
     'assign_appeal',

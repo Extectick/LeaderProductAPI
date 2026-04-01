@@ -11,20 +11,48 @@ import { randomUUID } from 'node:crypto';
 import { ZodError } from 'zod';
 import { fromZodError } from 'zod-validation-error';
 import prisma from '../../prisma/client';
+import { cacheDelPrefix } from '../../utils/cache';
 import {
   agreementsBatchSchema,
   counterpartiesBatchSchema,
   nomenclatureBatchSchema,
+  organizationsBatchSchema,
   orderAckSchema,
   ordersStatusBatchSchema,
   productPricesBatchSchema,
+  sessionCompleteSchema,
+  sessionStartSchema,
   specialPricesBatchSchema,
   stockBatchSchema,
   warehousesBatchSchema,
 } from './onec.schemas';
 import { onecSchemaResponse } from './onec.schema.response';
+import {
+  completeOnecSyncSession,
+  resolveBatchSession,
+  stageAgreementsBatch,
+  stageCounterpartiesBatch,
+  stageNomenclatureBatch,
+  stageOrganizationsBatch,
+  stageProductPricesBatch,
+  stageSpecialPricesBatch,
+  stageStockBatch,
+  stageWarehousesBatch,
+  startOnecSyncSession,
+} from './onec.sync';
 
 type BatchResult = { key: string; status: 'ok' | 'error'; error?: string };
+type ClearEntityCode =
+  | 'nomenclature'
+  | 'organizations'
+  | 'warehouses'
+  | 'counterparties'
+  | 'agreements'
+  | 'product-prices'
+  | 'special-prices'
+  | 'stock';
+
+const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
 
 const toDecimal = (value?: number | null) =>
   value === undefined || value === null ? undefined : new Prisma.Decimal(value);
@@ -154,6 +182,29 @@ const handleValidationError = (error: ZodError<unknown>, res: Response) => {
   });
 };
 
+async function completeImplicitSessionIfNeeded(
+  implicit: boolean,
+  sessionId: string | undefined,
+  results: BatchResult[]
+) {
+  if (!implicit || !sessionId) {
+    return undefined;
+  }
+
+  try {
+    const outcome = await completeOnecSyncSession({
+      secret: process.env.ONEC_SECRET ?? '',
+      sessionId,
+    });
+    return outcome;
+  } catch (error) {
+    console.error(`Failed to auto-complete implicit sync session ${sessionId}`, error);
+    const message = error instanceof Error ? error.message : 'Failed to complete sync session';
+    results.push({ key: sessionId, status: 'error', error: message });
+    return undefined;
+  }
+}
+
 export const onecAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const rawSecret = (req.body?.secret ?? req.query?.secret) as unknown;
   const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
@@ -163,8 +214,145 @@ export const onecAuthMiddleware = (req: Request, res: Response, next: NextFuncti
   return next();
 };
 
+const normalizeCounterpartyString = (value: string | null | undefined): string | undefined => {
+  if (value === null || value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const digitsOnly = (value: string | null | undefined): string | undefined => {
+  const prepared = normalizeCounterpartyString(value);
+  if (!prepared) return undefined;
+  const digits = prepared.replace(/\D+/g, '');
+  return digits.length > 0 ? digits : undefined;
+};
+
+const normalizeInn = (value: string | null | undefined): string | undefined => {
+  const digits = digitsOnly(value);
+  if (!digits) return undefined;
+  return digits.length === 10 || digits.length === 12 ? digits : undefined;
+};
+
+const normalizeKpp = (value: string | null | undefined): string | undefined => {
+  const digits = digitsOnly(value);
+  if (!digits) return undefined;
+  return digits.length === 9 ? digits : undefined;
+};
+
+const normalizePhone = (value: string | null | undefined): string | undefined => {
+  const prepared = normalizeCounterpartyString(value);
+  if (!prepared) return undefined;
+  const digits = prepared.replace(/\D+/g, '');
+  if (digits.length < 6) return undefined;
+  return prepared.startsWith('+') ? `+${digits}` : digits;
+};
+
+const clearOnecEntity = async (entity: ClearEntityCode) => {
+  await prisma.$transaction(async (tx) => {
+    switch (entity) {
+      case 'stock':
+        await tx.stockBalance.deleteMany({});
+        return;
+      case 'organizations':
+        await tx.stockBalance.deleteMany({});
+        await tx.organization.deleteMany({});
+        return;
+      case 'special-prices':
+        await tx.specialPrice.deleteMany({});
+        return;
+      case 'product-prices':
+        await tx.productPrice.deleteMany({});
+        return;
+      case 'agreements':
+        await tx.specialPrice.deleteMany({ where: { agreementId: { not: null } } });
+        await tx.clientAgreement.deleteMany({});
+        await tx.clientContract.deleteMany({});
+        await tx.priceType.deleteMany({});
+        return;
+      case 'counterparties':
+        await tx.specialPrice.deleteMany({ where: { counterpartyId: { not: null } } });
+        await tx.clientAgreement.deleteMany({});
+        await tx.clientContract.deleteMany({});
+        await tx.deliveryAddress.deleteMany({});
+        await tx.counterparty.deleteMany({});
+        return;
+      case 'warehouses':
+        await tx.stockBalance.deleteMany({});
+        await tx.clientAgreement.deleteMany({ where: { warehouseId: { not: null } } });
+        await tx.warehouse.deleteMany({});
+        return;
+      case 'nomenclature':
+        await tx.stockBalance.deleteMany({});
+        await tx.specialPrice.deleteMany({});
+        await tx.productPrice.deleteMany({});
+        await tx.productPackage.deleteMany({});
+        await tx.product.deleteMany({});
+        await tx.productGroup.deleteMany({});
+        return;
+      default:
+        throw new Error(`Unsupported clear entity: ${entity}`);
+    }
+  });
+};
+
 export const handleSchema = async (_req: Request, res: Response) => {
   return res.status(200).json(onecSchemaResponse);
+};
+
+export const handleSyncSessionStart = async (req: Request, res: Response) => {
+  try {
+    const parsed = sessionStartSchema.parse(req.body);
+    const session = await startOnecSyncSession(parsed);
+    return res.json({ success: true, session });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return handleValidationError(error, res);
+    }
+    console.error('Unexpected error in sync session start', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const handleSyncSessionComplete = async (req: Request, res: Response) => {
+  try {
+    const parsed = sessionCompleteSchema.parse(req.body);
+    const outcome = await completeOnecSyncSession(parsed);
+    return res.json({ success: true, session: outcome });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return handleValidationError(error, res);
+    }
+    console.error('Unexpected error in sync session complete', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const handleEntityClear = async (req: Request, res: Response) => {
+  const entity = toSingleString(req.params.entity) as ClearEntityCode | undefined;
+  if (
+    entity !== 'nomenclature' &&
+    entity !== 'organizations' &&
+    entity !== 'warehouses' &&
+    entity !== 'counterparties' &&
+    entity !== 'agreements' &&
+    entity !== 'product-prices' &&
+    entity !== 'special-prices' &&
+    entity !== 'stock'
+  ) {
+    return res.status(400).json({ error: 'Unsupported entity for clear' });
+  }
+
+  try {
+    await clearOnecEntity(entity);
+    if (entity === 'stock' || entity === 'nomenclature' || entity === 'warehouses' || entity === 'organizations') {
+      await cacheDelPrefix(STOCK_BALANCES_CACHE_PREFIX);
+    }
+    return res.json({ success: true, entity });
+  } catch (error) {
+    console.error(`Unexpected error while clearing ${entity}`, error);
+    const message = error instanceof Error ? error.message : 'Failed to clear entity';
+    return res.status(500).json({ error: message });
+  }
 };
 
 export const handleNomenclatureBatch = async (req: Request, res: Response) => {
@@ -180,187 +368,16 @@ export const handleNomenclatureBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = nomenclatureBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('nomenclature', parsed.sessionId);
+    const results = await stageNomenclatureBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      const groups = parsed.items.filter((item) => item.isGroup);
-      const products = parsed.items.filter((item) => !item.isGroup);
-
-      const groupCache = new Map<string, string>();
-
-      const parentResolver = async (guid?: string | null): Promise<string | undefined> => {
-        if (!guid) return undefined;
-        if (groupCache.has(guid)) return groupCache.get(guid);
-
-        const found = await tx.productGroup.findUnique({ where: { guid } });
-        if (found) {
-          groupCache.set(guid, found.id);
-          return found.id;
-        }
-        return undefined;
-      };
-
-      for (const group of groups) {
-        try {
-          const parentId = await parentResolver(group.parentGuid ?? undefined);
-          if (group.parentGuid && !parentId) {
-            // Решение: если родитель не найден, создаём группу без parentId, чтобы не блокировать приём батча
-            console.warn(`Parent group ${group.parentGuid} not found. Creating ${group.guid} without parent.`);
-          }
-
-          const sourceUpdatedAt = group.sourceUpdatedAt ?? syncedAt;
-          const saved = await tx.productGroup.upsert({
-            where: { guid: group.guid },
-            create: {
-              guid: group.guid,
-              name: group.name,
-              code: group.code,
-              isActive: group.isActive ?? true,
-              parentId: parentId ?? null,
-              sourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              name: group.name,
-              code: group.code,
-              isActive: group.isActive ?? true,
-              parentId: parentId ?? null,
-              sourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-          groupCache.set(saved.guid, saved.id);
-          results.push({ key: group.guid, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert group ${group.guid}`, err);
-          results.push({ key: group.guid, status: 'error', error: 'Failed to upsert group' });
-        }
-      }
-
-      for (const product of products) {
-        try {
-          let baseUnitId: string | undefined;
-          if (product.baseUnit) {
-            const baseUnitSourceUpdatedAt =
-              product.baseUnit.sourceUpdatedAt ?? product.sourceUpdatedAt ?? syncedAt;
-            const baseUnit = await tx.unit.upsert({
-              where: { guid: product.baseUnit.guid },
-              create: {
-                guid: product.baseUnit.guid,
-                name: product.baseUnit.name,
-                code: product.baseUnit.code,
-                symbol: product.baseUnit.symbol,
-                sourceUpdatedAt: baseUnitSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              },
-              update: {
-                name: product.baseUnit.name,
-                code: product.baseUnit.code,
-                symbol: product.baseUnit.symbol,
-                sourceUpdatedAt: baseUnitSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              },
-            });
-            baseUnitId = baseUnit.id;
-          }
-
-          const groupId = await parentResolver(product.parentGuid ?? undefined);
-          if (product.parentGuid && !groupId) {
-            console.warn(
-              `Group ${product.parentGuid} for product ${product.guid} not found. Product will be created without group.`
-            );
-          }
-
-          const productSourceUpdatedAt = product.sourceUpdatedAt ?? syncedAt;
-          const savedProduct = await tx.product.upsert({
-            where: { guid: product.guid },
-            create: {
-              guid: product.guid,
-              name: product.name,
-              code: product.code,
-              article: product.article,
-              sku: product.sku,
-              isWeight: product.isWeight ?? false,
-              isService: product.isService ?? false,
-              isActive: product.isActive ?? true,
-              groupId: groupId ?? null,
-              baseUnitId: baseUnitId ?? null,
-              sourceUpdatedAt: productSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              name: product.name,
-              code: product.code,
-              article: product.article,
-              sku: product.sku,
-              isWeight: product.isWeight ?? false,
-              isService: product.isService ?? false,
-              isActive: product.isActive ?? true,
-              groupId: groupId ?? null,
-              baseUnitId: baseUnitId ?? null,
-              sourceUpdatedAt: productSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-
-          if (product.packages?.length) {
-            for (const pack of product.packages) {
-              const packUnitSourceUpdatedAt =
-                pack.unit.sourceUpdatedAt ?? pack.sourceUpdatedAt ?? product.sourceUpdatedAt ?? syncedAt;
-              const unit = await tx.unit.upsert({
-                where: { guid: pack.unit.guid },
-                create: {
-                  guid: pack.unit.guid,
-                  name: pack.unit.name,
-                  code: pack.unit.code,
-                  symbol: pack.unit.symbol,
-                  sourceUpdatedAt: packUnitSourceUpdatedAt,
-                  lastSyncedAt: syncedAt,
-                },
-                update: {
-                  name: pack.unit.name,
-                  code: pack.unit.code,
-                  symbol: pack.unit.symbol,
-                  sourceUpdatedAt: packUnitSourceUpdatedAt,
-                  lastSyncedAt: syncedAt,
-                },
-              });
-
-              const packSourceUpdatedAt = pack.sourceUpdatedAt ?? product.sourceUpdatedAt ?? syncedAt;
-              const packageData = {
-                productId: savedProduct.id,
-                unitId: unit.id,
-                name: pack.name,
-                multiplier: toDecimal(pack.multiplier) ?? new Prisma.Decimal(1),
-                barcode: pack.barcode,
-                isDefault: pack.isDefault ?? false,
-                sortOrder: pack.sortOrder ?? 0,
-                sourceUpdatedAt: packSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              };
-
-              if (pack.guid) {
-                await tx.productPackage.upsert({
-                  where: { guid: pack.guid },
-                  create: { ...packageData, guid: pack.guid },
-                  update: packageData,
-                });
-              } else {
-                await tx.productPackage.create({ data: packageData });
-              }
-            }
-          }
-
-          results.push({ key: product.guid, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert product ${product.guid}`, err);
-          results.push({ key: product.guid, status: 'error', error: 'Failed to upsert product' });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -372,7 +389,6 @@ export const handleNomenclatureBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleStockBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -386,71 +402,16 @@ export const handleStockBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = stockBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('stock', parsed.sessionId);
+    const results = await stageStockBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      const productGuids = Array.from(new Set(parsed.items.map((i) => i.productGuid)));
-      const warehouseGuids = Array.from(new Set(parsed.items.map((i) => i.warehouseGuid)));
-
-      const [products, warehouses] = await Promise.all([
-        productGuids.length
-          ? tx.product.findMany({ where: { guid: { in: productGuids } } })
-          : Promise.resolve([]),
-        warehouseGuids.length
-          ? tx.warehouse.findMany({ where: { guid: { in: warehouseGuids } } })
-          : Promise.resolve([]),
-      ]);
-
-      const productMap = new Map(products.map((p) => [p.guid, p.id]));
-      const warehouseMap = new Map(warehouses.map((w) => [w.guid, w.id]));
-
-      for (const item of parsed.items) {
-        const key = `${item.productGuid}:${item.warehouseGuid}`;
-        const productId = productMap.get(item.productGuid);
-        const warehouseId = warehouseMap.get(item.warehouseGuid);
-
-        if (!productId || !warehouseId) {
-          console.warn(
-            `Stock item skipped for product ${item.productGuid} or warehouse ${item.warehouseGuid}`
-          );
-          results.push({
-            key,
-            status: 'error',
-            error: 'Product or warehouse not found',
-          });
-          continue;
-        }
-
-        try {
-          await tx.stockBalance.upsert({
-            where: { productId_warehouseId: { productId, warehouseId } },
-            create: {
-              productId,
-              warehouseId,
-              quantity: toDecimal(item.quantity) ?? new Prisma.Decimal(0),
-              reserved: toDecimal(item.reserved),
-              updatedAt: item.updatedAt,
-              sourceUpdatedAt: item.updatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              quantity: toDecimal(item.quantity) ?? new Prisma.Decimal(0),
-              reserved: toDecimal(item.reserved),
-              updatedAt: item.updatedAt,
-              sourceUpdatedAt: item.updatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-          results.push({ key, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert stock for ${key}`, err);
-          results.push({ key, status: 'error', error: 'Failed to upsert stock' });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -462,7 +423,40 @@ export const handleStockBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+export const handleOrganizationsBatch = async (req: Request, res: Response) => {
+  const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
+  const baseMeta = { rawCount };
+  let runId: string | undefined;
 
+  try {
+    runId = (await startSyncRun(SyncEntityType.ORGANIZATIONS, SyncDirection.IMPORT, baseMeta)).id;
+  } catch (e) {
+    console.error('Failed to start sync run for organizations', e);
+  }
+
+  try {
+    const parsed = organizationsBatchSchema.parse(req.body);
+    const session = await resolveBatchSession('organizations', parsed.sessionId);
+    const results = await stageOrganizationsBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
+
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
+    });
+    return res.json({ success: true, count: results.length, results });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      await safeFailSyncRun(runId, error, baseMeta);
+      return handleValidationError(error, res);
+    }
+    await safeFailSyncRun(runId, error, baseMeta);
+    console.error('Unexpected error in organizations batch', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
 export const handleCounterpartiesBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -476,85 +470,16 @@ export const handleCounterpartiesBatch = async (req: Request, res: Response) => 
 
   try {
     const parsed = counterpartiesBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('counterparties', parsed.sessionId);
+    const results = await stageCounterpartiesBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      for (const item of parsed.items) {
-        try {
-          const counterpartySourceUpdatedAt = item.sourceUpdatedAt ?? syncedAt;
-          const counterparty = await tx.counterparty.upsert({
-            where: { guid: item.guid },
-            create: {
-              guid: item.guid,
-              name: item.name,
-              fullName: item.fullName ?? undefined,
-              inn: item.inn ?? undefined,
-              kpp: item.kpp ?? undefined,
-              phone: item.phone ?? undefined,
-              email: item.email ?? undefined,
-              isActive: item.isActive ?? true,
-              sourceUpdatedAt: counterpartySourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              name: item.name,
-              fullName: item.fullName ?? undefined,
-              inn: item.inn ?? undefined,
-              kpp: item.kpp ?? undefined,
-              phone: item.phone ?? undefined,
-              email: item.email ?? undefined,
-              isActive: item.isActive ?? true,
-              sourceUpdatedAt: counterpartySourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-
-          if (item.addresses?.length) {
-            for (const address of item.addresses) {
-              const addressSourceUpdatedAt = address.sourceUpdatedAt ?? item.sourceUpdatedAt ?? syncedAt;
-              const addressData = {
-                counterpartyId: counterparty.id,
-                guid: address.guid ?? null,
-                name: address.name ?? null,
-                fullAddress: address.fullAddress,
-                city: address.city ?? null,
-                street: address.street ?? null,
-                house: address.house ?? null,
-                building: address.building ?? null,
-                apartment: address.apartment ?? null,
-                postcode: address.postcode ?? null,
-                isDefault: address.isDefault ?? false,
-                isActive: address.isActive ?? true,
-                sourceUpdatedAt: addressSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              };
-
-              if (address.guid) {
-                await tx.deliveryAddress.upsert({
-                  where: { guid: address.guid },
-                  create: addressData,
-                  update: addressData,
-                });
-              } else {
-                await tx.deliveryAddress.create({ data: addressData });
-              }
-            }
-          }
-
-          results.push({ key: item.guid, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert counterparty ${item.guid}`, err);
-          results.push({
-            key: item.guid,
-            status: 'error',
-            error: 'Failed to upsert counterparty',
-          });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -566,7 +491,6 @@ export const handleCounterpartiesBatch = async (req: Request, res: Response) => 
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleWarehousesBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -580,47 +504,16 @@ export const handleWarehousesBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = warehousesBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('warehouses', parsed.sessionId);
+    const results = await stageWarehousesBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      for (const item of parsed.items) {
-        try {
-          const sourceUpdatedAt = item.sourceUpdatedAt ?? syncedAt;
-          await tx.warehouse.upsert({
-            where: { guid: item.guid },
-            create: {
-              guid: item.guid,
-              name: item.name,
-              code: item.code ?? undefined,
-              isActive: item.isActive ?? true,
-              isDefault: item.isDefault ?? false,
-              isPickup: item.isPickup ?? false,
-              address: item.address ?? undefined,
-              sourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              name: item.name,
-              code: item.code ?? undefined,
-              isActive: item.isActive ?? true,
-              isDefault: item.isDefault ?? false,
-              isPickup: item.isPickup ?? false,
-              address: item.address ?? undefined,
-              sourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-
-          results.push({ key: item.guid, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert warehouse ${item.guid}`, err);
-          results.push({ key: item.guid, status: 'error', error: 'Failed to upsert warehouse' });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -632,7 +525,6 @@ export const handleWarehousesBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleAgreementsBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -646,167 +538,16 @@ export const handleAgreementsBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = agreementsBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('agreements', parsed.sessionId);
+    const results = await stageAgreementsBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      for (const item of parsed.items) {
-        const agreementKey = item.agreement.guid;
-        try {
-          let priceTypeId: string | undefined;
-          if (item.priceType) {
-            const priceTypeSourceUpdatedAt = item.priceType.sourceUpdatedAt ?? syncedAt;
-            const priceType = await tx.priceType.upsert({
-              where: { guid: item.priceType.guid },
-              create: {
-                guid: item.priceType.guid,
-                name: item.priceType.name,
-                code: item.priceType.code ?? undefined,
-                isActive: item.priceType.isActive ?? true,
-                sourceUpdatedAt: priceTypeSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              },
-              update: {
-                name: item.priceType.name,
-                code: item.priceType.code ?? undefined,
-                isActive: item.priceType.isActive ?? true,
-                sourceUpdatedAt: priceTypeSourceUpdatedAt,
-                lastSyncedAt: syncedAt,
-              },
-            });
-            priceTypeId = priceType.id;
-          }
-
-          const counterparty = await tx.counterparty.findUnique({
-            where: { guid: item.contract.counterpartyGuid },
-          });
-
-          if (!counterparty) {
-            results.push({
-              key: agreementKey,
-              status: 'error',
-              error: `Counterparty ${item.contract.counterpartyGuid} not found`,
-            });
-              continue;
-          }
-
-          const contractSourceUpdatedAt = item.contract.sourceUpdatedAt ?? syncedAt;
-          const contract = await tx.clientContract.upsert({
-            where: { guid: item.contract.guid },
-            create: {
-              guid: item.contract.guid,
-              counterpartyId: counterparty.id,
-              number: item.contract.number,
-              date: item.contract.date,
-              validFrom: item.contract.validFrom ?? null,
-              validTo: item.contract.validTo ?? null,
-              isActive: item.contract.isActive ?? true,
-              comment: item.contract.comment ?? undefined,
-              sourceUpdatedAt: contractSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              counterpartyId: counterparty.id,
-              number: item.contract.number,
-              date: item.contract.date,
-              validFrom: item.contract.validFrom ?? null,
-              validTo: item.contract.validTo ?? null,
-              isActive: item.contract.isActive ?? true,
-              comment: item.contract.comment ?? undefined,
-              sourceUpdatedAt: contractSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-
-          let agreementPriceTypeId = priceTypeId;
-          if (item.agreement.priceTypeGuid) {
-            const foundPriceType = await tx.priceType.findUnique({
-              where: { guid: item.agreement.priceTypeGuid },
-            });
-            if (!foundPriceType) {
-              results.push({
-                key: agreementKey,
-                status: 'error',
-                error: `Price type ${item.agreement.priceTypeGuid} not found`,
-              });
-              continue;
-            }
-            agreementPriceTypeId = foundPriceType.id;
-          }
-
-          let warehouseId: string | undefined;
-          if (item.agreement.warehouseGuid) {
-            const warehouse = await tx.warehouse.findUnique({
-              where: { guid: item.agreement.warehouseGuid },
-            });
-            if (!warehouse) {
-              results.push({
-                key: agreementKey,
-                status: 'error',
-                error: `Warehouse ${item.agreement.warehouseGuid} not found`,
-              });
-              continue;
-            }
-            warehouseId = warehouse.id;
-          }
-
-          let agreementCounterpartyId: string | undefined = counterparty.id;
-          if (item.agreement.counterpartyGuid) {
-            const foundCounterparty = await tx.counterparty.findUnique({
-              where: { guid: item.agreement.counterpartyGuid },
-            });
-            if (!foundCounterparty) {
-              results.push({
-                key: agreementKey,
-                status: 'error',
-                error: `Counterparty ${item.agreement.counterpartyGuid} not found`,
-              });
-              continue;
-            }
-            agreementCounterpartyId = foundCounterparty.id;
-          }
-
-          const agreementSourceUpdatedAt = item.agreement.sourceUpdatedAt ?? syncedAt;
-          await tx.clientAgreement.upsert({
-            where: { guid: item.agreement.guid },
-            create: {
-              guid: item.agreement.guid,
-              name: item.agreement.name,
-              counterpartyId: agreementCounterpartyId ?? null,
-              contractId: contract.id,
-              priceTypeId: agreementPriceTypeId ?? null,
-              warehouseId: warehouseId ?? null,
-              currency: item.agreement.currency ?? undefined,
-              isActive: item.agreement.isActive ?? true,
-              sourceUpdatedAt: agreementSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-            update: {
-              name: item.agreement.name,
-              counterpartyId: agreementCounterpartyId ?? null,
-              contractId: contract.id,
-              priceTypeId: agreementPriceTypeId ?? null,
-              warehouseId: warehouseId ?? null,
-              currency: item.agreement.currency ?? undefined,
-              isActive: item.agreement.isActive ?? true,
-              sourceUpdatedAt: agreementSourceUpdatedAt,
-              lastSyncedAt: syncedAt,
-            },
-          });
-
-          results.push({ key: agreementKey, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert agreement ${agreementKey}`, err);
-          results.push({
-            key: agreementKey,
-            status: 'error',
-            error: 'Failed to upsert agreement set',
-          });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -818,7 +559,6 @@ export const handleAgreementsBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleSpecialPricesBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -832,141 +572,16 @@ export const handleSpecialPricesBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = specialPricesBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('special-prices', parsed.sessionId);
+    const results = await stageSpecialPricesBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      const productGuids = Array.from(new Set(parsed.items.map((i) => i.productGuid)));
-      const counterpartyGuids = Array.from(
-        new Set(parsed.items.map((i) => i.counterpartyGuid).filter(Boolean) as string[])
-      );
-      const agreementGuids = Array.from(
-        new Set(parsed.items.map((i) => i.agreementGuid).filter(Boolean) as string[])
-      );
-      const priceTypeGuids = Array.from(
-        new Set(parsed.items.map((i) => i.priceTypeGuid).filter(Boolean) as string[])
-      );
-
-      const [products, counterparties, agreements, priceTypes] = await Promise.all([
-        productGuids.length
-          ? tx.product.findMany({ where: { guid: { in: productGuids } } })
-          : Promise.resolve([]),
-        counterpartyGuids.length
-          ? tx.counterparty.findMany({ where: { guid: { in: counterpartyGuids } } })
-          : Promise.resolve([]),
-        agreementGuids.length
-          ? tx.clientAgreement.findMany({ where: { guid: { in: agreementGuids } } })
-          : Promise.resolve([]),
-        priceTypeGuids.length
-          ? tx.priceType.findMany({ where: { guid: { in: priceTypeGuids } } })
-          : Promise.resolve([]),
-      ]);
-
-      const productMap = new Map(products.map((p) => [p.guid, p.id]));
-      const counterpartyMap = new Map(counterparties.map((c) => [c.guid, c.id]));
-      const agreementMap = new Map(agreements.map((a) => [a.guid, a.id]));
-      const priceTypeMap = new Map(priceTypes.map((p) => [p.guid, p.id]));
-
-      for (const item of parsed.items) {
-        const key =
-          item.guid ??
-          buildBatchKey([
-            ['productGuid', item.productGuid],
-            ['counterpartyGuid', item.counterpartyGuid],
-            ['agreementGuid', item.agreementGuid],
-            ['priceTypeGuid', item.priceTypeGuid],
-            ['startDate', item.startDate],
-          ]);
-        const productId = productMap.get(item.productGuid);
-        if (!productId) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Product ${item.productGuid} not found`,
-          });
-          continue;
-        }
-
-        const counterpartyId =
-          item.counterpartyGuid !== undefined
-            ? counterpartyMap.get(item.counterpartyGuid) ?? null
-            : null;
-        const agreementId =
-          item.agreementGuid !== undefined ? agreementMap.get(item.agreementGuid) ?? null : null;
-        const priceTypeId =
-          item.priceTypeGuid !== undefined ? priceTypeMap.get(item.priceTypeGuid) ?? null : null;
-
-        if (item.counterpartyGuid && counterpartyId === null) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Counterparty ${item.counterpartyGuid} not found`,
-          });
-          continue;
-        }
-        if (item.agreementGuid && agreementId === null) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Agreement ${item.agreementGuid} not found`,
-          });
-          continue;
-        }
-        if (item.priceTypeGuid && priceTypeId === null) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Price type ${item.priceTypeGuid} not found`,
-          });
-          continue;
-        }
-
-        const sourceUpdatedAt = item.sourceUpdatedAt ?? syncedAt;
-        const data = {
-          productId,
-          counterpartyId,
-          agreementId,
-          priceTypeId,
-          price: toDecimal(item.price) ?? new Prisma.Decimal(0),
-          currency: item.currency ?? undefined,
-          startDate: item.startDate ?? null,
-          endDate: item.endDate ?? null,
-          minQty: toDecimal(item.minQty),
-          isActive: item.isActive ?? true,
-          sourceUpdatedAt,
-          lastSyncedAt: syncedAt,
-        };
-
-        const where: Prisma.SpecialPriceWhereUniqueInput = item.guid
-          ? { guid: item.guid }
-          : ({
-              productId_counterpartyId_agreementId_priceTypeId_startDate: {
-                productId,
-                counterpartyId: counterpartyId ?? null,
-                agreementId: agreementId ?? null,
-                priceTypeId: priceTypeId ?? null,
-                startDate: item.startDate ?? null,
-              },
-            } as Prisma.SpecialPriceWhereUniqueInput); // cast because prisma types expect non-null strings even when fields are nullable
-
-        try {
-          await tx.specialPrice.upsert({
-            where,
-            create: {
-              guid: item.guid ?? null,
-              ...data,
-            },
-            update: data,
-          });
-          results.push({ key, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert special price ${key}`, err);
-          results.push({ key, status: 'error', error: 'Failed to upsert special price' });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -978,7 +593,6 @@ export const handleSpecialPricesBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleProductPricesBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -992,99 +606,16 @@ export const handleProductPricesBatch = async (req: Request, res: Response) => {
 
   try {
     const parsed = productPricesBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
-    const syncedAt = now();
+    const session = await resolveBatchSession('product-prices', parsed.sessionId);
+    const results = await stageProductPricesBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
 
-    await prisma.$transaction(async (tx) => {
-      const productGuids = Array.from(new Set(parsed.items.map((i) => i.productGuid)));
-      const priceTypeGuids = Array.from(
-        new Set(parsed.items.map((i) => i.priceTypeGuid).filter(Boolean) as string[])
-      );
-
-      const [products, priceTypes] = await Promise.all([
-        productGuids.length
-          ? tx.product.findMany({ where: { guid: { in: productGuids } } })
-          : Promise.resolve([]),
-        priceTypeGuids.length
-          ? tx.priceType.findMany({ where: { guid: { in: priceTypeGuids } } })
-          : Promise.resolve([]),
-      ]);
-
-      const productMap = new Map(products.map((p) => [p.guid, p.id]));
-      const priceTypeMap = new Map(priceTypes.map((p) => [p.guid, p.id]));
-
-      for (const item of parsed.items) {
-        const key =
-          item.guid ??
-          buildBatchKey([
-            ['productGuid', item.productGuid],
-            ['priceTypeGuid', item.priceTypeGuid],
-            ['startDate', item.startDate],
-          ]);
-        const productId = productMap.get(item.productGuid);
-        if (!productId) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Product ${item.productGuid} not found`,
-          });
-          continue;
-        }
-
-        const priceTypeId =
-          item.priceTypeGuid !== undefined ? priceTypeMap.get(item.priceTypeGuid) ?? null : null;
-
-        if (item.priceTypeGuid && priceTypeId === null) {
-          results.push({
-            key,
-            status: 'error',
-            error: `Price type ${item.priceTypeGuid} not found`,
-          });
-          continue;
-        }
-
-        const sourceUpdatedAt = item.sourceUpdatedAt ?? syncedAt;
-        const data = {
-          productId,
-          priceTypeId,
-          price: toDecimal(item.price) ?? new Prisma.Decimal(0),
-          currency: item.currency ?? undefined,
-          startDate: item.startDate ?? null,
-          endDate: item.endDate ?? null,
-          minQty: toDecimal(item.minQty),
-          isActive: item.isActive ?? true,
-          sourceUpdatedAt,
-          lastSyncedAt: syncedAt,
-        };
-
-        const where: Prisma.ProductPriceWhereUniqueInput = item.guid
-          ? { guid: item.guid }
-          : ({
-              productId_priceTypeId_startDate: {
-                productId,
-                priceTypeId: priceTypeId ?? null,
-                startDate: item.startDate ?? null,
-              },
-            } as Prisma.ProductPriceWhereUniqueInput);
-
-        try {
-          await tx.productPrice.upsert({
-            where,
-            create: {
-              guid: item.guid ?? null,
-              ...data,
-            },
-            update: data,
-          });
-          results.push({ key, status: 'ok' });
-        } catch (err) {
-          console.error(`Failed to upsert product price ${key}`, err);
-          results.push({ key, status: 'error', error: 'Failed to upsert product price' });
-        }
-      }
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
     });
-
-    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
     return res.json({ success: true, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -1096,7 +627,6 @@ export const handleProductPricesBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
-
 export const handleOrdersQueued = async (req: Request, res: Response) => {
   const includeSentRaw = String(req.query.includeSent ?? '').toLowerCase();
   const includeSent = includeSentRaw === '1' || includeSentRaw === 'true' || includeSentRaw === 'yes';

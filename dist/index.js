@@ -28,7 +28,9 @@ const tracking_1 = __importDefault(require("./routes/tracking"));
 const updates_1 = __importDefault(require("./routes/updates"));
 const files_1 = __importDefault(require("./routes/files"));
 const services_1 = __importDefault(require("./routes/services"));
+const stockBalances_1 = __importDefault(require("./routes/stockBalances"));
 const notifications_1 = __importDefault(require("./routes/notifications"));
+const home_1 = __importDefault(require("./routes/home"));
 const onec_routes_1 = __importDefault(require("./modules/onec/onec.routes"));
 const marketplace_routes_1 = __importDefault(require("./modules/marketplace/marketplace.routes"));
 const scheduledJobsService_1 = require("./services/scheduledJobsService");
@@ -109,7 +111,10 @@ app.use('/qr', qr_1.default);
 app.use('/password-reset', passwordReset_1.default);
 app.use('/tracking', tracking_1.default);
 app.use('/services', services_1.default);
+app.use('/stock-balances', stockBalances_1.default);
+app.use('/home', home_1.default);
 app.use('/updates', updates_1.default);
+app.use('/update-files', files_1.default);
 app.use('/files', files_1.default);
 app.use('/notifications', notifications_1.default);
 app.use('/api/1c', onec_routes_1.default);
@@ -217,6 +222,7 @@ const io = new socket_io_1.Server(server, {
 });
 app.set('io', io);
 const userSocketCounts = new Map();
+const userFocusedSocketCounts = new Map();
 const userPresenceRefreshTimers = new Map();
 const PRESENCE_REFRESH_MS = Math.max(15000, Number(process.env.PRESENCE_REFRESH_MS || 30000));
 function normalizePresenceUserIds(value) {
@@ -253,6 +259,53 @@ function stopPresenceRefresh(userId) {
     clearInterval(timer);
     userPresenceRefreshTimers.delete(userId);
 }
+function incrementMapValue(map, userId) {
+    const next = (map.get(userId) || 0) + 1;
+    map.set(userId, next);
+    return next;
+}
+function decrementMapValue(map, userId) {
+    const next = Math.max(0, (map.get(userId) || 0) - 1);
+    if (next > 0)
+        map.set(userId, next);
+    else
+        map.delete(userId);
+    return next;
+}
+function syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount) {
+    if (prevFocusedCount === 0 && nextFocusedCount === 1) {
+        void (0, presenceService_1.markUserOnline)(userId)
+            .catch((err) => {
+            console.warn('[presence] markUserOnline failed', err?.message || err);
+        })
+            .finally(() => {
+            emitPresenceChanged(userId, true, null);
+        });
+        startPresenceRefresh(userId);
+        return;
+    }
+    if (prevFocusedCount > 0 && nextFocusedCount === 0) {
+        stopPresenceRefresh(userId);
+        void (0, presenceService_1.markUserOffline)(userId)
+            .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
+            .catch((err) => {
+            console.warn('[presence] markUserOffline failed', err?.message || err);
+            emitPresenceChanged(userId, false, new Date());
+        });
+    }
+}
+function applyPresenceFocus(socket, userId, focused) {
+    const normalized = !!focused;
+    const prevFocused = socket?.data?.presenceFocused !== false;
+    if (prevFocused === normalized)
+        return;
+    socket.data.presenceFocused = normalized;
+    const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+    const nextFocusedCount = normalized
+        ? incrementMapValue(userFocusedSocketCounts, userId)
+        : decrementMapValue(userFocusedSocketCounts, userId);
+    syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
+}
 io.use((socket, next) => {
     const authToken = (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
         (typeof socket.handshake.headers.authorization === 'string' &&
@@ -271,23 +324,25 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
     const userId = Number(socket.data?.user?.userId);
     if (Number.isFinite(userId) && userId > 0) {
-        const nextCount = (userSocketCounts.get(userId) || 0) + 1;
-        userSocketCounts.set(userId, nextCount);
-        if (nextCount === 1) {
-            void (0, presenceService_1.markUserOnline)(userId)
-                .catch((err) => {
-                console.warn('[presence] markUserOnline failed', err?.message || err);
-            })
-                .finally(() => {
-                emitPresenceChanged(userId, true, null);
-            });
-            startPresenceRefresh(userId);
-        }
+        incrementMapValue(userSocketCounts, userId);
+        socket.data.presenceFocused = true;
+        const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+        const nextFocusedCount = incrementMapValue(userFocusedSocketCounts, userId);
+        syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
     }
     socket.on('join', (room) => { if (room)
         socket.join(room); });
     socket.on('leave', (room) => { if (room)
         socket.leave(room); });
+    socket.on('presence:focus', (payload) => {
+        if (!Number.isFinite(userId) || userId <= 0)
+            return;
+        if (!payload || typeof payload !== 'object')
+            return;
+        if (typeof payload.focused !== 'boolean')
+            return;
+        applyPresenceFocus(socket, userId, payload.focused);
+    });
     socket.on('presence:subscribe', (payload) => {
         const userIds = normalizePresenceUserIds(payload);
         userIds.forEach((id) => socket.join(`presence:${id}`));
@@ -299,20 +354,13 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         if (!Number.isFinite(userId) || userId <= 0)
             return;
-        const prevCount = userSocketCounts.get(userId) || 0;
-        const nextCount = Math.max(0, prevCount - 1);
-        if (nextCount > 0) {
-            userSocketCounts.set(userId, nextCount);
-            return;
+        decrementMapValue(userSocketCounts, userId);
+        const wasFocused = socket.data?.presenceFocused !== false;
+        if (wasFocused) {
+            const prevFocusedCount = userFocusedSocketCounts.get(userId) || 0;
+            const nextFocusedCount = decrementMapValue(userFocusedSocketCounts, userId);
+            syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
         }
-        userSocketCounts.delete(userId);
-        stopPresenceRefresh(userId);
-        void (0, presenceService_1.markUserOffline)(userId)
-            .then((lastSeenAt) => emitPresenceChanged(userId, false, lastSeenAt))
-            .catch((err) => {
-            console.warn('[presence] markUserOffline failed', err?.message || err);
-            emitPresenceChanged(userId, false, new Date());
-        });
     });
 });
 // ---- Start ----

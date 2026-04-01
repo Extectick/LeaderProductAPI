@@ -159,23 +159,48 @@ async function main() {
     }
   }
 
+  async function recordExists(tableName, whereClause, params = []) {
+    try {
+      const res = await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM "${tableName}" WHERE ${whereClause} LIMIT 1) AS present;`,
+        params
+      );
+      return !!res.rows?.[0]?.present;
+    } catch (error) {
+      if (error && error.code === '42P01') return false;
+      throw error;
+    }
+  }
+
   try {
     if (!autoSeed) {
       console.log('[init] auto seed disabled (DB_AUTO_SEED=0)');
     } else {
-      const [hasRoles, hasServices] = await Promise.all([
+      const [
+        hasRoles,
+        hasServices,
+        hasStockBalancesService,
+        hasStockBalancesGroup,
+        hasStockBalancesPermission,
+      ] = await Promise.all([
         tableHasRows('Role'),
         tableHasRows('Service'),
+        recordExists('Service', '"key" = $1', ['stock_balances']),
+        recordExists('PermissionGroup', '"key" = $1', ['service_stock_balances']),
+        recordExists('Permission', '"name" = $1', ['view_stock_balances']),
       ]);
 
-      if (!hasRoles || !hasServices) {
+      if (!hasRoles || !hasServices || !hasStockBalancesService || !hasStockBalancesGroup || !hasStockBalancesPermission) {
         const reasons = [];
         if (!hasRoles) reasons.push('roles empty');
         if (!hasServices) reasons.push('services empty');
+        if (!hasStockBalancesService) reasons.push('service stock_balances missing');
+        if (!hasStockBalancesGroup) reasons.push('permission group service_stock_balances missing');
+        if (!hasStockBalancesPermission) reasons.push('permission view_stock_balances missing');
         console.log(`[init] seed required (${reasons.join(', ')}) -> running seed`);
         run('node dist/prisma/seed.js');
       } else {
-        console.log('[init] seed skipped (roles and services already exist)');
+        console.log('[init] seed skipped (catalog is present)');
       }
     }
 

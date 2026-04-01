@@ -2,13 +2,17 @@ import { Router } from 'express';
 import {
   handleAgreementsBatch,
   handleCounterpartiesBatch,
+  handleEntityClear,
   handleNomenclatureBatch,
+  handleOrganizationsBatch,
   handleOrderAck,
   handleOrdersQueued,
   handleOrdersStatusBatch,
   handleProductPricesBatch,
   handleSchema,
   handleSpecialPricesBatch,
+  handleSyncSessionComplete,
+  handleSyncSessionStart,
   handleSyncRunDetail,
   handleSyncRunsList,
   handleStockBatch,
@@ -19,6 +23,9 @@ import {
 const router = Router();
 
 router.use(onecAuthMiddleware);
+
+router.post('/sync/session/start', handleSyncSessionStart);
+router.post('/sync/session/complete', handleSyncSessionComplete);
 
 /**
  * @openapi
@@ -53,6 +60,7 @@ router.use(onecAuthMiddleware);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.get('/schema', handleSchema);
+router.post('/:entity/clear', handleEntityClear);
 
 /**
  * @openapi
@@ -119,6 +127,7 @@ router.get('/schema', handleSchema);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/nomenclature/batch', handleNomenclatureBatch);
+router.post('/organizations/batch', handleOrganizationsBatch);
 
 /**
  * @openapi
