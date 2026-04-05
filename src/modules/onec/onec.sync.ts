@@ -1407,6 +1407,9 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
         continue;
       }
 
+      const quantity = item.quantity ?? item.inStock ?? 0;
+      const reserved = item.reserved ?? ((item.clientReserved ?? 0) + (item.managerReserved ?? 0));
+
       const syncKey = `${product.id}|${warehouse.id}|${organization.id}|${item.seriesGuid ?? ''}`;
       await tx.stockBalance.upsert({
         where: { syncKey },
@@ -1415,8 +1418,13 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
           productId: product.id,
           warehouseId: warehouse.id,
           organizationId: organization.id,
-          quantity: toDecimal(item.quantity) ?? new Prisma.Decimal(0),
-          reserved: toDecimal(item.reserved),
+          quantity: toDecimal(quantity) ?? new Prisma.Decimal(0),
+          reserved: toDecimal(reserved),
+          inStock: toDecimal(item.inStock ?? quantity),
+          shipping: toDecimal(item.shipping),
+          clientReserved: toDecimal(item.clientReserved),
+          managerReserved: toDecimal(item.managerReserved),
+          available: toDecimal(item.available ?? (quantity - reserved)),
           updatedAt: item.updatedAt ?? syncedAt,
           seriesGuid: item.seriesGuid ?? null,
           seriesNumber: item.seriesNumber ?? null,
@@ -1427,8 +1435,13 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
         },
         update: {
           organizationId: organization.id,
-          quantity: toDecimal(item.quantity) ?? new Prisma.Decimal(0),
-          reserved: toDecimal(item.reserved),
+          quantity: toDecimal(quantity) ?? new Prisma.Decimal(0),
+          reserved: toDecimal(reserved),
+          inStock: toDecimal(item.inStock ?? quantity),
+          shipping: toDecimal(item.shipping),
+          clientReserved: toDecimal(item.clientReserved),
+          managerReserved: toDecimal(item.managerReserved),
+          available: toDecimal(item.available ?? (quantity - reserved)),
           updatedAt: item.updatedAt ?? syncedAt,
           seriesGuid: item.seriesGuid ?? null,
           seriesNumber: item.seriesNumber ?? null,

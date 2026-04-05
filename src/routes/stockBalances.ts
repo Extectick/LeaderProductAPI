@@ -67,6 +67,10 @@ type LeafRow = {
   } | null;
   quantity: number;
   reserved: number;
+  inStock: number;
+  shipping: number;
+  clientReserved: number;
+  managerReserved: number;
   available: number;
   updatedAt: string;
 };
@@ -79,6 +83,10 @@ type GroupChildNode = {
   code: string | null;
   quantity: number;
   reserved: number;
+  inStock: number;
+  shipping: number;
+  clientReserved: number;
+  managerReserved: number;
   available: number;
   leafCount?: number;
   leaves: LeafRow[];
@@ -92,6 +100,10 @@ type GroupNode = {
   code: string | null;
   quantity: number;
   reserved: number;
+  inStock: number;
+  shipping: number;
+  clientReserved: number;
+  managerReserved: number;
   available: number;
   childCount?: number;
   children: GroupChildNode[];
@@ -124,9 +136,24 @@ function decimalToNumber(value: unknown): number {
   return Number(value) || 0;
 }
 
-function addTotals(target: { quantity: number; reserved: number; available: number }, leaf: LeafRow) {
+function addTotals(
+  target: {
+    quantity: number;
+    reserved: number;
+    inStock: number;
+    shipping: number;
+    clientReserved: number;
+    managerReserved: number;
+    available: number;
+  },
+  leaf: LeafRow
+) {
   target.quantity += leaf.quantity;
   target.reserved += leaf.reserved;
+  target.inStock += leaf.inStock;
+  target.shipping += leaf.shipping;
+  target.clientReserved += leaf.clientReserved;
+  target.managerReserved += leaf.managerReserved;
   target.available += leaf.available;
 }
 
@@ -241,7 +268,11 @@ function toLeafRow(balance: {
 }): LeafRow {
   const quantity = decimalToNumber(balance.quantity);
   const reserved = decimalToNumber(balance.reserved);
-  const available = quantity - reserved;
+  const inStock = decimalToNumber((balance as { inStock?: unknown }).inStock ?? balance.quantity);
+  const shipping = decimalToNumber((balance as { shipping?: unknown }).shipping);
+  const clientReserved = decimalToNumber((balance as { clientReserved?: unknown }).clientReserved);
+  const managerReserved = decimalToNumber((balance as { managerReserved?: unknown }).managerReserved);
+  const available = decimalToNumber((balance as { available?: unknown }).available ?? (quantity - reserved));
 
   return {
     id: balance.id,
@@ -282,6 +313,10 @@ function toLeafRow(balance: {
         : null,
     quantity,
     reserved,
+    inStock,
+    shipping,
+    clientReserved,
+    managerReserved,
     available,
     updatedAt: balance.updatedAt.toISOString(),
   };
@@ -423,6 +458,10 @@ router.get(
             code: rootRef.code,
             quantity: 0,
             reserved: 0,
+            inStock: 0,
+            shipping: 0,
+            clientReserved: 0,
+            managerReserved: 0,
             available: 0,
             childCount: 0,
             children: [],
@@ -442,6 +481,10 @@ router.get(
             code: childRef.code,
             quantity: 0,
             reserved: 0,
+            inStock: 0,
+            shipping: 0,
+            clientReserved: 0,
+            managerReserved: 0,
             available: 0,
             leafCount: 0,
             leaves: [],
@@ -545,7 +588,11 @@ router.get(
         for (const balance of balances) {
           const quantity = decimalToNumber(balance.quantity);
           const reserved = decimalToNumber(balance.reserved);
-          const available = quantity - reserved;
+          const inStock = decimalToNumber((balance as { inStock?: unknown }).inStock ?? balance.quantity);
+          const shipping = decimalToNumber((balance as { shipping?: unknown }).shipping);
+          const clientReserved = decimalToNumber((balance as { clientReserved?: unknown }).clientReserved);
+          const managerReserved = decimalToNumber((balance as { managerReserved?: unknown }).managerReserved);
+          const available = decimalToNumber((balance as { available?: unknown }).available ?? (quantity - reserved));
           const childRef =
             hierarchy === 'warehouse-product'
               ? {
@@ -571,6 +618,10 @@ router.get(
               code: childRef.code,
               quantity: 0,
               reserved: 0,
+              inStock: 0,
+              shipping: 0,
+              clientReserved: 0,
+              managerReserved: 0,
               available: 0,
               leafCount: 0,
               leaves: [],
@@ -580,6 +631,10 @@ router.get(
 
           childNode.quantity += quantity;
           childNode.reserved += reserved;
+          childNode.inStock += inStock;
+          childNode.shipping += shipping;
+          childNode.clientReserved += clientReserved;
+          childNode.managerReserved += managerReserved;
           childNode.available += available;
           childNode.leafCount = (childNode.leafCount || 0) + 1;
         }

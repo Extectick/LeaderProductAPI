@@ -232,6 +232,11 @@ model StockBalance {
   organizationId       String?
   quantity             Decimal  @db.Decimal(18, 3)
   reserved             Decimal? @db.Decimal(18, 3)
+  inStock              Decimal? @db.Decimal(18, 3)
+  shipping             Decimal? @db.Decimal(18, 3)
+  clientReserved       Decimal? @db.Decimal(18, 3)
+  managerReserved      Decimal? @db.Decimal(18, 3)
+  available            Decimal? @db.Decimal(18, 3)
   updatedAt            DateTime
   seriesGuid           String?
   seriesNumber         String?
