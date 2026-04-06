@@ -1,4 +1,4 @@
-import { OrderStatus, Prisma } from '@prisma/client';
+import { OrderSource, OrderStatus, OrderSyncState, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import prisma from '../../prisma/client';
 import { ErrorCodes } from '../../utils/apiResponse';
@@ -1314,7 +1314,9 @@ export async function createOrder(userId: number, body: OrderCreateBody) {
       unitId: string | null;
       quantity: Prisma.Decimal;
       quantityBase: Prisma.Decimal;
+      basePrice: Prisma.Decimal;
       price: Prisma.Decimal;
+      priceSource: string;
       lineAmount: Prisma.Decimal;
     }> = [];
 
@@ -1401,7 +1403,9 @@ export async function createOrder(userId: number, body: OrderCreateBody) {
         unitId: packageRecord?.unitId ?? product.baseUnit?.id ?? null,
         quantity,
         quantityBase,
+        basePrice: price,
         price,
+        priceSource: `${resolvedPrice.match.source}:${resolvedPrice.match.level}`,
         lineAmount,
       });
     }
@@ -1418,11 +1422,15 @@ export async function createOrder(userId: number, body: OrderCreateBody) {
     return tx.order.create({
       data: {
         guid,
+        source: OrderSource.MARKETPLACE_CLIENT,
+        revision: 1,
+        syncState: OrderSyncState.QUEUED,
         counterpartyId: context.counterparty.id,
         agreementId: context.agreement?.id ?? null,
         contractId,
         warehouseId,
         deliveryAddressId: context.deliveryAddress?.id ?? null,
+        createdByUserId: userId,
         status: OrderStatus.QUEUED,
         queuedAt: createdAt,
         deliveryDate: body.deliveryDate ?? null,
@@ -1437,7 +1445,12 @@ export async function createOrder(userId: number, body: OrderCreateBody) {
             unitId: item.unitId,
             quantity: item.quantity,
             quantityBase: item.quantityBase,
+            basePrice: item.basePrice,
             price: item.price,
+            isManualPrice: false,
+            manualPrice: null,
+            priceSource: item.priceSource,
+            appliedDiscountPercent: null,
             lineAmount: item.lineAmount,
             sourceUpdatedAt: createdAt,
           })),

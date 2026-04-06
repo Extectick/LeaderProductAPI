@@ -256,6 +256,8 @@ model User {
   qrlist             QRList[]
   routes             UserRoute[]
   routePoints        RoutePoint[]
+  createdOrders      Order[]             @relation("OrdersCreatedBy")
+  orderEvents        OrderEvent[]        @relation("OrderEventsActor")
   lastSeenAt         DateTime?
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt

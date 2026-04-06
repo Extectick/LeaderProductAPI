@@ -71,6 +71,14 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
     isSystem: true,
     serviceKey: 'stock_balances',
   },
+  {
+    key: 'service_client_orders',
+    displayName: 'Сервис: Заказы клиентов',
+    description: 'Права доступа к менеджерскому сервису заказов клиентов.',
+    sortOrder: 130,
+    isSystem: true,
+    serviceKey: 'client_orders',
+  },
 ];
 
 export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
@@ -116,6 +124,8 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { name: 'export_qr', displayName: 'Экспорт QR', description: 'Разрешает экспортировать данные по QR-кодам.', groupKey: 'service_qrcodes' },
 
   { name: 'view_stock_balances', displayName: 'Просмотр остатков по складам', description: 'Разрешает просматривать остатки по складам, организациям и сериям.', groupKey: 'service_stock_balances' },
+  { name: 'view_client_orders', displayName: 'Просмотр заказов клиентов', description: 'Разрешает просматривать менеджерские заказы клиентов и их статус синхронизации.', groupKey: 'service_client_orders' },
+  { name: 'manage_client_orders', displayName: 'Управление заказами клиентов', description: 'Разрешает создавать, редактировать, отправлять и отменять заказы клиентов.', groupKey: 'service_client_orders' },
 ];
 
 export const PERMISSION_CATALOG_BY_NAME = new Map(
@@ -157,6 +167,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'delete_appeal_message',
     'manage_appeal_watchers',
     'view_stock_balances',
+    'view_client_orders',
   ],
   department_manager: [
     'assign_appeal',
@@ -164,5 +175,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'export_appeals',
     'view_appeals_analytics',
     'manage_appeal_labor',
+    'view_client_orders',
+    'manage_client_orders',
   ],
 };

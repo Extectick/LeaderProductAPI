@@ -182,21 +182,43 @@ async function main() {
         hasStockBalancesService,
         hasStockBalancesGroup,
         hasStockBalancesPermission,
+        hasClientOrdersService,
+        hasClientOrdersGroup,
+        hasClientOrdersViewPermission,
+        hasClientOrdersManagePermission,
       ] = await Promise.all([
         tableHasRows('Role'),
         tableHasRows('Service'),
         recordExists('Service', '"key" = $1', ['stock_balances']),
         recordExists('PermissionGroup', '"key" = $1', ['service_stock_balances']),
         recordExists('Permission', '"name" = $1', ['view_stock_balances']),
+        recordExists('Service', '"key" = $1', ['client_orders']),
+        recordExists('PermissionGroup', '"key" = $1', ['service_client_orders']),
+        recordExists('Permission', '"name" = $1', ['view_client_orders']),
+        recordExists('Permission', '"name" = $1', ['manage_client_orders']),
       ]);
 
-      if (!hasRoles || !hasServices || !hasStockBalancesService || !hasStockBalancesGroup || !hasStockBalancesPermission) {
+      if (
+        !hasRoles ||
+        !hasServices ||
+        !hasStockBalancesService ||
+        !hasStockBalancesGroup ||
+        !hasStockBalancesPermission ||
+        !hasClientOrdersService ||
+        !hasClientOrdersGroup ||
+        !hasClientOrdersViewPermission ||
+        !hasClientOrdersManagePermission
+      ) {
         const reasons = [];
         if (!hasRoles) reasons.push('roles empty');
         if (!hasServices) reasons.push('services empty');
         if (!hasStockBalancesService) reasons.push('service stock_balances missing');
         if (!hasStockBalancesGroup) reasons.push('permission group service_stock_balances missing');
         if (!hasStockBalancesPermission) reasons.push('permission view_stock_balances missing');
+        if (!hasClientOrdersService) reasons.push('service client_orders missing');
+        if (!hasClientOrdersGroup) reasons.push('permission group service_client_orders missing');
+        if (!hasClientOrdersViewPermission) reasons.push('permission view_client_orders missing');
+        if (!hasClientOrdersManagePermission) reasons.push('permission manage_client_orders missing');
         console.log(`[init] seed required (${reasons.join(', ')}) -> running seed`);
         run('node dist/prisma/seed.js');
       } else {

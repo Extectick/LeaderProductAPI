@@ -12,6 +12,30 @@ enum OrderStatus {
   CANCELLED
 }
 
+enum OrderSyncState {
+  DRAFT
+  QUEUED
+  SYNCED
+  CONFLICT
+  ERROR
+  CANCEL_REQUESTED
+}
+
+enum OrderSource {
+  MARKETPLACE_CLIENT
+  MANAGER_APP
+}
+
+enum OrderEventSource {
+  APP_MANAGER
+  APP_CANCEL_REQUEST
+  ONEC_ACK
+  ONEC_IMPORT
+  ONEC_EDIT
+  ONEC_POST
+  SYSTEM
+}
+
 model Counterparty {
   id          String   @id @default(cuid())
   guid        String   @unique
@@ -216,6 +240,7 @@ model Organization {
   lastSyncedAt    DateTime?
 
   stocks    StockBalance[]
+  orders    Order[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -411,24 +436,37 @@ model Order {
   guid              String?      @unique
   number1c          String?
   date1c            DateTime?
+  source            OrderSource  @default(MARKETPLACE_CLIENT)
+  revision          Int          @default(1)
+  syncState         OrderSyncState @default(DRAFT)
 
   counterpartyId    String
   agreementId       String?
   contractId        String?
   warehouseId       String?
   deliveryAddressId String?
+  organizationId    String?
+  createdByUserId   Int?
 
   status            OrderStatus @default(DRAFT)
   comment           String?
   deliveryDate      DateTime?
   totalAmount       Decimal?    @db.Decimal(18, 2)
   currency          String?
+  generalDiscountPercent Decimal? @db.Decimal(5, 2)
+  generalDiscountAmount  Decimal? @db.Decimal(18, 2)
 
   queuedAt          DateTime?
   sentTo1cAt        DateTime?
   lastStatusSyncAt  DateTime?
   exportAttempts    Int        @default(0)
   lastExportError   String?
+  isPostedIn1c      Boolean    @default(false)
+  postedAt1c        DateTime?
+  cancelRequestedAt DateTime?
+  cancelReason      String?
+  last1cError       String?
+  last1cSnapshot    Json?
 
   sourceUpdatedAt   DateTime?
   lastSyncedAt      DateTime?
@@ -438,8 +476,11 @@ model Order {
   contract          ClientContract? @relation(fields: [contractId], references: [id])
   warehouse         Warehouse?      @relation(fields: [warehouseId], references: [id])
   deliveryAddress   DeliveryAddress? @relation(fields: [deliveryAddressId], references: [id])
+  organization      Organization?   @relation(fields: [organizationId], references: [id])
+  createdByUser     User?           @relation("OrdersCreatedBy", fields: [createdByUserId], references: [id])
 
   items             OrderItem[]
+  events            OrderEvent[]
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -448,7 +489,12 @@ model Order {
   @@index([agreementId])
   @@index([contractId])
   @@index([warehouseId])
+  @@index([organizationId])
+  @@index([createdByUserId])
   @@index([status])
+  @@index([source])
+  @@index([syncState])
+  @@index([revision])
   @@index([queuedAt])
   @@index([sentTo1cAt])
   @@index([sourceUpdatedAt])
@@ -463,8 +509,13 @@ model OrderItem {
 
   quantity        Decimal  @db.Decimal(18, 3)
   quantityBase    Decimal? @db.Decimal(18, 3)
+  basePrice       Decimal? @db.Decimal(18, 4)
   price           Decimal  @db.Decimal(18, 4)
+  isManualPrice   Boolean  @default(false)
+  manualPrice     Decimal? @db.Decimal(18, 4)
+  priceSource     String?
   discountPercent Decimal? @db.Decimal(5, 2)
+  appliedDiscountPercent Decimal? @db.Decimal(5, 2)
   lineAmount      Decimal? @db.Decimal(18, 2)
   comment         String?
 
@@ -482,4 +533,24 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@index([sourceUpdatedAt])
+}
+
+model OrderEvent {
+  id          String           @id @default(cuid())
+  orderId      String
+  revision     Int
+  source       OrderEventSource
+  eventType    String
+  payload      Json
+  actorUserId  Int?
+  note         String?
+  createdAt    DateTime         @default(now())
+
+  order        Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  actorUser    User?            @relation("OrderEventsActor", fields: [actorUserId], references: [id])
+
+  @@index([orderId])
+  @@index([orderId, revision])
+  @@index([source])
+  @@index([actorUserId])
 }

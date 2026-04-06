@@ -27,6 +27,7 @@ import notificationsRouter from './routes/notifications';
 import homeRouter from './routes/home';
 import onecRouter from './modules/onec/onec.routes';
 import marketplaceRouter from './modules/marketplace/marketplace.routes';
+import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
@@ -135,6 +136,7 @@ app.use('/files', filesRouter);
 app.use('/notifications', notificationsRouter);
 app.use('/api/1c', onecRouter);
 app.use('/api/marketplace', marketplaceRouter);
+app.use('/api/client-orders', clientOrdersRouter);
 
 app.use(
   '/appeals',

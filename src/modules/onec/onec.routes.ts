@@ -7,6 +7,7 @@ import {
   handleOrganizationsBatch,
   handleOrderAck,
   handleOrdersQueued,
+  handleOrdersSnapshotBatch,
   handleOrdersStatusBatch,
   handleProductPricesBatch,
   handleSchema,
@@ -691,6 +692,7 @@ router.post('/orders/:guid/ack', handleOrderAck);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/orders/status/batch', handleOrdersStatusBatch);
+router.post('/orders/snapshot/batch', handleOrdersSnapshotBatch);
 
 /**
  * @openapi

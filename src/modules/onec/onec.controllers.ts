@@ -1,5 +1,8 @@
 import {
+  OrderEventSource,
+  OrderSource,
   OrderStatus,
+  OrderSyncState,
   Prisma,
   SyncDirection,
   SyncEntityType,
@@ -12,12 +15,14 @@ import { ZodError } from 'zod';
 import { fromZodError } from 'zod-validation-error';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
+import { appendOrderEvent } from '../orders/orderEvents';
 import {
   agreementsBatchSchema,
   counterpartiesBatchSchema,
   nomenclatureBatchSchema,
   organizationsBatchSchema,
   orderAckSchema,
+  ordersSnapshotBatchSchema,
   ordersStatusBatchSchema,
   productPricesBatchSchema,
   sessionCompleteSchema,
@@ -635,8 +640,11 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
     ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 200)
     : 50;
 
-  const statuses = includeSent ? [OrderStatus.QUEUED, OrderStatus.SENT_TO_1C] : [OrderStatus.QUEUED];
-  const baseMeta = { includeSent, limit, statuses };
+  const statuses = includeSent ? [OrderStatus.QUEUED, OrderStatus.SENT_TO_1C, OrderStatus.CANCELLED] : [OrderStatus.QUEUED, OrderStatus.CANCELLED];
+  const syncStates = includeSent
+    ? [OrderSyncState.QUEUED, OrderSyncState.CANCEL_REQUESTED, OrderSyncState.SYNCED]
+    : [OrderSyncState.QUEUED, OrderSyncState.CANCEL_REQUESTED];
+  const baseMeta = { includeSent, limit, statuses, syncStates };
   let runId: string | undefined;
 
   try {
@@ -647,12 +655,19 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
 
   try {
     const orders = await prisma.order.findMany({
-      where: { status: { in: statuses } },
+      where: {
+        source: { in: [OrderSource.MANAGER_APP, OrderSource.MARKETPLACE_CLIENT] },
+        status: { in: statuses },
+        syncState: { in: syncStates },
+      },
       orderBy: [{ queuedAt: 'asc' }, { createdAt: 'asc' }],
       take: limit,
       select: {
         id: true,
         guid: true,
+        source: true,
+        revision: true,
+        syncState: true,
         status: true,
         queuedAt: true,
         sentTo1cAt: true,
@@ -660,8 +675,15 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
         comment: true,
         currency: true,
         totalAmount: true,
+        generalDiscountPercent: true,
+        generalDiscountAmount: true,
         exportAttempts: true,
         lastExportError: true,
+        isPostedIn1c: true,
+        postedAt1c: true,
+        cancelRequestedAt: true,
+        cancelReason: true,
+        last1cError: true,
         counterparty: {
           select: { guid: true, name: true, inn: true, kpp: true, isActive: true },
         },
@@ -677,14 +699,22 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
         deliveryAddress: {
           select: { guid: true, name: true, fullAddress: true, isActive: true },
         },
+        organization: {
+          select: { guid: true, name: true, code: true, isActive: true },
+        },
         items: {
           orderBy: [{ createdAt: 'asc' }],
           select: {
             id: true,
             quantity: true,
             quantityBase: true,
+            basePrice: true,
             price: true,
+            isManualPrice: true,
+            manualPrice: true,
+            priceSource: true,
             discountPercent: true,
+            appliedDiscountPercent: true,
             lineAmount: true,
             comment: true,
             product: { select: { guid: true, name: true, sku: true, article: true, isActive: true } },
@@ -697,6 +727,9 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
 
     const payload = orders.map((order) => ({
       guid: order.guid ?? order.id,
+      source: order.source,
+      revision: order.revision,
+      syncState: order.syncState,
       status: order.status,
       queuedAt: order.queuedAt,
       sentTo1cAt: order.sentTo1cAt,
@@ -704,13 +737,21 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
       comment: order.comment,
       currency: order.currency,
       totalAmount: decimalToNumber(order.totalAmount),
+      generalDiscountPercent: decimalToNumber(order.generalDiscountPercent),
+      generalDiscountAmount: decimalToNumber(order.generalDiscountAmount),
       exportAttempts: order.exportAttempts,
       lastExportError: order.lastExportError,
+      isPostedIn1c: order.isPostedIn1c,
+      postedAt1c: order.postedAt1c,
+      cancelRequestedAt: order.cancelRequestedAt,
+      cancelReason: order.cancelReason,
+      last1cError: order.last1cError,
       counterparty: order.counterparty,
       agreement: order.agreement,
       contract: order.contract,
       warehouse: order.warehouse,
       deliveryAddress: order.deliveryAddress,
+      organization: order.organization,
       items: order.items.map((item) => ({
         id: item.id,
         product: item.product,
@@ -718,8 +759,13 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
         unit: item.unit,
         quantity: decimalToNumber(item.quantity),
         quantityBase: decimalToNumber(item.quantityBase),
+        basePrice: decimalToNumber(item.basePrice),
         price: decimalToNumber(item.price),
+        isManualPrice: item.isManualPrice,
+        manualPrice: decimalToNumber(item.manualPrice),
+        priceSource: item.priceSource,
         discountPercent: decimalToNumber(item.discountPercent),
+        appliedDiscountPercent: decimalToNumber(item.appliedDiscountPercent),
         lineAmount: decimalToNumber(item.lineAmount),
         comment: item.comment,
       })),
@@ -757,7 +803,10 @@ export const handleOrderAck = async (req: Request, res: Response) => {
   try {
     const parsed = orderAckSchema.parse(req.body);
     const syncedAt = now();
-    const order = await prisma.order.findUnique({ where: { guid: orderGuid }, select: { id: true, guid: true } });
+    const order = await prisma.order.findUnique({
+      where: { guid: orderGuid },
+      select: { id: true, guid: true, revision: true },
+    });
 
     if (!order) {
       const results: BatchResult[] = [{ key: orderGuid, status: 'error', error: 'Order not found' }];
@@ -766,16 +815,33 @@ export const handleOrderAck = async (req: Request, res: Response) => {
     }
 
     if (parsed.error) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: {
-          status: OrderStatus.QUEUED,
-          exportAttempts: { increment: 1 },
-          lastExportError: parsed.error,
-          sentTo1cAt: null,
-          lastSyncedAt: syncedAt,
-          sourceUpdatedAt: parsed.sourceUpdatedAt ?? syncedAt,
-        },
+      await prisma.$transaction(async (tx) => {
+        const nextRevision = order.revision + 1;
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            revision: nextRevision,
+            status: OrderStatus.QUEUED,
+            syncState: OrderSyncState.ERROR,
+            exportAttempts: { increment: 1 },
+            lastExportError: parsed.error,
+            last1cError: parsed.error,
+            sentTo1cAt: null,
+            lastSyncedAt: syncedAt,
+            sourceUpdatedAt: parsed.sourceUpdatedAt ?? syncedAt,
+          },
+        });
+        await appendOrderEvent(tx, {
+          orderId: order.id,
+          revision: nextRevision,
+          source: OrderEventSource.ONEC_ACK,
+          eventType: 'ONEC_ORDER_ACK_ERROR',
+          payload: {
+            error: parsed.error,
+            sourceUpdatedAt: (parsed.sourceUpdatedAt ?? syncedAt).toISOString(),
+          },
+          note: parsed.error,
+        });
       });
       const results: BatchResult[] = [{ key: order.guid ?? orderGuid, status: 'error', error: parsed.error }];
       await safeCompleteSyncRun(runId, results, baseMeta, 'Order export acknowledged with error');
@@ -783,19 +849,37 @@ export const handleOrderAck = async (req: Request, res: Response) => {
     }
 
     const nextStatus = parsed.status ?? OrderStatus.SENT_TO_1C;
-    await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: nextStatus,
-        number1c: parsed.number1c ?? undefined,
-        date1c: parsed.date1c ?? undefined,
-        sentTo1cAt: parsed.sentTo1cAt ?? syncedAt,
-        lastStatusSyncAt: syncedAt,
-        exportAttempts: { increment: 1 },
-        lastExportError: null,
-        lastSyncedAt: syncedAt,
-        sourceUpdatedAt: parsed.sourceUpdatedAt ?? syncedAt,
-      },
+    await prisma.$transaction(async (tx) => {
+      const nextRevision = order.revision + 1;
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          revision: nextRevision,
+          status: nextStatus,
+          syncState: OrderSyncState.SYNCED,
+          number1c: parsed.number1c ?? undefined,
+          date1c: parsed.date1c ?? undefined,
+          sentTo1cAt: parsed.sentTo1cAt ?? syncedAt,
+          lastStatusSyncAt: syncedAt,
+          exportAttempts: { increment: 1 },
+          lastExportError: null,
+          last1cError: null,
+          lastSyncedAt: syncedAt,
+          sourceUpdatedAt: parsed.sourceUpdatedAt ?? syncedAt,
+        },
+      });
+      await appendOrderEvent(tx, {
+        orderId: order.id,
+        revision: nextRevision,
+        source: OrderEventSource.ONEC_ACK,
+        eventType: 'ONEC_ORDER_ACK_OK',
+        payload: {
+          status: nextStatus,
+          number1c: parsed.number1c ?? null,
+          date1c: parsed.date1c?.toISOString?.() ?? null,
+          sentTo1cAt: (parsed.sentTo1cAt ?? syncedAt).toISOString(),
+        },
+      });
     });
 
     const results: BatchResult[] = [{ key: order.guid ?? orderGuid, status: 'ok' }];
@@ -841,8 +925,17 @@ export const handleOrdersStatusBatch = async (req: Request, res: Response) => {
           continue;
         }
 
+        const current = await tx.order.findUnique({
+          where: { id: order.id },
+          select: { revision: true },
+        });
+
         const data: Prisma.OrderUpdateInput = {
+          revision: (current?.revision ?? 0) + 1,
           status: item.status,
+          syncState: OrderSyncState.SYNCED,
+          isPostedIn1c: item.status === OrderStatus.CONFIRMED ? true : undefined,
+          postedAt1c: item.status === OrderStatus.CONFIRMED ? syncedAt : undefined,
           lastStatusSyncAt: syncedAt,
           lastSyncedAt: syncedAt,
           sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
@@ -856,6 +949,20 @@ export const handleOrdersStatusBatch = async (req: Request, res: Response) => {
 
         try {
           await tx.order.update({ where: { id: order.id }, data });
+          await appendOrderEvent(tx, {
+            orderId: order.id,
+            revision: (current?.revision ?? 0) + 1,
+            source: item.status === OrderStatus.CONFIRMED ? OrderEventSource.ONEC_POST : OrderEventSource.ONEC_EDIT,
+            eventType: 'ONEC_ORDER_STATUS_SYNC',
+            payload: {
+              status: item.status,
+              number1c: item.number1c ?? null,
+              date1c: item.date1c?.toISOString?.() ?? null,
+              comment: item.comment ?? null,
+              totalAmount: item.totalAmount ?? null,
+              currency: item.currency ?? null,
+            },
+          });
           results.push({ key: order.guid ?? item.guid, status: 'ok' });
         } catch (err) {
           console.error(`Failed to update order status ${item.guid}`, err);
@@ -873,6 +980,273 @@ export const handleOrdersStatusBatch = async (req: Request, res: Response) => {
     }
     await safeFailSyncRun(runId, error, baseMeta);
     console.error('Unexpected error in orders status batch', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+async function upsertSnapshotOrganization(
+  tx: Prisma.TransactionClient,
+  organization?: { guid: string; name: string; code?: string }
+) {
+  if (!organization) return null;
+  const record = await tx.organization.upsert({
+    where: { guid: organization.guid },
+    update: {
+      name: organization.name,
+      code: organization.code ?? undefined,
+      isActive: true,
+      sourceUpdatedAt: now(),
+      lastSyncedAt: now(),
+    },
+    create: {
+      guid: organization.guid,
+      name: organization.name,
+      code: organization.code ?? null,
+      isActive: true,
+      sourceUpdatedAt: now(),
+      lastSyncedAt: now(),
+    },
+    select: { id: true },
+  });
+  return record.id;
+}
+
+async function replaceOrderItemsFromSnapshot(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  items: Array<{
+    product: { guid: string };
+    package?: { guid?: string | undefined } | null;
+    unit?: { guid?: string | undefined } | null;
+    quantity: number;
+    quantityBase?: number | undefined;
+    basePrice?: number | null | undefined;
+    price?: number | null | undefined;
+    isManualPrice?: boolean | undefined;
+    manualPrice?: number | null | undefined;
+    priceSource?: string | undefined;
+    discountPercent?: number | null | undefined;
+    appliedDiscountPercent?: number | null | undefined;
+    lineAmount?: number | null | undefined;
+    comment?: string | null | undefined;
+  }>
+) {
+  await tx.orderItem.deleteMany({ where: { orderId } });
+
+  let computedTotal = new Prisma.Decimal(0);
+
+  for (const item of items) {
+    const product = await tx.product.findUnique({
+      where: { guid: item.product.guid },
+      select: {
+        id: true,
+        guid: true,
+        baseUnit: { select: { id: true, guid: true } },
+      },
+    });
+
+    if (!product) {
+      throw new Error(`Product ${item.product.guid} not found for order snapshot`);
+    }
+
+    const packageRecord = item.package?.guid
+      ? await tx.productPackage.findFirst({
+          where: { guid: item.package.guid, productId: product.id },
+          select: { id: true, unitId: true, multiplier: true },
+        })
+      : null;
+
+    const explicitUnit = item.unit?.guid
+      ? await tx.unit.findUnique({ where: { guid: item.unit.guid }, select: { id: true } })
+      : null;
+
+    const quantity = toDecimal(item.quantity) ?? new Prisma.Decimal(item.quantity);
+    const quantityBase =
+      item.quantityBase !== undefined && item.quantityBase !== null
+        ? new Prisma.Decimal(item.quantityBase)
+        : packageRecord?.multiplier
+          ? quantity.mul(packageRecord.multiplier)
+          : quantity;
+    const price =
+      item.price !== undefined && item.price !== null
+        ? new Prisma.Decimal(item.price)
+        : item.basePrice !== undefined && item.basePrice !== null
+          ? new Prisma.Decimal(item.basePrice)
+          : new Prisma.Decimal(0);
+    const lineAmount =
+      item.lineAmount !== undefined && item.lineAmount !== null
+        ? new Prisma.Decimal(item.lineAmount)
+        : quantityBase.mul(price);
+
+    computedTotal = computedTotal.add(lineAmount);
+
+    await tx.orderItem.create({
+      data: {
+        orderId,
+        productId: product.id,
+        packageId: packageRecord?.id ?? null,
+        unitId: explicitUnit?.id ?? packageRecord?.unitId ?? product.baseUnit?.id ?? null,
+        quantity,
+        quantityBase,
+        basePrice: item.basePrice !== undefined && item.basePrice !== null ? new Prisma.Decimal(item.basePrice) : null,
+        price,
+        isManualPrice: item.isManualPrice ?? false,
+        manualPrice: item.manualPrice !== undefined && item.manualPrice !== null ? new Prisma.Decimal(item.manualPrice) : null,
+        priceSource: item.priceSource ?? null,
+        discountPercent:
+          item.discountPercent !== undefined && item.discountPercent !== null
+            ? new Prisma.Decimal(item.discountPercent)
+            : null,
+        appliedDiscountPercent:
+          item.appliedDiscountPercent !== undefined && item.appliedDiscountPercent !== null
+            ? new Prisma.Decimal(item.appliedDiscountPercent)
+            : null,
+        lineAmount,
+        comment: item.comment ?? null,
+        sourceUpdatedAt: now(),
+      },
+    });
+  }
+
+  return computedTotal;
+}
+
+export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => {
+  const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
+  const baseMeta = { rawCount };
+  let runId: string | undefined;
+
+  try {
+    runId = (await startSyncRun(SyncEntityType.ORDERS_SNAPSHOT, SyncDirection.IMPORT, baseMeta)).id;
+  } catch (e) {
+    console.error('Failed to start sync run for orders snapshot', e);
+  }
+
+  try {
+    const parsed = ordersSnapshotBatchSchema.parse(req.body);
+    const results: BatchResult[] = [];
+    const syncedAt = now();
+
+    await prisma.$transaction(async (tx) => {
+      for (const item of parsed.items) {
+        const order = await tx.order.findUnique({
+          where: { guid: item.guid },
+          select: { id: true, guid: true, revision: true, source: true },
+        });
+
+        if (!order) {
+          results.push({ key: item.guid, status: 'error', error: 'Order not found' });
+          continue;
+        }
+
+        if (item.baseRevision !== order.revision) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              syncState: OrderSyncState.CONFLICT,
+              last1cError: `Revision conflict. Current=${order.revision}, snapshotBase=${item.baseRevision}`,
+              last1cSnapshot: item as unknown as Prisma.InputJsonValue,
+              lastSyncedAt: syncedAt,
+            },
+          });
+          await appendOrderEvent(tx, {
+            orderId: order.id,
+            revision: order.revision,
+            source: OrderEventSource.ONEC_EDIT,
+            eventType: 'ONEC_ORDER_SNAPSHOT_CONFLICT',
+            payload: item as unknown as Prisma.InputJsonValue,
+            note: `Revision conflict. Current=${order.revision}, snapshotBase=${item.baseRevision}`,
+          });
+          results.push({ key: item.guid, status: 'error', error: 'Revision conflict' });
+          continue;
+        }
+
+        try {
+          const organizationId = await upsertSnapshotOrganization(tx, item.organization);
+          const computedTotal = await replaceOrderItemsFromSnapshot(tx, order.id, item.items);
+          const nextRevision = item.revision ?? order.revision + 1;
+          const nextStatus = item.status;
+          const nextSyncState =
+            item.syncState ??
+            (nextStatus === OrderStatus.CANCELLED ? OrderSyncState.SYNCED : OrderSyncState.SYNCED);
+
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              revision: nextRevision,
+              status: nextStatus,
+              syncState: nextSyncState,
+              number1c: item.number1c ?? undefined,
+              date1c: item.date1c ?? undefined,
+              isPostedIn1c: item.isPostedIn1c ?? false,
+              postedAt1c: item.postedAt1c ?? undefined,
+              organizationId: organizationId ?? undefined,
+              comment: item.comment ?? null,
+              deliveryDate: item.deliveryDate ?? null,
+              currency: item.currency ?? undefined,
+              totalAmount:
+                item.totalAmount !== undefined && item.totalAmount !== null
+                  ? new Prisma.Decimal(item.totalAmount)
+                  : computedTotal,
+              generalDiscountPercent:
+                item.generalDiscountPercent !== undefined && item.generalDiscountPercent !== null
+                  ? new Prisma.Decimal(item.generalDiscountPercent)
+                  : null,
+              generalDiscountAmount:
+                item.generalDiscountAmount !== undefined && item.generalDiscountAmount !== null
+                  ? new Prisma.Decimal(item.generalDiscountAmount)
+                  : null,
+              cancelReason: item.cancelReason ?? null,
+              last1cError: item.last1cError ?? null,
+              last1cSnapshot: item as unknown as Prisma.InputJsonValue,
+              lastStatusSyncAt: syncedAt,
+              lastSyncedAt: syncedAt,
+              sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+            },
+          });
+
+          await appendOrderEvent(tx, {
+            orderId: order.id,
+            revision: nextRevision,
+            source: item.isPostedIn1c ? OrderEventSource.ONEC_POST : OrderEventSource.ONEC_EDIT,
+            eventType: 'ONEC_ORDER_SNAPSHOT_APPLIED',
+            payload: item as unknown as Prisma.InputJsonValue,
+          });
+
+          results.push({ key: order.guid ?? item.guid, status: 'ok' });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to apply order snapshot';
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              syncState: OrderSyncState.ERROR,
+              last1cError: message,
+              last1cSnapshot: item as unknown as Prisma.InputJsonValue,
+              lastSyncedAt: syncedAt,
+            },
+          });
+          await appendOrderEvent(tx, {
+            orderId: order.id,
+            revision: order.revision,
+            source: OrderEventSource.ONEC_IMPORT,
+            eventType: 'ONEC_ORDER_SNAPSHOT_ERROR',
+            payload: item as unknown as Prisma.InputJsonValue,
+            note: message,
+          });
+          results.push({ key: item.guid, status: 'error', error: message });
+        }
+      }
+    });
+
+    await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
+    return res.json({ success: true, count: results.length, results });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      await safeFailSyncRun(runId, error, baseMeta);
+      return handleValidationError(error, res);
+    }
+    await safeFailSyncRun(runId, error, baseMeta);
+    console.error('Unexpected error in orders snapshot batch', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 };

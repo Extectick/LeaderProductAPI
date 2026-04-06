@@ -1,4 +1,4 @@
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, OrderSyncState } from '@prisma/client';
 import { z } from 'zod';
 
 const envelope = {
@@ -241,6 +241,77 @@ export const ordersStatusBatchSchema = z.object({
   items: z.array(orderStatusItemSchema).min(1),
 });
 
+const snapshotOrganizationSchema = z.object({
+  guid: z.string().min(1),
+  name: z.string().min(1),
+  code: z.string().optional(),
+});
+
+const snapshotUnitSchema = z.object({
+  guid: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  symbol: z.string().optional(),
+});
+
+const snapshotPackageSchema = z.object({
+  guid: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  multiplier: z.number().optional(),
+});
+
+const snapshotProductSchema = z.object({
+  guid: z.string().min(1),
+  name: z.string().min(1).optional(),
+  code: z.string().optional(),
+  article: z.string().optional(),
+  sku: z.string().optional(),
+});
+
+const orderSnapshotItemLineSchema = z.object({
+  product: snapshotProductSchema,
+  package: snapshotPackageSchema.nullable().optional(),
+  unit: snapshotUnitSchema.nullable().optional(),
+  quantity: z.number().positive(),
+  quantityBase: z.number().positive().optional(),
+  basePrice: z.number().nullable().optional(),
+  price: z.number().nullable().optional(),
+  isManualPrice: z.boolean().optional(),
+  manualPrice: z.number().nullable().optional(),
+  priceSource: z.string().optional(),
+  discountPercent: z.number().min(0).max(100).nullable().optional(),
+  appliedDiscountPercent: z.number().min(0).max(100).nullable().optional(),
+  lineAmount: z.number().nullable().optional(),
+  comment: z.string().nullable().optional(),
+});
+
+const orderSnapshotItemSchema = z.object({
+  guid: z.string().min(1),
+  baseRevision: z.number().int().min(1),
+  revision: z.number().int().min(1).optional(),
+  status: z.nativeEnum(OrderStatus),
+  syncState: z.nativeEnum(OrderSyncState).optional(),
+  number1c: z.string().optional(),
+  date1c: nullableDate,
+  isPostedIn1c: z.boolean().optional(),
+  postedAt1c: nullableDate,
+  organization: snapshotOrganizationSchema.optional(),
+  comment: z.string().nullable().optional(),
+  deliveryDate: nullableDate,
+  currency: z.string().optional(),
+  totalAmount: z.number().nullable().optional(),
+  generalDiscountPercent: z.number().min(0).max(100).nullable().optional(),
+  generalDiscountAmount: z.number().nullable().optional(),
+  cancelReason: z.string().nullable().optional(),
+  last1cError: z.string().nullable().optional(),
+  sourceUpdatedAt: nullableDate,
+  items: z.array(orderSnapshotItemLineSchema).min(1),
+});
+
+export const ordersSnapshotBatchSchema = z.object({
+  ...envelope,
+  items: z.array(orderSnapshotItemSchema).min(1),
+});
+
 const orderAckStatusSchema = z.literal(OrderStatus.SENT_TO_1C);
 
 export const orderAckSchema = z.object({
@@ -265,6 +336,7 @@ export const sessionCompleteSchema = z.object({
 });
 
 export type OrdersStatusBatch = z.infer<typeof ordersStatusBatchSchema>;
+export type OrdersSnapshotBatch = z.infer<typeof ordersSnapshotBatchSchema>;
 export type OrderAckBody = z.infer<typeof orderAckSchema>;
 export type SessionStartBody = z.infer<typeof sessionStartSchema>;
 export type SessionCompleteBody = z.infer<typeof sessionCompleteSchema>;

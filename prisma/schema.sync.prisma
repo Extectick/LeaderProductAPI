@@ -47,6 +47,7 @@ enum SyncEntityType {
   STOCK
   ORDERS_EXPORT
   ORDERS_STATUS
+  ORDERS_SNAPSHOT
 }
 
 model SyncRun {
