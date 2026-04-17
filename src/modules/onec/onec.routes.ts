@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   handleAgreementsBatch,
+  handleContractsBatch,
   handleCounterpartiesBatch,
   handleEntityClear,
   handleNomenclatureBatch,
@@ -256,6 +257,57 @@ router.post('/stock/batch', handleStockBatch);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/counterparties/batch', handleCounterpartiesBatch);
+
+/**
+ * @openapi
+ * /api/1c/contracts/batch:
+ *   post:
+ *     tags: [1C]
+ *     summary: Импорт договоров контрагентов
+ *     description: Принимает отдельную выгрузку справочника ДоговорыКонтрагентов и выполняет upsert по guid.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [secret, items]
+ *             properties:
+ *               secret: { type: string }
+ *               sessionId: { type: string, nullable: true }
+ *               items:
+ *                 type: array
+ *                 minItems: 1
+ *                 items:
+ *                   type: object
+ *                   required: [guid, counterpartyGuid, number, date]
+ *                   properties:
+ *                     guid: { type: string }
+ *                     counterpartyGuid: { type: string }
+ *                     organizationGuid: { type: string, nullable: true }
+ *                     number: { type: string }
+ *                     date: { type: string, format: date-time }
+ *                     name: { type: string, nullable: true }
+ *                     printName: { type: string, nullable: true }
+ *                     isActive: { type: boolean, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Батч успешно принят
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *       400:
+ *         description: Ошибка валидации
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ *       401:
+ *         description: Неверный secret
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiError' }
+ */
+router.post('/contracts/batch', handleContractsBatch);
 
 /**
  * @openapi

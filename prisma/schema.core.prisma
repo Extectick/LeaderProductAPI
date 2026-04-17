@@ -283,6 +283,8 @@ model User {
   phoneMigrationReports     UserPhoneMigrationReport[]
   notificationSettings UserNotificationSettings?
   appealMutes          AppealMute[]
+  clientOrderSettings  ClientOrderUserSettings?
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[]
 
   @@index([email])
   @@index([currentProfileType, roleId, createdAt])

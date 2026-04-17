@@ -13,6 +13,11 @@ export const decimalToNumber = (value: unknown): number | null => {
 export const toDecimal = (value?: number | null) =>
   value === undefined || value === null ? undefined : new Prisma.Decimal(value);
 
+const bigintToString = (value: bigint | number | string | null | undefined): string | null => {
+  if (value === null || value === undefined) return null;
+  return String(value);
+};
+
 export const orderDetailSelect = {
   id: true,
   guid: true,
@@ -119,6 +124,7 @@ export const orderDetailSelect = {
     orderBy: [{ createdAt: 'asc' }],
     select: {
       id: true,
+      productId: true,
       quantity: true,
       quantityBase: true,
       basePrice: true,
@@ -126,6 +132,12 @@ export const orderDetailSelect = {
       isManualPrice: true,
       manualPrice: true,
       priceSource: true,
+      priceType: {
+        select: {
+          guid: true,
+          name: true,
+        },
+      },
       discountPercent: true,
       appliedDiscountPercent: true,
       lineAmount: true,
@@ -137,6 +149,7 @@ export const orderDetailSelect = {
           code: true,
           article: true,
           sku: true,
+          isWeight: true,
         },
       },
       package: {
@@ -225,7 +238,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
           firstName: order.createdByUser.firstName,
           lastName: order.createdByUser.lastName,
           middleName: order.createdByUser.middleName,
-          phone: order.createdByUser.phone,
+          phone: bigintToString(order.createdByUser.phone),
           email: order.createdByUser.email,
         }
       : null,
@@ -238,6 +251,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
       isManualPrice: item.isManualPrice,
       manualPrice: decimalToNumber(item.manualPrice),
       priceSource: item.priceSource,
+      priceType: item.priceType,
       discountPercent: decimalToNumber(item.discountPercent),
       appliedDiscountPercent: decimalToNumber(item.appliedDiscountPercent),
       lineAmount: decimalToNumber(item.lineAmount),

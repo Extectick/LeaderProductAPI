@@ -36,32 +36,66 @@ enum OrderEventSource {
   SYSTEM
 }
 
+enum ClientOrderDeliveryDateMode {
+  NEXT_DAY
+  OFFSET_DAYS
+  FIXED_DATE
+}
+
 model Counterparty {
-  id          String   @id @default(cuid())
-  guid        String   @unique
-  name        String
-  fullName    String?
-  inn         String?
-  kpp         String?
-  phone       String?
-  email       String?
-  isActive    Boolean  @default(true)
+  id                       String   @id @default(cuid())
+  guid                     String   @unique
+  name                     String
+  fullName                 String?
+  inn                      String?
+  kpp                      String?
+  phone                    String?
+  email                    String?
+  dataVersion              String?
+  isSeparateSubdivision    Boolean?
+  legalEntityType          String?
+  legalOrIndividualType    String?
+  registrationCountryGuid  String?
+  headCounterpartyGuid     String?
+  additionalInfo           String?
+  partnerGuid              String?
+  vatByRates4And2          Boolean?
+  okpoCode                 String?
+  registrationNumber       String?
+  taxNumber                String?
+  internationalName        String?
+  isPredefined             Boolean?
+  predefinedDataName       String?
+  isActive                 Boolean  @default(true)
+  defaultAgreementId       String?
+  defaultContractId        String?
+  defaultWarehouseId       String?
+  defaultDeliveryAddressId String?
 
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
 
-  contracts     ClientContract[]
-  agreements    ClientAgreement[]
-  addresses     DeliveryAddress[]
-  specialPrices SpecialPrice[]
-  orders        Order[]
-  clientProfiles ClientProfile[] @relation("ClientProfileCounterparty")
+  contracts                   ClientContract[]
+  agreements                  ClientAgreement[]
+  addresses                   DeliveryAddress[]
+  specialPrices               SpecialPrice[]
+  orders                      Order[]
+  clientProfiles              ClientProfile[] @relation("ClientProfileCounterparty")
+  defaultAgreement            ClientAgreement? @relation("CounterpartyDefaultAgreement", fields: [defaultAgreementId], references: [id])
+  defaultContract             ClientContract? @relation("CounterpartyDefaultContract", fields: [defaultContractId], references: [id])
+  defaultWarehouse            Warehouse? @relation("CounterpartyDefaultWarehouse", fields: [defaultWarehouseId], references: [id])
+  defaultDeliveryAddress      DeliveryAddress? @relation("CounterpartyDefaultDeliveryAddress", fields: [defaultDeliveryAddressId], references: [id])
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[]
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   @@index([isActive])
   @@index([sourceUpdatedAt])
+  @@index([defaultAgreementId])
+  @@index([defaultContractId])
+  @@index([defaultWarehouseId])
+  @@index([defaultDeliveryAddressId])
 }
 
 model DeliveryAddress {
@@ -84,9 +118,11 @@ model DeliveryAddress {
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
 
-  counterparty   Counterparty @relation(fields: [counterpartyId], references: [id])
-  orders         Order[]
-  activeForProfiles ClientProfile[] @relation("ClientProfileActiveDeliveryAddress")
+  counterparty               Counterparty @relation(fields: [counterpartyId], references: [id])
+  orders                     Order[]
+  activeForProfiles          ClientProfile[] @relation("ClientProfileActiveDeliveryAddress")
+  defaultForCounterparties   Counterparty[] @relation("CounterpartyDefaultDeliveryAddress")
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[] @relation("ClientOrderUserDefaultDeliveryAddress")
 
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -216,10 +252,12 @@ model Warehouse {
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
 
-  stocks    StockBalance[]
-  agreements ClientAgreement[]
-  orders    Order[]
-  activeForProfiles ClientProfile[] @relation("ClientProfileActiveWarehouse")
+  stocks                     StockBalance[]
+  agreements                 ClientAgreement[]
+  orders                     Order[]
+  activeForProfiles          ClientProfile[] @relation("ClientProfileActiveWarehouse")
+  defaultForCounterparties   Counterparty[] @relation("CounterpartyDefaultWarehouse")
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[] @relation("ClientOrderUserDefaultWarehouse")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -239,8 +277,12 @@ model Organization {
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
 
-  stocks    StockBalance[]
-  orders    Order[]
+  stocks                     StockBalance[]
+  contracts                  ClientContract[]
+  agreements                 ClientAgreement[]
+  orders                     Order[]
+  clientOrderPreferredBy     ClientOrderUserSettings[] @relation("ClientOrderPreferredOrganization")
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[] @relation("ClientOrderRememberedDefaultsOrganization")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -286,25 +328,68 @@ model ClientContract {
   id             String   @id @default(cuid())
   guid           String   @unique
   counterpartyId String
+  organizationId String?
+  dataVersion    String?
+  name           String?
+  printName      String?
   number         String
   date           DateTime
   validFrom      DateTime?
   validTo        DateTime?
+  partnerGuid    String?
+  bankAccountGuid String?
+  counterpartyBankAccountGuid String?
+  contactPersonGuid String?
+  departmentGuid String?
+  managerGuid    String?
+  cashFlowItemGuid String?
+  businessOperation String?
+  financialAccountingGroupGuid String?
+  activityDirectionGuid String?
+  currency       String?
+  currencyGuid   String?
+  status         String?
+  contractType   String?
+  purpose        String?
+  isAgreed       Boolean?
+  hasPaymentTerm Boolean?
+  paymentTermDays Int?
+  settlementProcedure String?
+  limitDebtAmount Boolean?
+  amount         Decimal? @db.Decimal(18, 2)
+  allowedDebtAmount Decimal? @db.Decimal(18, 2)
+  forbidOverdueDebt Boolean?
+  vatTaxation    String?
+  vatRate        String?
+  vatDefinedInDocument Boolean?
+  deliveryMethod String?
+  carrierPartnerGuid String?
+  deliveryZoneGuid String?
+  deliveryTimeFrom String?
+  deliveryTimeTo String?
+  deliveryAddress String?
+  deliveryAddressFields String?
+  additionalDeliveryInfo String?
   isActive       Boolean  @default(true)
   comment        String?
 
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
 
-  counterparty   Counterparty   @relation(fields: [counterpartyId], references: [id])
-  agreements     ClientAgreement[]
-  orders         Order[]
-  activeForProfiles ClientProfile[] @relation("ClientProfileActiveContract")
+  counterparty               Counterparty   @relation(fields: [counterpartyId], references: [id])
+  organization               Organization?  @relation(fields: [organizationId], references: [id])
+  agreements                 ClientAgreement[]
+  orders                     Order[]
+  activeForProfiles          ClientProfile[] @relation("ClientProfileActiveContract")
+  defaultForCounterparties   Counterparty[] @relation("CounterpartyDefaultContract")
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[] @relation("ClientOrderUserDefaultContract")
 
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   @@index([counterpartyId])
+  @@index([organizationId])
+  @@index([status])
   @@index([isActive])
   @@index([sourceUpdatedAt])
 }
@@ -320,6 +405,7 @@ model PriceType {
   lastSyncedAt    DateTime?
 
   agreements    ClientAgreement[]
+  orderItems    OrderItem[]
   productPrices ProductPrice[]
   specialPrices SpecialPrice[]
   activeForProfiles ClientProfile[] @relation("ClientProfileActivePriceType")
@@ -335,11 +421,52 @@ model ClientAgreement {
   id              String   @id @default(cuid())
   guid            String   @unique
   name            String
+  number          String?
+  date            DateTime?
   counterpartyId  String?
+  organizationId  String?
   contractId      String?
   priceTypeId     String?
   warehouseId     String?
   currency        String?
+  dataVersion     String?
+  partnerGuid     String?
+  partnerSegmentGuid String?
+  paymentScheduleGuid String?
+  documentAmount  Decimal? @db.Decimal(18, 2)
+  isTemplate      Boolean?
+  deliveryTerm    String?
+  priceIncludesVat Boolean?
+  usedBySalesRepresentatives Boolean?
+  parentAgreementGuid String?
+  nomenclatureSegmentGuid String?
+  validFrom       DateTime?
+  validTo         DateTime?
+  comment         String?
+  isRegular       Boolean?
+  period          String?
+  periodCount     Int?
+  status          String?
+  isAgreed        Boolean?
+  managerGuid     String?
+  businessOperation String?
+  manualDiscountPercent Decimal? @db.Decimal(5, 2)
+  manualMarkupPercent Decimal? @db.Decimal(5, 2)
+  availableForExternalUsers Boolean?
+  usesCounterpartyContracts Boolean?
+  limitManualDiscounts Boolean?
+  paymentForm     String?
+  contactPersonGuid String?
+  settlementProcedure String?
+  priceCalculationVariant String?
+  minOrderAmount  Decimal? @db.Decimal(18, 2)
+  orderFrequency  String?
+  individualPriceTypeGuid String?
+  settlementCurrency String?
+  paymentInCurrency Boolean?
+  financialAccountingGroupGuid String?
+  cashFlowItemGuid String?
+  activityDirectionGuid String?
 
   isActive        Boolean  @default(true)
 
@@ -347,21 +474,26 @@ model ClientAgreement {
   lastSyncedAt    DateTime?
 
   counterparty    Counterparty?   @relation(fields: [counterpartyId], references: [id])
+  organization    Organization?   @relation(fields: [organizationId], references: [id])
   contract        ClientContract? @relation(fields: [contractId], references: [id])
   warehouse       Warehouse?      @relation(fields: [warehouseId], references: [id])
   priceType       PriceType?      @relation(fields: [priceTypeId], references: [id])
 
-  specialPrices   SpecialPrice[]
-  orders          Order[]
-  activeForProfiles ClientProfile[] @relation("ClientProfileActiveAgreement")
+  specialPrices               SpecialPrice[]
+  orders                      Order[]
+  activeForProfiles           ClientProfile[] @relation("ClientProfileActiveAgreement")
+  defaultForCounterparties    Counterparty[] @relation("CounterpartyDefaultAgreement")
+  clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[] @relation("ClientOrderUserDefaultAgreement")
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([counterpartyId])
+  @@index([organizationId])
   @@index([contractId])
   @@index([warehouseId])
   @@index([priceTypeId])
+  @@index([status])
   @@index([isActive])
   @@index([sourceUpdatedAt])
 }
@@ -506,6 +638,7 @@ model OrderItem {
   productId       String
   packageId       String?
   unitId          String?
+  priceTypeId     String?
 
   quantity        Decimal  @db.Decimal(18, 3)
   quantityBase    Decimal? @db.Decimal(18, 3)
@@ -526,12 +659,14 @@ model OrderItem {
   product         Product        @relation(fields: [productId], references: [id])
   package         ProductPackage? @relation(fields: [packageId], references: [id])
   unit            Unit?          @relation("OrderItem_unit", fields: [unitId], references: [id])
+  priceType       PriceType?      @relation(fields: [priceTypeId], references: [id])
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([orderId])
   @@index([productId])
+  @@index([priceTypeId])
   @@index([sourceUpdatedAt])
 }
 
@@ -553,4 +688,49 @@ model OrderEvent {
   @@index([orderId, revision])
   @@index([source])
   @@index([actorUserId])
+}
+
+model ClientOrderUserSettings {
+  id                      Int                         @id @default(autoincrement())
+  userId                  Int                         @unique
+  preferredOrganizationId String?
+  deliveryDateMode        ClientOrderDeliveryDateMode @default(NEXT_DAY)
+  deliveryDateOffsetDays  Int                         @default(1)
+  fixedDeliveryDate       DateTime?
+  user                    User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredOrganization   Organization?               @relation("ClientOrderPreferredOrganization", fields: [preferredOrganizationId], references: [id], onDelete: SetNull)
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+
+  @@index([preferredOrganizationId])
+}
+
+model ClientOrderUserCounterpartyDefaults {
+  id                Int              @id @default(autoincrement())
+  userId            Int
+  organizationId    String
+  counterpartyId    String
+  agreementId       String?
+  contractId        String?
+  warehouseId       String?
+  deliveryAddressId String?
+  lastUsedAt        DateTime         @default(now())
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization      Organization     @relation("ClientOrderRememberedDefaultsOrganization", fields: [organizationId], references: [id], onDelete: Cascade)
+  counterparty      Counterparty     @relation(fields: [counterpartyId], references: [id], onDelete: Cascade)
+  agreement         ClientAgreement? @relation("ClientOrderUserDefaultAgreement", fields: [agreementId], references: [id], onDelete: SetNull)
+  contract          ClientContract?  @relation("ClientOrderUserDefaultContract", fields: [contractId], references: [id], onDelete: SetNull)
+  warehouse         Warehouse?       @relation("ClientOrderUserDefaultWarehouse", fields: [warehouseId], references: [id], onDelete: SetNull)
+  deliveryAddress   DeliveryAddress? @relation("ClientOrderUserDefaultDeliveryAddress", fields: [deliveryAddressId], references: [id], onDelete: SetNull)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([userId, organizationId, counterpartyId])
+  @@index([userId])
+  @@index([organizationId])
+  @@index([counterpartyId])
+  @@index([agreementId])
+  @@index([contractId])
+  @@index([warehouseId])
+  @@index([deliveryAddressId])
 }

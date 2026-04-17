@@ -18,6 +18,7 @@ import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
 import {
   agreementsBatchSchema,
+  contractsBatchSchema,
   counterpartiesBatchSchema,
   nomenclatureBatchSchema,
   organizationsBatchSchema,
@@ -36,6 +37,7 @@ import {
   completeOnecSyncSession,
   resolveBatchSession,
   stageAgreementsBatch,
+  stageContractsBatch,
   stageCounterpartiesBatch,
   stageNomenclatureBatch,
   stageOrganizationsBatch,
@@ -52,6 +54,7 @@ type ClearEntityCode =
   | 'organizations'
   | 'warehouses'
   | 'counterparties'
+  | 'contracts'
   | 'agreements'
   | 'product-prices'
   | 'special-prices'
@@ -271,10 +274,27 @@ const clearOnecEntity = async (entity: ClearEntityCode) => {
       case 'agreements':
         await tx.specialPrice.deleteMany({ where: { agreementId: { not: null } } });
         await tx.clientAgreement.deleteMany({});
-        await tx.clientContract.deleteMany({});
         await tx.priceType.deleteMany({});
         return;
+      case 'contracts':
+        await tx.clientAgreement.updateMany({ where: { contractId: { not: null } }, data: { contractId: null } });
+        await tx.order.updateMany({ where: { contractId: { not: null } }, data: { contractId: null } });
+        await tx.counterparty.updateMany({ where: { defaultContractId: { not: null } }, data: { defaultContractId: null } });
+        await tx.clientOrderUserCounterpartyDefaults.updateMany({
+          where: { contractId: { not: null } },
+          data: { contractId: null },
+        });
+        await tx.clientContract.deleteMany({});
+        return;
       case 'counterparties':
+        await tx.counterparty.updateMany({
+          data: {
+            defaultAgreementId: null,
+            defaultContractId: null,
+            defaultWarehouseId: null,
+            defaultDeliveryAddressId: null,
+          },
+        });
         await tx.specialPrice.deleteMany({ where: { counterpartyId: { not: null } } });
         await tx.clientAgreement.deleteMany({});
         await tx.clientContract.deleteMany({});
@@ -339,6 +359,7 @@ export const handleEntityClear = async (req: Request, res: Response) => {
     entity !== 'organizations' &&
     entity !== 'warehouses' &&
     entity !== 'counterparties' &&
+    entity !== 'contracts' &&
     entity !== 'agreements' &&
     entity !== 'product-prices' &&
     entity !== 'special-prices' &&
@@ -530,6 +551,40 @@ export const handleWarehousesBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+export const handleContractsBatch = async (req: Request, res: Response) => {
+  const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
+  const baseMeta = { rawCount };
+  let runId: string | undefined;
+
+  try {
+    runId = (await startSyncRun(SyncEntityType.CONTRACTS, SyncDirection.IMPORT, baseMeta)).id;
+  } catch (e) {
+    console.error('Failed to start sync run for contracts', e);
+  }
+
+  try {
+    const parsed = contractsBatchSchema.parse(req.body);
+    const session = await resolveBatchSession('contracts', parsed.sessionId);
+    const results = await stageContractsBatch(session.sessionId, parsed.items);
+    const outcome = await completeImplicitSessionIfNeeded(session.implicit, session.sessionId, results);
+
+    await safeCompleteSyncRun(runId, results, {
+      rawCount,
+      parsedCount: parsed.items.length,
+      sessionId: session.sessionId,
+      sessionStatus: outcome?.status,
+    });
+    return res.json({ success: true, count: results.length, results });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      await safeFailSyncRun(runId, error, baseMeta);
+      return handleValidationError(error, res);
+    }
+    await safeFailSyncRun(runId, error, baseMeta);
+    console.error('Unexpected error in contracts batch', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
 export const handleAgreementsBatch = async (req: Request, res: Response) => {
   const rawCount = Array.isArray(req.body?.items) ? req.body.items.length : 0;
   const baseMeta = { rawCount };
@@ -713,6 +768,7 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
             isManualPrice: true,
             manualPrice: true,
             priceSource: true,
+            priceType: { select: { guid: true, name: true } },
             discountPercent: true,
             appliedDiscountPercent: true,
             lineAmount: true,
@@ -764,6 +820,7 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
         isManualPrice: item.isManualPrice,
         manualPrice: decimalToNumber(item.manualPrice),
         priceSource: item.priceSource,
+        priceType: item.priceType,
         discountPercent: decimalToNumber(item.discountPercent),
         appliedDiscountPercent: decimalToNumber(item.appliedDiscountPercent),
         lineAmount: decimalToNumber(item.lineAmount),
@@ -1022,6 +1079,7 @@ async function replaceOrderItemsFromSnapshot(
     quantityBase?: number | undefined;
     basePrice?: number | null | undefined;
     price?: number | null | undefined;
+    priceType?: { guid: string; name?: string | undefined } | null | undefined;
     isManualPrice?: boolean | undefined;
     manualPrice?: number | null | undefined;
     priceSource?: string | undefined;
@@ -1078,6 +1136,10 @@ async function replaceOrderItemsFromSnapshot(
         ? new Prisma.Decimal(item.lineAmount)
         : quantityBase.mul(price);
 
+    const priceType = item.priceType?.guid
+      ? await tx.priceType.findUnique({ where: { guid: item.priceType.guid }, select: { id: true } })
+      : null;
+
     computedTotal = computedTotal.add(lineAmount);
 
     await tx.orderItem.create({
@@ -1086,6 +1148,7 @@ async function replaceOrderItemsFromSnapshot(
         productId: product.id,
         packageId: packageRecord?.id ?? null,
         unitId: explicitUnit?.id ?? packageRecord?.unitId ?? product.baseUnit?.id ?? null,
+        priceTypeId: priceType?.id ?? null,
         quantity,
         quantityBase,
         basePrice: item.basePrice !== undefined && item.basePrice !== null ? new Prisma.Decimal(item.basePrice) : null,

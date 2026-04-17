@@ -3,6 +3,7 @@
   WORKDIR /app
   
   # схема нужна ДО npm ci (postinstall: prisma generate)
+  RUN apk add --no-cache openssl libc6-compat libstdc++
   COPY package*.json ./
   COPY prisma.config.js ./
   COPY scripts ./scripts
@@ -34,7 +35,7 @@
   COPY scripts ./scripts
   
   # оставляем только прод-зависимости (prisma у тебя в "dependencies", значит не удалится)
-  RUN npm prune --production
+  RUN npm prune --omit=dev
   
   # создаём пользователя и выдаём права ОДИН РАЗ
   RUN addgroup -S app \

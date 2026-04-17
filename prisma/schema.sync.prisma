@@ -41,6 +41,7 @@ enum SyncEntityType {
   ORGANIZATIONS
   WAREHOUSES
   COUNTERPARTIES
+  CONTRACTS
   AGREEMENTS
   PRODUCT_PRICES
   SPECIAL_PRICES
@@ -109,6 +110,7 @@ model OnecSyncSession {
   organizationItems  OnecStageOrganization[]
   warehouseItems     OnecStageWarehouse[]
   counterpartyItems  OnecStageCounterparty[]
+  contractItems      OnecStageContract[]
   agreementItems     OnecStageAgreement[]
   productPriceItems  OnecStageProductPrice[]
   specialPriceItems  OnecStageSpecialPrice[]
@@ -227,6 +229,30 @@ model OnecStageAgreement {
   @@index([contractGuid])
   @@index([warehouseGuid])
   @@index([priceTypeGuid])
+}
+
+model OnecStageContract {
+  id                String                 @id @default(cuid())
+  sessionId         String
+  sourceKey         String
+  guid              String
+  counterpartyGuid  String?
+  organizationGuid  String?
+  payload           Json
+  payloadHash       String
+  sourceUpdatedAt   DateTime?
+  lastImportedAt    DateTime               @default(now())
+  resolveStatus     OnecStageResolveStatus @default(PENDING)
+  lastResolveError  String?
+  resolvedAt        DateTime?
+
+  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sourceKey])
+  @@index([sessionId, resolveStatus])
+  @@index([guid])
+  @@index([counterpartyGuid])
+  @@index([organizationGuid])
 }
 
 model OnecStageProductPrice {

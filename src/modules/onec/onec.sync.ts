@@ -9,6 +9,7 @@ import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import type {
   AgreementItem,
+  ContractItem,
   CounterpartyItem,
   NomenclatureItem,
   OrganizationItem,
@@ -25,6 +26,7 @@ export type BatchEntityCode =
   | 'organizations'
   | 'warehouses'
   | 'counterparties'
+  | 'contracts'
   | 'agreements'
   | 'product-prices'
   | 'special-prices'
@@ -40,6 +42,21 @@ type ApplySummary = {
   errors: StageIssue[];
 };
 
+const emptyApplySummary = (): ApplySummary => ({ resolvedStageIds: [], blocked: [], errors: [] });
+
+const mergeApplySummaries = (base: ApplySummary, extra: ApplySummary): ApplySummary => {
+  const blockedIds = new Set(extra.blocked.map((item) => item.stageId));
+  const errorIds = new Set(extra.errors.map((item) => item.stageId));
+  const resolvedStageIds = [...new Set([...base.resolvedStageIds, ...extra.resolvedStageIds])].filter(
+    (stageId) => !blockedIds.has(stageId) && !errorIds.has(stageId)
+  );
+  return {
+    resolvedStageIds,
+    blocked: [...base.blocked, ...extra.blocked],
+    errors: [...base.errors, ...extra.errors],
+  };
+};
+
 type SessionOutcome = {
   sessionId: string;
   status: OnecSyncSessionStatus;
@@ -52,11 +69,34 @@ type SessionOutcome = {
 
 type TxClient = Prisma.TransactionClient;
 
+const CLOSED_AGREEMENT_STATUS = 'Закрыто';
+const CLOSED_CONTRACT_STATUS = 'Закрыт';
+const ZERO_GUID = '00000000-0000-0000-0000-000000000000';
+
+function nonEmptyString(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function optionalGuid(value?: string | null) {
+  const guid = nonEmptyString(value);
+  return guid && guid !== ZERO_GUID ? guid : undefined;
+}
+
+function isClosedAgreementStatus(status?: string | null) {
+  return status?.trim().toLocaleLowerCase('ru') === CLOSED_AGREEMENT_STATUS.toLocaleLowerCase('ru');
+}
+
+function isClosedContractStatus(status?: string | null) {
+  return status?.trim().toLocaleLowerCase('ru') === CLOSED_CONTRACT_STATUS.toLocaleLowerCase('ru');
+}
+
 const ENTITY_SYNC_TYPE: Record<BatchEntityCode, SyncEntityType> = {
   nomenclature: SyncEntityType.NOMENCLATURE,
   organizations: SyncEntityType.ORGANIZATIONS,
   warehouses: SyncEntityType.WAREHOUSES,
   counterparties: SyncEntityType.COUNTERPARTIES,
+  contracts: SyncEntityType.CONTRACTS,
   agreements: SyncEntityType.AGREEMENTS,
   'product-prices': SyncEntityType.PRODUCT_PRICES,
   'special-prices': SyncEntityType.SPECIAL_PRICES,
@@ -72,6 +112,7 @@ const RECONCILE_ORDER: BatchEntityCode[] = [
   'organizations',
   'warehouses',
   'counterparties',
+  'contracts',
   'agreements',
   'product-prices',
   'special-prices',
@@ -102,6 +143,9 @@ const normalizeSelectedEntities = (selected?: string[] | null): BatchEntityCode[
 
 const toDecimal = (value?: number | null) =>
   value === undefined || value === null ? undefined : new Prisma.Decimal(value);
+
+const toNullableDecimal = (value?: number | null) =>
+  value === undefined || value === null ? null : new Prisma.Decimal(value);
 
 const normalizeCounterpartyString = (value: string | null | undefined): string | undefined => {
   if (value === null || value === undefined) return undefined;
@@ -373,6 +417,53 @@ export async function stageCounterpartiesBatch(
   return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
+export async function stageContractsBatch(
+  sessionId: string,
+  items: ContractItem[]
+): Promise<BatchResult[]> {
+  const importedAt = now();
+  await Promise.all(
+    items.map((item) =>
+      prisma.onecStageContract.upsert({
+        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+        create: {
+          sessionId,
+          sourceKey: item.guid,
+          guid: item.guid,
+          counterpartyGuid: item.counterpartyGuid ?? null,
+          organizationGuid: item.organizationGuid ?? null,
+          payload: toJsonValue(item),
+          payloadHash: hashPayload(item),
+          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+          lastImportedAt: importedAt,
+          resolveStatus: OnecStageResolveStatus.PENDING,
+          lastResolveError: null,
+          resolvedAt: null,
+        },
+        update: {
+          counterpartyGuid: item.counterpartyGuid ?? null,
+          organizationGuid: item.organizationGuid ?? null,
+          payload: toJsonValue(item),
+          payloadHash: hashPayload(item),
+          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+          lastImportedAt: importedAt,
+          resolveStatus: OnecStageResolveStatus.PENDING,
+          lastResolveError: null,
+          resolvedAt: null,
+        },
+      })
+    )
+  );
+  await prisma.onecSyncSession.update({
+    where: { id: sessionId },
+    data: {
+      acceptedCount: { increment: items.length },
+      lastActivityAt: importedAt,
+    },
+  });
+  return items.map((item) => ({ key: item.guid, status: 'ok' }));
+}
+
 export async function stageAgreementsBatch(
   sessionId: string,
   items: AgreementItem[]
@@ -437,16 +528,24 @@ export async function stageProductPricesBatch(
   items: ProductPriceItem[]
 ): Promise<BatchResult[]> {
   const importedAt = now();
+  const productPriceSourceKey = (item: ProductPriceItem) =>
+    optionalGuid(item.guid) ??
+    [
+      item.productGuid,
+      item.characteristicGuid ?? '',
+      item.priceTypeGuid ?? item.priceType?.guid ?? '',
+      item.packageGuid ?? '',
+      item.startDate?.toISOString() ?? '',
+    ].join('|');
   await Promise.all(
     items.map((item) => {
-      const sourceKey =
-        item.guid ?? `${item.productGuid}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`;
+      const sourceKey = productPriceSourceKey(item);
       return prisma.onecStageProductPrice.upsert({
         where: { sessionId_sourceKey: { sessionId, sourceKey } },
         create: {
           sessionId,
           sourceKey,
-          guid: item.guid ?? null,
+          guid: optionalGuid(item.guid) ?? null,
           productGuid: item.productGuid,
           priceTypeGuid: item.priceTypeGuid ?? null,
           startDate: item.startDate ?? null,
@@ -459,7 +558,7 @@ export async function stageProductPricesBatch(
           resolvedAt: null,
         },
         update: {
-          guid: item.guid ?? null,
+          guid: optionalGuid(item.guid) ?? null,
           productGuid: item.productGuid,
           priceTypeGuid: item.priceTypeGuid ?? null,
           startDate: item.startDate ?? null,
@@ -482,7 +581,7 @@ export async function stageProductPricesBatch(
     },
   });
   return items.map((item) => ({
-    key: item.guid ?? `${item.productGuid}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`,
+    key: productPriceSourceKey(item),
     status: 'ok',
   }));
 }
@@ -495,14 +594,14 @@ export async function stageSpecialPricesBatch(
   await Promise.all(
     items.map((item) => {
       const sourceKey =
-        item.guid ??
+        optionalGuid(item.guid) ??
         `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`;
       return prisma.onecStageSpecialPrice.upsert({
         where: { sessionId_sourceKey: { sessionId, sourceKey } },
         create: {
           sessionId,
           sourceKey,
-          guid: item.guid ?? null,
+          guid: optionalGuid(item.guid) ?? null,
           productGuid: item.productGuid,
           counterpartyGuid: item.counterpartyGuid ?? null,
           agreementGuid: item.agreementGuid ?? null,
@@ -517,7 +616,7 @@ export async function stageSpecialPricesBatch(
           resolvedAt: null,
         },
         update: {
-          guid: item.guid ?? null,
+          guid: optionalGuid(item.guid) ?? null,
           productGuid: item.productGuid,
           counterpartyGuid: item.counterpartyGuid ?? null,
           agreementGuid: item.agreementGuid ?? null,
@@ -543,7 +642,7 @@ export async function stageSpecialPricesBatch(
   });
   return items.map((item) => ({
     key:
-      item.guid ??
+      optionalGuid(item.guid) ??
       `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`,
     status: 'ok',
   }));
@@ -627,10 +726,27 @@ async function clearEntityInTx(tx: TxClient, entity: BatchEntityCode) {
     case 'agreements':
       await tx.specialPrice.deleteMany({ where: { agreementId: { not: null } } });
       await tx.clientAgreement.deleteMany({});
-      await tx.clientContract.deleteMany({});
       await tx.priceType.deleteMany({});
       return;
+    case 'contracts':
+      await tx.clientAgreement.updateMany({ where: { contractId: { not: null } }, data: { contractId: null } });
+      await tx.order.updateMany({ where: { contractId: { not: null } }, data: { contractId: null } });
+      await tx.counterparty.updateMany({ where: { defaultContractId: { not: null } }, data: { defaultContractId: null } });
+      await tx.clientOrderUserCounterpartyDefaults.updateMany({
+        where: { contractId: { not: null } },
+        data: { contractId: null },
+      });
+      await tx.clientContract.deleteMany({});
+      return;
     case 'counterparties':
+      await tx.counterparty.updateMany({
+        data: {
+          defaultAgreementId: null,
+          defaultContractId: null,
+          defaultWarehouseId: null,
+          defaultDeliveryAddressId: null,
+        },
+      });
       await tx.specialPrice.deleteMany({ where: { counterpartyId: { not: null } } });
       await tx.clientAgreement.deleteMany({});
       await tx.clientContract.deleteMany({});
@@ -926,31 +1042,36 @@ async function applyStagedCounterparties(
   for (const stage of stages) {
     const item = stage.payload as unknown as CounterpartyItem;
     try {
+      const counterpartyData = {
+        name: item.name,
+        fullName: item.fullName ?? null,
+        inn: normalizeInn(item.inn),
+        kpp: normalizeKpp(item.kpp),
+        phone: normalizePhone(item.phone),
+        email: normalizeCounterpartyString(item.email),
+        dataVersion: item.dataVersion ?? null,
+        isSeparateSubdivision: item.isSeparateSubdivision ?? null,
+        legalEntityType: item.legalEntityType ?? null,
+        legalOrIndividualType: item.legalOrIndividualType ?? null,
+        registrationCountryGuid: item.registrationCountryGuid ?? null,
+        headCounterpartyGuid: item.headCounterpartyGuid ?? null,
+        additionalInfo: item.additionalInfo ?? null,
+        partnerGuid: item.partnerGuid ?? null,
+        vatByRates4And2: item.vatByRates4And2 ?? null,
+        okpoCode: item.okpoCode ?? null,
+        registrationNumber: item.registrationNumber ?? null,
+        taxNumber: item.taxNumber ?? null,
+        internationalName: item.internationalName ?? null,
+        isPredefined: item.isPredefined ?? null,
+        predefinedDataName: item.predefinedDataName ?? null,
+        isActive: item.isActive ?? true,
+        sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+        lastSyncedAt: syncedAt,
+      };
       const counterparty = await tx.counterparty.upsert({
         where: { guid: item.guid },
-        create: {
-          guid: item.guid,
-          name: item.name,
-          fullName: item.fullName ?? undefined,
-          inn: normalizeInn(item.inn),
-          kpp: normalizeKpp(item.kpp),
-          phone: normalizePhone(item.phone),
-          email: normalizeCounterpartyString(item.email),
-          isActive: item.isActive ?? true,
-          sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
-        update: {
-          name: item.name,
-          fullName: item.fullName ?? undefined,
-          inn: normalizeInn(item.inn),
-          kpp: normalizeKpp(item.kpp),
-          phone: normalizePhone(item.phone),
-          email: normalizeCounterpartyString(item.email),
-          isActive: item.isActive ?? true,
-          sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
+        create: { guid: item.guid, ...counterpartyData },
+        update: counterpartyData,
         select: { id: true },
       });
 
@@ -1019,6 +1140,19 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
         counterpartyId = counterparty.id;
       }
 
+      let organizationId: string | null = null;
+      if (item.agreement.organizationGuid) {
+        const organization = await tx.organization.findUnique({
+          where: { guid: item.agreement.organizationGuid },
+          select: { id: true },
+        });
+        if (!organization) {
+          summary.blocked.push({ stageId: stage.id, message: `Organization ${item.agreement.organizationGuid} not found` });
+          continue;
+        }
+        organizationId = organization.id;
+      }
+
       let priceTypeId: string | null = null;
       if (item.priceType) {
         const priceType = await tx.priceType.upsert({
@@ -1059,31 +1193,71 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
           summary.blocked.push({ stageId: stage.id, message: `Counterparty ${item.contract.counterpartyGuid} not found` });
           continue;
         }
+        let contractOrganizationId = organizationId;
+        if (item.contract.organizationGuid && item.contract.organizationGuid !== item.agreement.organizationGuid) {
+          const contractOrganization = await tx.organization.findUnique({
+            where: { guid: item.contract.organizationGuid },
+            select: { id: true },
+          });
+          if (!contractOrganization) {
+            summary.blocked.push({ stageId: stage.id, message: `Organization ${item.contract.organizationGuid} not found` });
+            continue;
+          }
+          contractOrganizationId = contractOrganization.id;
+        }
+        const contractData = {
+          counterpartyId,
+          organizationId: contractOrganizationId,
+          dataVersion: item.contract.dataVersion ?? null,
+          name: item.contract.name ?? null,
+          printName: item.contract.printName ?? null,
+          number: item.contract.number,
+          date: item.contract.date,
+          validFrom: item.contract.validFrom ?? null,
+          validTo: item.contract.validTo ?? null,
+          partnerGuid: item.contract.partnerGuid ?? null,
+          bankAccountGuid: item.contract.bankAccountGuid ?? null,
+          counterpartyBankAccountGuid: item.contract.counterpartyBankAccountGuid ?? null,
+          contactPersonGuid: item.contract.contactPersonGuid ?? null,
+          departmentGuid: item.contract.departmentGuid ?? null,
+          managerGuid: item.contract.managerGuid ?? null,
+          cashFlowItemGuid: item.contract.cashFlowItemGuid ?? null,
+          businessOperation: item.contract.businessOperation ?? null,
+          financialAccountingGroupGuid: item.contract.financialAccountingGroupGuid ?? null,
+          activityDirectionGuid: item.contract.activityDirectionGuid ?? null,
+          currency: item.contract.currency ?? null,
+          currencyGuid: item.contract.currencyGuid ?? null,
+          status: item.contract.status ?? null,
+          contractType: item.contract.contractType ?? null,
+          purpose: item.contract.purpose ?? null,
+          isAgreed: item.contract.isAgreed ?? null,
+          hasPaymentTerm: item.contract.hasPaymentTerm ?? null,
+          paymentTermDays: item.contract.paymentTermDays ?? null,
+          settlementProcedure: item.contract.settlementProcedure ?? null,
+          limitDebtAmount: item.contract.limitDebtAmount ?? null,
+          amount: toNullableDecimal(item.contract.amount),
+          allowedDebtAmount: toNullableDecimal(item.contract.allowedDebtAmount),
+          forbidOverdueDebt: item.contract.forbidOverdueDebt ?? null,
+          vatTaxation: item.contract.vatTaxation ?? null,
+          vatRate: item.contract.vatRate ?? null,
+          vatDefinedInDocument: item.contract.vatDefinedInDocument ?? null,
+          deliveryMethod: item.contract.deliveryMethod ?? null,
+          carrierPartnerGuid: item.contract.carrierPartnerGuid ?? null,
+          deliveryZoneGuid: item.contract.deliveryZoneGuid ?? null,
+          deliveryTimeFrom: item.contract.deliveryTimeFrom ?? null,
+          deliveryTimeTo: item.contract.deliveryTimeTo ?? null,
+          deliveryAddress: item.contract.deliveryAddress ?? null,
+          deliveryAddressFields: item.contract.deliveryAddressFields ?? null,
+          additionalDeliveryInfo: item.contract.additionalDeliveryInfo ?? null,
+          isActive: (item.contract.isActive ?? true) && !isClosedContractStatus(item.contract.status),
+          comment: item.contract.comment ?? null,
+          sourceUpdatedAt: item.contract.sourceUpdatedAt ?? syncedAt,
+          lastSyncedAt: syncedAt,
+        };
         const contract = await tx.clientContract.upsert({
           where: { guid: item.contract.guid },
-          create: {
-            guid: item.contract.guid,
-            counterpartyId,
-            number: item.contract.number,
-            date: item.contract.date,
-            validFrom: item.contract.validFrom ?? null,
-            validTo: item.contract.validTo ?? null,
-            isActive: item.contract.isActive ?? true,
-            comment: item.contract.comment ?? undefined,
-            sourceUpdatedAt: item.contract.sourceUpdatedAt ?? syncedAt,
-            lastSyncedAt: syncedAt,
-          },
-          update: {
-            counterpartyId,
-            number: item.contract.number,
-            date: item.contract.date,
-            validFrom: item.contract.validFrom ?? null,
-            validTo: item.contract.validTo ?? null,
-            isActive: item.contract.isActive ?? true,
-            comment: item.contract.comment ?? undefined,
-            sourceUpdatedAt: item.contract.sourceUpdatedAt ?? syncedAt,
-            lastSyncedAt: syncedAt,
-          },
+          create: { guid: item.contract.guid, ...contractData },
+          update: contractData,
           select: { id: true },
         });
         contractId = contract.id;
@@ -1112,31 +1286,62 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
         warehouseId = warehouse.id;
       }
 
+      const agreementData = {
+        name: item.agreement.name,
+        number: item.agreement.number ?? null,
+        date: item.agreement.date ?? null,
+        counterpartyId,
+        organizationId,
+        contractId,
+        priceTypeId,
+        warehouseId,
+        currency: item.agreement.currency ?? null,
+        dataVersion: item.agreement.dataVersion ?? null,
+        partnerGuid: item.agreement.partnerGuid ?? null,
+        partnerSegmentGuid: item.agreement.partnerSegmentGuid ?? null,
+        paymentScheduleGuid: item.agreement.paymentScheduleGuid ?? null,
+        documentAmount: toNullableDecimal(item.agreement.documentAmount),
+        isTemplate: item.agreement.isTemplate ?? null,
+        deliveryTerm: item.agreement.deliveryTerm ?? null,
+        priceIncludesVat: item.agreement.priceIncludesVat ?? null,
+        usedBySalesRepresentatives: item.agreement.usedBySalesRepresentatives ?? null,
+        parentAgreementGuid: item.agreement.parentAgreementGuid ?? null,
+        nomenclatureSegmentGuid: item.agreement.nomenclatureSegmentGuid ?? null,
+        validFrom: item.agreement.validFrom ?? null,
+        validTo: item.agreement.validTo ?? null,
+        comment: item.agreement.comment ?? null,
+        isRegular: item.agreement.isRegular ?? null,
+        period: item.agreement.period ?? null,
+        periodCount: item.agreement.periodCount ?? null,
+        status: item.agreement.status ?? null,
+        isAgreed: item.agreement.isAgreed ?? null,
+        managerGuid: item.agreement.managerGuid ?? null,
+        businessOperation: item.agreement.businessOperation ?? null,
+        manualDiscountPercent: toNullableDecimal(item.agreement.manualDiscountPercent),
+        manualMarkupPercent: toNullableDecimal(item.agreement.manualMarkupPercent),
+        availableForExternalUsers: item.agreement.availableForExternalUsers ?? null,
+        usesCounterpartyContracts: item.agreement.usesCounterpartyContracts ?? null,
+        limitManualDiscounts: item.agreement.limitManualDiscounts ?? null,
+        paymentForm: item.agreement.paymentForm ?? null,
+        contactPersonGuid: item.agreement.contactPersonGuid ?? null,
+        settlementProcedure: item.agreement.settlementProcedure ?? null,
+        priceCalculationVariant: item.agreement.priceCalculationVariant ?? null,
+        minOrderAmount: toNullableDecimal(item.agreement.minOrderAmount),
+        orderFrequency: item.agreement.orderFrequency ?? null,
+        individualPriceTypeGuid: item.agreement.individualPriceTypeGuid ?? null,
+        settlementCurrency: item.agreement.settlementCurrency ?? null,
+        paymentInCurrency: item.agreement.paymentInCurrency ?? null,
+        financialAccountingGroupGuid: item.agreement.financialAccountingGroupGuid ?? null,
+        cashFlowItemGuid: item.agreement.cashFlowItemGuid ?? null,
+        activityDirectionGuid: item.agreement.activityDirectionGuid ?? null,
+        isActive: (item.agreement.isActive ?? true) && !isClosedAgreementStatus(item.agreement.status),
+        sourceUpdatedAt: item.agreement.sourceUpdatedAt ?? syncedAt,
+        lastSyncedAt: syncedAt,
+      };
       await tx.clientAgreement.upsert({
         where: { guid: item.agreement.guid },
-        create: {
-          guid: item.agreement.guid,
-          name: item.agreement.name,
-          counterpartyId,
-          contractId,
-          priceTypeId,
-          warehouseId,
-          currency: item.agreement.currency ?? undefined,
-          isActive: item.agreement.isActive ?? true,
-          sourceUpdatedAt: item.agreement.sourceUpdatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
-        update: {
-          name: item.agreement.name,
-          counterpartyId,
-          contractId,
-          priceTypeId,
-          warehouseId,
-          currency: item.agreement.currency ?? undefined,
-          isActive: item.agreement.isActive ?? true,
-          sourceUpdatedAt: item.agreement.sourceUpdatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
+        create: { guid: item.agreement.guid, ...agreementData },
+        update: agreementData,
       });
 
       summary.resolvedStageIds.push(stage.id);
@@ -1144,6 +1349,217 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
       summary.errors.push({
         stageId: stage.id,
         message: error instanceof Error ? error.message : 'Failed to apply agreement',
+      });
+    }
+  }
+
+  return summary;
+}
+
+async function applyStagedContracts(tx: TxClient, sessionId: string, syncedAt: Date): Promise<ApplySummary> {
+  const stages = await tx.onecStageContract.findMany({ where: { sessionId }, orderBy: { lastImportedAt: 'asc' } });
+  const summary: ApplySummary = { resolvedStageIds: [], blocked: [], errors: [] };
+
+  for (const stage of stages) {
+    const item = stage.payload as unknown as ContractItem;
+    try {
+      const counterparty = await tx.counterparty.findUnique({
+        where: { guid: item.counterpartyGuid },
+        select: { id: true },
+      });
+      if (!counterparty) {
+        summary.blocked.push({ stageId: stage.id, message: `Counterparty ${item.counterpartyGuid} not found` });
+        continue;
+      }
+
+      let organizationId: string | null = null;
+      if (item.organizationGuid) {
+        const organization = await tx.organization.findUnique({
+          where: { guid: item.organizationGuid },
+          select: { id: true },
+        });
+        if (!organization) {
+          summary.blocked.push({ stageId: stage.id, message: `Organization ${item.organizationGuid} not found` });
+          continue;
+        }
+        organizationId = organization.id;
+      }
+
+      const data = {
+        counterpartyId: counterparty.id,
+        organizationId,
+        dataVersion: item.dataVersion ?? null,
+        name: item.name ?? null,
+        printName: item.printName ?? null,
+        number: item.number,
+        date: item.date,
+        validFrom: item.validFrom ?? null,
+        validTo: item.validTo ?? null,
+        partnerGuid: item.partnerGuid ?? null,
+        bankAccountGuid: item.bankAccountGuid ?? null,
+        counterpartyBankAccountGuid: item.counterpartyBankAccountGuid ?? null,
+        contactPersonGuid: item.contactPersonGuid ?? null,
+        departmentGuid: item.departmentGuid ?? null,
+        managerGuid: item.managerGuid ?? null,
+        cashFlowItemGuid: item.cashFlowItemGuid ?? null,
+        businessOperation: item.businessOperation ?? null,
+        financialAccountingGroupGuid: item.financialAccountingGroupGuid ?? null,
+        activityDirectionGuid: item.activityDirectionGuid ?? null,
+        currency: item.currency ?? null,
+        currencyGuid: item.currencyGuid ?? null,
+        status: item.status ?? null,
+        contractType: item.contractType ?? null,
+        purpose: item.purpose ?? null,
+        isAgreed: item.isAgreed ?? null,
+        hasPaymentTerm: item.hasPaymentTerm ?? null,
+        paymentTermDays: item.paymentTermDays ?? null,
+        settlementProcedure: item.settlementProcedure ?? null,
+        limitDebtAmount: item.limitDebtAmount ?? null,
+        amount: toNullableDecimal(item.amount),
+        allowedDebtAmount: toNullableDecimal(item.allowedDebtAmount),
+        forbidOverdueDebt: item.forbidOverdueDebt ?? null,
+        vatTaxation: item.vatTaxation ?? null,
+        vatRate: item.vatRate ?? null,
+        vatDefinedInDocument: item.vatDefinedInDocument ?? null,
+        deliveryMethod: item.deliveryMethod ?? null,
+        carrierPartnerGuid: item.carrierPartnerGuid ?? null,
+        deliveryZoneGuid: item.deliveryZoneGuid ?? null,
+        deliveryTimeFrom: item.deliveryTimeFrom ?? null,
+        deliveryTimeTo: item.deliveryTimeTo ?? null,
+        deliveryAddress: item.deliveryAddress ?? null,
+        deliveryAddressFields: item.deliveryAddressFields ?? null,
+        additionalDeliveryInfo: item.additionalDeliveryInfo ?? null,
+        isActive: (item.isActive ?? true) && !isClosedContractStatus(item.status),
+        comment: item.comment ?? null,
+        sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+        lastSyncedAt: syncedAt,
+      };
+
+      await tx.clientContract.upsert({
+        where: { guid: item.guid },
+        create: { guid: item.guid, ...data },
+        update: data,
+      });
+
+      summary.resolvedStageIds.push(stage.id);
+    } catch (error) {
+      summary.errors.push({
+        stageId: stage.id,
+        message: error instanceof Error ? error.message : 'Failed to apply contract',
+      });
+    }
+  }
+
+  return summary;
+}
+
+async function applyCounterpartyDefaultLinks(
+  tx: TxClient,
+  sessionId: string,
+  syncedAt: Date
+): Promise<ApplySummary> {
+  const stages = await tx.onecStageCounterparty.findMany({
+    where: { sessionId },
+    orderBy: { lastImportedAt: 'asc' },
+  });
+  const summary: ApplySummary = emptyApplySummary();
+
+  for (const stage of stages) {
+    const item = stage.payload as unknown as CounterpartyItem;
+    try {
+      const counterparty = await tx.counterparty.findUnique({
+        where: { guid: item.guid },
+        select: { id: true },
+      });
+
+      if (!counterparty) {
+        summary.blocked.push({ stageId: stage.id, message: `Counterparty ${item.guid} not found` });
+        continue;
+      }
+
+      const hasDefaultField = (field: keyof CounterpartyItem) => Object.prototype.hasOwnProperty.call(item, field);
+      const updateData: Prisma.CounterpartyUncheckedUpdateInput = { lastSyncedAt: syncedAt };
+
+      if (hasDefaultField('defaultAgreementGuid')) {
+        let defaultAgreementId: string | null = null;
+        if (item.defaultAgreementGuid) {
+          const agreement = await tx.clientAgreement.findUnique({
+            where: { guid: item.defaultAgreementGuid },
+            select: { id: true },
+          });
+          if (!agreement) {
+            summary.blocked.push({ stageId: stage.id, message: `Default agreement ${item.defaultAgreementGuid} not found` });
+            continue;
+          }
+          defaultAgreementId = agreement.id;
+        }
+        updateData.defaultAgreementId = defaultAgreementId;
+      }
+
+      if (hasDefaultField('defaultContractGuid')) {
+        let defaultContractId: string | null = null;
+        if (item.defaultContractGuid) {
+          const contract = await tx.clientContract.findUnique({
+            where: { guid: item.defaultContractGuid },
+            select: { id: true },
+          });
+          if (!contract) {
+            summary.blocked.push({ stageId: stage.id, message: `Default contract ${item.defaultContractGuid} not found` });
+            continue;
+          }
+          defaultContractId = contract.id;
+        }
+        updateData.defaultContractId = defaultContractId;
+      }
+
+      if (hasDefaultField('defaultWarehouseGuid')) {
+        let defaultWarehouseId: string | null = null;
+        if (item.defaultWarehouseGuid) {
+          const warehouse = await tx.warehouse.findUnique({
+            where: { guid: item.defaultWarehouseGuid },
+            select: { id: true },
+          });
+          if (!warehouse) {
+            summary.blocked.push({ stageId: stage.id, message: `Default warehouse ${item.defaultWarehouseGuid} not found` });
+            continue;
+          }
+          defaultWarehouseId = warehouse.id;
+        }
+        updateData.defaultWarehouseId = defaultWarehouseId;
+      }
+
+      if (hasDefaultField('defaultDeliveryAddressGuid')) {
+        let defaultDeliveryAddressId: string | null = null;
+        if (item.defaultDeliveryAddressGuid) {
+          const deliveryAddress = await tx.deliveryAddress.findFirst({
+            where: {
+              guid: item.defaultDeliveryAddressGuid,
+              counterpartyId: counterparty.id,
+            },
+            select: { id: true },
+          });
+          if (!deliveryAddress) {
+            summary.blocked.push({
+              stageId: stage.id,
+              message: `Default delivery address ${item.defaultDeliveryAddressGuid} not found`,
+            });
+            continue;
+          }
+          defaultDeliveryAddressId = deliveryAddress.id;
+        }
+        updateData.defaultDeliveryAddressId = defaultDeliveryAddressId;
+      }
+
+      await tx.counterparty.update({
+        where: { id: counterparty.id },
+        data: updateData,
+      });
+
+      summary.resolvedStageIds.push(stage.id);
+    } catch (error) {
+      summary.errors.push({
+        stageId: stage.id,
+        message: error instanceof Error ? error.message : 'Failed to apply counterparty default links',
       });
     }
   }
@@ -1172,7 +1588,28 @@ async function applyStagedProductPrices(
       }
 
       let priceTypeId: string | null = null;
-      if (item.priceTypeGuid) {
+      if (item.priceType) {
+        const priceType = await tx.priceType.upsert({
+          where: { guid: item.priceType.guid },
+          create: {
+            guid: item.priceType.guid,
+            name: item.priceType.name,
+            code: item.priceType.code,
+            isActive: item.priceType.isActive ?? true,
+            sourceUpdatedAt: item.priceType.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          },
+          update: {
+            name: item.priceType.name,
+            code: item.priceType.code,
+            isActive: item.priceType.isActive ?? true,
+            sourceUpdatedAt: item.priceType.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          },
+          select: { id: true },
+        });
+        priceTypeId = priceType.id;
+      } else if (item.priceTypeGuid) {
         const priceType = await tx.priceType.findUnique({
           where: { guid: item.priceTypeGuid },
           select: { id: true },
@@ -1193,12 +1630,13 @@ async function applyStagedProductPrices(
         endDate: item.endDate ?? null,
         minQty: toDecimal(item.minQty),
         isActive: item.isActive ?? true,
-        sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+        sourceUpdatedAt: item.sourceUpdatedAt ?? item.startDate ?? syncedAt,
         lastSyncedAt: syncedAt,
       };
 
-      const where: Prisma.ProductPriceWhereUniqueInput = item.guid
-        ? { guid: item.guid }
+      const itemGuid = optionalGuid(item.guid);
+      const where: Prisma.ProductPriceWhereUniqueInput = itemGuid
+        ? { guid: itemGuid }
         : ({
             productId_priceTypeId_startDate: {
               productId: product.id,
@@ -1209,7 +1647,7 @@ async function applyStagedProductPrices(
 
       await tx.productPrice.upsert({
         where,
-        create: { guid: item.guid ?? null, ...data },
+        create: { guid: itemGuid ?? null, ...data },
         update: data,
       });
 
@@ -1299,8 +1737,9 @@ async function applyStagedSpecialPrices(
         lastSyncedAt: syncedAt,
       };
 
-      const where: Prisma.SpecialPriceWhereUniqueInput = item.guid
-        ? { guid: item.guid }
+      const itemGuid = optionalGuid(item.guid);
+      const where: Prisma.SpecialPriceWhereUniqueInput = itemGuid
+        ? { guid: itemGuid }
         : ({
             productId_counterpartyId_agreementId_priceTypeId_startDate: {
               productId: product.id,
@@ -1313,7 +1752,7 @@ async function applyStagedSpecialPrices(
 
       await tx.specialPrice.upsert({
         where,
-        create: { guid: item.guid ?? null, ...data },
+        create: { guid: itemGuid ?? null, ...data },
         update: data,
       });
 
@@ -1500,6 +1939,12 @@ async function updateStageStatuses(
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
+      case 'contracts':
+        await prisma.onecStageContract.updateMany({
+          where: { sessionId, id: { in: resolvedIds } },
+          data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
+        });
+        break;
       case 'agreements':
         await prisma.onecStageAgreement.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
@@ -1540,6 +1985,9 @@ async function updateStageStatuses(
         return;
       case 'counterparties':
         await prisma.onecStageCounterparty.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        return;
+      case 'contracts':
+        await prisma.onecStageContract.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'agreements':
         await prisma.onecStageAgreement.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
@@ -1618,6 +2066,9 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
             case 'counterparties':
               summary = await applyStagedCounterparties(tx, session.id, syncedAt);
               break;
+            case 'contracts':
+              summary = await applyStagedContracts(tx, session.id, syncedAt);
+              break;
             case 'agreements':
               summary = await applyStagedAgreements(tx, session.id, syncedAt);
               break;
@@ -1632,6 +2083,14 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
               break;
           }
           summaries.set(entity, summary);
+        }
+
+        if (entities.includes('counterparties')) {
+          const defaultsSummary = await applyCounterpartyDefaultLinks(tx, session.id, syncedAt);
+          summaries.set(
+            'counterparties',
+            mergeApplySummaries(summaries.get('counterparties') ?? emptyApplySummary(), defaultsSummary)
+          );
         }
 
         const blockedCount = [...summaries.values()].reduce((sum, item) => sum + item.blocked.length, 0);
