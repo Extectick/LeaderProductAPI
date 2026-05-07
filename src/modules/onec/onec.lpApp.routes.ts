@@ -8,6 +8,7 @@ import { ErrorCodes, errorResponse, successResponse } from '../../utils/apiRespo
 import {
   getOnecLpAppTransportTask,
   getOnecLpAppTransportTasks,
+  getOnecLpAppPhysicalPersons,
   getOnecLpAppUsers,
   OnecLpAppConfigError,
   OnecLpAppHttpError,
@@ -92,6 +93,11 @@ type DriverFilterInput = {
   driverPhysicalPersonGuid?: string;
 };
 
+type CurrentDriverOnecBinding = {
+  driverUserGuid: string | null;
+  driverPhysicalPersonGuid: string | null;
+};
+
 const DEPARTURE_POINT_PRESETS = {
   omsk: {
     key: 'omsk',
@@ -122,19 +128,23 @@ function canManageTransportTasks(req: AuthRequest<any, any, any, any>) {
   );
 }
 
-async function loadEmployeeOnecUserGuid(userId: number) {
+async function loadEmployeeOnecBinding(userId: number): Promise<CurrentDriverOnecBinding> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
       employeeProfile: {
         select: {
           onecUserGuid: true,
+          onecPhysicalPersonGuid: true,
         },
       },
     },
   });
 
-  return user?.employeeProfile?.onecUserGuid?.trim() || null;
+  return {
+    driverUserGuid: user?.employeeProfile?.onecUserGuid?.trim() || null,
+    driverPhysicalPersonGuid: user?.employeeProfile?.onecPhysicalPersonGuid?.trim() || null,
+  };
 }
 
 function asOnecQuery(query: TransportTasksQuery): OnecLpAppQuery {
@@ -175,9 +185,9 @@ async function buildRouteMutationPayload(
       payload.driverPhysicalPersonGuid = body.driverPhysicalPersonGuid;
     }
   } else {
-    const driverUserGuid = await resolveDriverUserGuidForCurrentUser(req, res);
-    if (!driverUserGuid) return undefined;
-    payload.driverUserGuid = driverUserGuid;
+    const binding = await resolveDriverBindingForCurrentUser(req, res);
+    if (!binding) return undefined;
+    applyDriverBinding(payload, binding);
   }
 
   return payload;
@@ -255,8 +265,34 @@ function handleLpAppError(res: express.Response, error: unknown, fallbackMessage
   return res.status(500).json(errorResponse(fallbackMessage, ErrorCodes.INTERNAL_ERROR));
 }
 
+function applyDriverBinding(target: DriverFilterInput, binding: CurrentDriverOnecBinding) {
+  delete target.driverGuid;
+  delete target.driverUserGuid;
+  delete target.driverPhysicalPersonGuid;
+
+  if (binding.driverPhysicalPersonGuid) {
+    target.driverPhysicalPersonGuid = binding.driverPhysicalPersonGuid;
+    return;
+  }
+
+  if (binding.driverUserGuid) {
+    target.driverUserGuid = binding.driverUserGuid;
+  }
+}
+
+async function resolveDriverBindingForCurrentUser(req: AuthRequest<any, any, any, any>, res: express.Response) {
+  const binding = await loadEmployeeOnecBinding(req.user!.userId);
+  if (!binding.driverPhysicalPersonGuid && !binding.driverUserGuid) {
+    res
+      .status(409)
+      .json(errorResponse('Для пользователя не задан GUID физлица или пользователя 1С', ErrorCodes.CONFLICT));
+    return null;
+  }
+  return binding;
+}
+
 async function resolveDriverUserGuidForCurrentUser(req: AuthRequest<any, any, any, any>, res: express.Response) {
-  const driverUserGuid = await loadEmployeeOnecUserGuid(req.user!.userId);
+  const driverUserGuid = (await loadEmployeeOnecBinding(req.user!.userId)).driverUserGuid;
   if (!driverUserGuid) {
     res
       .status(409)
@@ -281,6 +317,15 @@ router.get('/users', authorizePermissions(['manage_transport_tasks']), async (_r
     return res.json(successResponse(payload, 'Пользователи 1С'));
   } catch (error) {
     return handleLpAppError(res, error, 'Ошибка получения пользователей 1С');
+  }
+});
+
+router.get('/physical-persons', authorizePermissions(['manage_transport_tasks']), async (_req: AuthRequest, res) => {
+  try {
+    const payload = await getOnecLpAppPhysicalPersons();
+    return res.json(successResponse(payload, 'Физические лица 1С'));
+  } catch (error) {
+    return handleLpAppError(res, error, 'Ошибка получения физических лиц 1С');
   }
 });
 
@@ -377,11 +422,9 @@ router.get(
     try {
       const query = asOnecQuery(parsed.data);
       if (!canManageTransportTasks(req) || !hasDriverFilter(parsed.data)) {
-        const driverUserGuid = await resolveDriverUserGuidForCurrentUser(req, res);
-        if (!driverUserGuid) return undefined;
-        query.driverUserGuid = driverUserGuid;
-        delete query.driverGuid;
-        delete query.driverPhysicalPersonGuid;
+        const binding = await resolveDriverBindingForCurrentUser(req, res);
+        if (!binding) return undefined;
+        applyDriverBinding(query, binding);
       }
 
       const payload = await getOnecLpAppTransportTasks(query);
@@ -409,11 +452,9 @@ router.get(
     try {
       const query = asOnecQuery(parsed.data);
       if (!canManageTransportTasks(req) || !hasDriverFilter(parsed.data)) {
-        const driverUserGuid = await resolveDriverUserGuidForCurrentUser(req, res);
-        if (!driverUserGuid) return undefined;
-        query.driverUserGuid = driverUserGuid;
-        delete query.driverGuid;
-        delete query.driverPhysicalPersonGuid;
+        const binding = await resolveDriverBindingForCurrentUser(req, res);
+        if (!binding) return undefined;
+        applyDriverBinding(query, binding);
       }
 
       const payload = await getOnecLpAppTransportTask(params.data.taskGuid, query);

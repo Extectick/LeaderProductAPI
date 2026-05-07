@@ -39,6 +39,7 @@ export async function createUserWithRole(
       data: {
         userId: user.id,
         departmentId: dept.id,
+        activeDepartmentId: dept.id,
         status: ProfileStatus.ACTIVE,
       },
     });

@@ -271,6 +271,14 @@ export type UpdateUserDepartmentResponse = SuccessResponse<{
   message: string;
 }> | ErrorResponse;
 
+export type UpdateActiveDepartmentRequest = {
+  departmentId: number | null;
+};
+
+export type UpdateActiveDepartmentResponse = SuccessResponse<{
+  message: string;
+}> | ErrorResponse;
+
 export type AssignDepartmentManagerRequest = {
   userId: string;
   departmentId: string;

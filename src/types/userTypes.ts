@@ -137,6 +137,10 @@ export type employeeProfile = {
     id: number;
     name: string;
     } | null;
+    activeDepartment: {
+    id: number;
+    name: string;
+    } | null;
     departmentRoles: Array<{
     id: number;
     role: {

@@ -13,6 +13,8 @@ import {
   UserProfileResponse,
   UpdateUserDepartmentRequest,
   UpdateUserDepartmentResponse,
+  UpdateActiveDepartmentRequest,
+  UpdateActiveDepartmentResponse,
   AssignDepartmentManagerRequest,
   AssignDepartmentManagerResponse,
   CreateClientProfileRequest,
@@ -64,7 +66,17 @@ const USER_LIST_SELECT = {
   role: { select: { id: true, name: true, displayName: true } },
   clientProfile: { select: { avatarUrl: true } },
   supplierProfile: { select: { avatarUrl: true } },
-  employeeProfile: { select: { departmentId: true, avatarUrl: true, onecUserGuid: true, onecPhysicalPersonGuid: true, department: { select: { id: true, name: true } } } },
+  employeeProfile: {
+    select: {
+      departmentId: true,
+      activeDepartmentId: true,
+      avatarUrl: true,
+      onecUserGuid: true,
+      onecPhysicalPersonGuid: true,
+      department: { select: { id: true, name: true } },
+      activeDepartment: { select: { id: true, name: true } },
+    },
+  },
 };
 
 const ADMIN_USER_LIST_SELECT = {
@@ -88,10 +100,12 @@ const ADMIN_USER_LIST_SELECT = {
     select: {
       status: true,
       departmentId: true,
+      activeDepartmentId: true,
       avatarUrl: true,
       onecUserGuid: true,
       onecPhysicalPersonGuid: true,
       department: { select: { id: true, name: true } },
+      activeDepartment: { select: { id: true, name: true } },
     },
   },
   _count: {
@@ -142,6 +156,29 @@ function resolveEmployeeModerationState(status: ProfileStatus | null | undefined
   if (status === 'ACTIVE') return 'EMPLOYEE_ACTIVE';
   if (status === 'BLOCKED') return 'EMPLOYEE_BLOCKED';
   return 'EMPLOYEE_PENDING';
+}
+
+async function ensureDepartmentExists(departmentId: number) {
+  const department = await prisma.department.findUnique({ where: { id: departmentId } });
+  if (!department) {
+    throw new Error('Department not found');
+  }
+  return department;
+}
+
+async function canUseDepartmentAsActive(userId: number, departmentId: number) {
+  const profile = await prisma.employeeProfile.findUnique({
+    where: { userId },
+    select: { departmentId: true },
+  });
+  if (!profile) return false;
+  if (profile.departmentId === departmentId) return true;
+
+  const departmentRole = await prisma.departmentRole.findFirst({
+    where: { userId, departmentId },
+    select: { id: true },
+  });
+  return Boolean(departmentRole);
 }
 
 type PermissionGroupView = {
@@ -361,8 +398,9 @@ router.put(
         );
       }
 
-      const department = await prisma.department.findUnique({ where: { id: departmentIdNum } });
-      if (!department) {
+      try {
+        await ensureDepartmentExists(departmentIdNum);
+      } catch {
         return res.status(404).json(
           errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND)
         );
@@ -370,7 +408,7 @@ router.put(
 
       await prisma.employeeProfile.updateMany({
         where: { userId: Number(userId) },
-        data: { departmentId: departmentIdNum },
+        data: { departmentId: departmentIdNum, activeDepartmentId: departmentIdNum },
       });
 
       res.json(successResponse({ message: 'Отдел пользователя обновлен' }));
@@ -473,8 +511,9 @@ router.put(
         );
       }
 
-      const department = await prisma.department.findUnique({ where: { id: departmentIdNum } });
-      if (!department) {
+      try {
+        await ensureDepartmentExists(departmentIdNum);
+      } catch {
         return res.status(404).json(
           errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND)
         );
@@ -482,7 +521,7 @@ router.put(
 
       await prisma.employeeProfile.updateMany({
         where: { userId: userIdNum },
-        data: { departmentId: departmentIdNum },
+        data: { departmentId: departmentIdNum, activeDepartmentId: departmentIdNum },
       });
 
       res.json(successResponse({ message: `Отдел пользователя ${userId} обновлен` }));
@@ -500,6 +539,178 @@ router.put(
           errorResponse('Ошибка обновления отдела', ErrorCodes.INTERNAL_ERROR)
         );
       }
+    }
+  }
+);
+
+router.put(
+  '/me/active-department',
+  authenticateToken,
+  checkUserStatus,
+  auditLog('Пользователь обновил активный отдел'),
+  async (
+    req: AuthRequest<{}, UpdateActiveDepartmentResponse, UpdateActiveDepartmentRequest>,
+    res: express.Response<UpdateActiveDepartmentResponse>
+  ) => {
+    try {
+      const userId = req.user!.userId;
+      const { departmentId } = req.body;
+
+      const profile = await prisma.employeeProfile.findUnique({
+        where: { userId },
+        select: { userId: true },
+      });
+      if (!profile) {
+        return res.status(404).json(
+          errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
+      if (departmentId === null) {
+        await prisma.employeeProfile.update({
+          where: { userId },
+          data: { activeDepartmentId: null },
+        });
+        return res.json(successResponse({ message: 'Активный отдел сброшен' }));
+      }
+
+      const departmentIdNum = Number(departmentId);
+      if (Number.isNaN(departmentIdNum)) {
+        return res.status(400).json(
+          errorResponse('Некорректный ID отдела', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      try {
+        await ensureDepartmentExists(departmentIdNum);
+      } catch {
+        return res.status(404).json(
+          errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
+      const canUse = await canUseDepartmentAsActive(userId, departmentIdNum);
+      if (!canUse) {
+        return res.status(400).json(
+          errorResponse(
+            'Активным можно выбрать только основной отдел или отдел из дополнительных ролей',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      await prisma.employeeProfile.update({
+        where: { userId },
+        data: { activeDepartmentId: departmentIdNum },
+      });
+
+      return res.json(successResponse({ message: 'Активный отдел обновлен' }));
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        return res.status(500).json(
+          errorResponse(
+            'Ошибка обновления активного отдела',
+            ErrorCodes.INTERNAL_ERROR,
+            process.env.NODE_ENV === 'development' ? error : undefined
+          )
+        );
+      }
+      return res.status(500).json(
+        errorResponse('Ошибка обновления активного отдела', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
+);
+
+router.put(
+  '/:userId/active-department',
+  authenticateToken,
+  checkUserStatus,
+  authorizeRoles(['admin']),
+  auditLog('Админ обновил активный отдел пользователя'),
+  async (
+    req: AuthRequest<{ userId: string }, UpdateActiveDepartmentResponse, UpdateActiveDepartmentRequest>,
+    res: express.Response<UpdateActiveDepartmentResponse>
+  ) => {
+    try {
+      const userId = Number(req.params.userId);
+      const { departmentId } = req.body;
+
+      if (Number.isNaN(userId)) {
+        return res.status(400).json(
+          errorResponse('Некорректный ID пользователя', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+      if (!user) {
+        return res.status(404).json(
+          errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
+      const profile = await prisma.employeeProfile.findUnique({
+        where: { userId },
+        select: { userId: true },
+      });
+      if (!profile) {
+        return res.status(404).json(
+          errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
+      if (departmentId === null) {
+        await prisma.employeeProfile.update({
+          where: { userId },
+          data: { activeDepartmentId: null },
+        });
+        return res.json(successResponse({ message: `Активный отдел пользователя ${userId} сброшен` }));
+      }
+
+      const departmentIdNum = Number(departmentId);
+      if (Number.isNaN(departmentIdNum)) {
+        return res.status(400).json(
+          errorResponse('Некорректный ID отдела', ErrorCodes.VALIDATION_ERROR)
+        );
+      }
+
+      try {
+        await ensureDepartmentExists(departmentIdNum);
+      } catch {
+        return res.status(404).json(
+          errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND)
+        );
+      }
+
+      const canUse = await canUseDepartmentAsActive(userId, departmentIdNum);
+      if (!canUse) {
+        return res.status(400).json(
+          errorResponse(
+            'Активным можно выбрать только основной отдел или отдел из дополнительных ролей',
+            ErrorCodes.VALIDATION_ERROR
+          )
+        );
+      }
+
+      await prisma.employeeProfile.update({
+        where: { userId },
+        data: { activeDepartmentId: departmentIdNum },
+      });
+
+      return res.json(successResponse({ message: `Активный отдел пользователя ${userId} обновлен` }));
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        return res.status(500).json(
+          errorResponse(
+            'Ошибка обновления активного отдела',
+            ErrorCodes.INTERNAL_ERROR,
+            process.env.NODE_ENV === 'development' ? error : undefined
+          )
+        );
+      }
+      return res.status(500).json(
+        errorResponse('Ошибка обновления активного отдела', ErrorCodes.INTERNAL_ERROR)
+      );
     }
   }
 );
@@ -1074,6 +1285,7 @@ router.post(
         data: {
           userId,
           departmentId,
+          activeDepartmentId: departmentId,
         }
       });
 
@@ -1252,7 +1464,14 @@ router.delete(
       }
 
       // Снимаем ссылки, чтобы не нарушать FK (сотрудники, роли, обращения)
-      await prisma.employeeProfile.updateMany({ where: { departmentId }, data: { departmentId: null } });
+      await prisma.employeeProfile.updateMany({
+        where: { departmentId },
+        data: { departmentId: null, activeDepartmentId: null },
+      });
+      await prisma.employeeProfile.updateMany({
+        where: { activeDepartmentId: departmentId },
+        data: { activeDepartmentId: null },
+      });
       await prisma.departmentRole.deleteMany({ where: { departmentId } });
       // обращения, где отдел указан
       // Обнуляем ссылку на отдел в обращениях, чтобы не ломать FK
@@ -2171,6 +2390,8 @@ router.get(
               : null,
             departmentName: u.employeeProfile?.department?.name ?? null,
             departmentId: u.employeeProfile?.department?.id ?? null,
+            activeDepartmentName: u.employeeProfile?.activeDepartment?.name ?? null,
+            activeDepartmentId: u.employeeProfile?.activeDepartment?.id ?? null,
             onecUserGuid: u.employeeProfile?.onecUserGuid ?? null,
             onecPhysicalPersonGuid: u.employeeProfile?.onecPhysicalPersonGuid ?? null,
             employeeStatus,
@@ -2266,7 +2487,14 @@ router.get(
               : u.avatarUrl;
           const avatarUrl = await resolveObjectUrl(rawAvatar ?? null);
           const departmentName = u.employeeProfile?.department?.name ?? null;
-          return { ...u, avatarUrl, departmentName, phone: toApiPhoneString(u.phone) };
+          const activeDepartmentName = u.employeeProfile?.activeDepartment?.name ?? null;
+          return {
+            ...u,
+            avatarUrl,
+            departmentName,
+            activeDepartmentName,
+            phone: toApiPhoneString(u.phone),
+          };
         })
       );
       const presence = await getPresenceForUsers(usersWithAvatar.map((u) => u.id));
@@ -3194,13 +3422,20 @@ router.patch(
       if (req.body.departmentId !== undefined) {
         const depId = req.body.departmentId;
         if (depId === null) {
-          await prisma.employeeProfile.updateMany({ where: { userId }, data: { departmentId: null } });
+          await prisma.employeeProfile.updateMany({
+            where: { userId },
+            data: { departmentId: null, activeDepartmentId: null },
+          });
         } else {
-          const department = await prisma.department.findUnique({ where: { id: Number(depId) } });
-          if (!department) {
+          try {
+            await ensureDepartmentExists(Number(depId));
+          } catch {
             return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
           }
-          await prisma.employeeProfile.updateMany({ where: { userId }, data: { departmentId: Number(depId) } });
+          await prisma.employeeProfile.updateMany({
+            where: { userId },
+            data: { departmentId: Number(depId), activeDepartmentId: Number(depId) },
+          });
         }
       }
 
@@ -3848,12 +4083,15 @@ router.patch(
         if (departmentId !== undefined) {
           if (departmentId === null) {
             data.departmentId = null;
+            data.activeDepartmentId = null;
           } else {
-            const dep = await prisma.department.findUnique({ where: { id: Number(departmentId) } });
-            if (!dep) {
+            try {
+              await ensureDepartmentExists(Number(departmentId));
+            } catch {
               return res.status(404).json(errorResponse('Отдел не найден', ErrorCodes.NOT_FOUND));
             }
             data.departmentId = Number(departmentId);
+            data.activeDepartmentId = Number(departmentId);
           }
         }
 

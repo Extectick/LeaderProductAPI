@@ -181,7 +181,9 @@ model EmployeeProfile {
   userId    Int      @unique
   user      User     @relation(fields: [userId], references: [id])
   departmentId Int?
-  department Department? @relation(fields: [departmentId], references: [id])
+  department Department? @relation("EmployeeProfilePrimaryDepartment", fields: [departmentId], references: [id])
+  activeDepartmentId Int?
+  activeDepartment Department? @relation("EmployeeProfileActiveDepartment", fields: [activeDepartmentId], references: [id])
   appealLaborHourlyRate Decimal? @db.Decimal(8, 2)
   onecUserGuid String? @unique
   onecPhysicalPersonGuid String? @unique
@@ -192,6 +194,7 @@ model EmployeeProfile {
   updatedAt DateTime @updatedAt
 
   @@index([status, departmentId, userId])
+  @@index([activeDepartmentId])
 }
 
 model Department {
@@ -200,8 +203,10 @@ model Department {
   appealPaymentRequired Boolean @default(true)
   appealLaborHourlyRate Decimal @default(1.0) @db.Decimal(8, 2)
   departmentRoles DepartmentRole[]
-  employeeProfiles EmployeeProfile[]  // Добавлено обратное отношение
+  employeeProfiles EmployeeProfile[] @relation("EmployeeProfilePrimaryDepartment")
+  activeEmployeeProfiles EmployeeProfile[] @relation("EmployeeProfileActiveDepartment")
   serviceAccesses ServiceDepartmentAccess[]
+  serviceDepartmentRoleAccesses ServiceDepartmentRoleAccess[]
   appealAnalyticsThresholds AppealAnalyticsThreshold[]
 
   // Новые связи с обращениями
@@ -250,6 +255,7 @@ model User {
   refreshTokens      RefreshToken[]
   role               Role                @relation(fields: [roleId], references: [id])
   departmentRoles    DepartmentRole[]
+  serviceAccesses    ServiceUserAccess[]
   auditLogs          AuditLog[]          @relation("UserAuditLogs")
   clientProfile      ClientProfile?
   supplierProfile    SupplierProfile?
@@ -450,6 +456,7 @@ model Role {
   users         User[]
   departmentRoles DepartmentRole[]
   serviceAccesses ServiceRoleAccess[]
+  serviceDepartmentAccesses ServiceDepartmentRoleAccess[]
 
   parentRoleId  Int?              // Родительская роль для иерархии ролей
   parentRole    Role?             @relation("RoleHierarchy", fields: [parentRoleId], references: [id])
@@ -511,6 +518,8 @@ model Service {
 
   roleAccess      ServiceRoleAccess[]
   departmentAccess ServiceDepartmentAccess[]
+  departmentRoleAccess ServiceDepartmentRoleAccess[]
+  userAccess      ServiceUserAccess[]
   permissionGroup PermissionGroup?
 }
 
@@ -544,6 +553,41 @@ model ServiceDepartmentAccess {
 
   @@unique([serviceId, departmentId])
   @@index([departmentId])
+}
+
+model ServiceDepartmentRoleAccess {
+  id           Int      @id @default(autoincrement())
+  serviceId     Int
+  departmentId  Int
+  roleId        Int
+  visible       Boolean?
+  enabled       Boolean?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  service    Service    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, departmentId, roleId])
+  @@index([departmentId, roleId])
+  @@index([roleId])
+}
+
+model ServiceUserAccess {
+  id        Int      @id @default(autoincrement())
+  serviceId Int
+  userId    Int
+  visible   Boolean?
+  enabled   Boolean?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, userId])
+  @@index([userId])
 }
 
 model RefreshToken {

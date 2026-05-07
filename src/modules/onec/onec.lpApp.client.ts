@@ -153,6 +153,10 @@ export function getOnecLpAppUsers() {
   return callOnecLpApp('/users');
 }
 
+export function getOnecLpAppPhysicalPersons() {
+  return callOnecLpApp('/physical-persons');
+}
+
 export function getOnecLpAppTransportTasks(query: OnecLpAppQuery) {
   return callOnecLpApp('/transport-tasks', { query });
 }
