@@ -34,7 +34,7 @@ const USER_LIST_SELECT = {
     role: { select: { id: true, name: true, displayName: true } },
     clientProfile: { select: { avatarUrl: true } },
     supplierProfile: { select: { avatarUrl: true } },
-    employeeProfile: { select: { departmentId: true, avatarUrl: true, department: { select: { id: true, name: true } } } },
+    employeeProfile: { select: { departmentId: true, avatarUrl: true, onecUserGuid: true, onecPhysicalPersonGuid: true, department: { select: { id: true, name: true } } } },
 };
 const ADMIN_USER_LIST_SELECT = {
     id: true,
@@ -58,6 +58,8 @@ const ADMIN_USER_LIST_SELECT = {
             status: true,
             departmentId: true,
             avatarUrl: true,
+            onecUserGuid: true,
+            onecPhysicalPersonGuid: true,
             department: { select: { id: true, name: true } },
         },
     },
@@ -70,6 +72,7 @@ const ADMIN_USER_LIST_SELECT = {
 const SYSTEM_ROLE_NAME_SET = new Set(permissionCatalog_1.SYSTEM_ROLE_NAMES);
 const ADMIN_LIST_SORT_FIELDS = new Set(['createdAt', 'name', 'email', 'lastSeenAt', 'role', 'status']);
 const ADMIN_LIST_SORT_DIRS = new Set(['asc', 'desc']);
+const GUID_1C_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const ADMIN_MODERATION_STATE_SET = new Set([
     'NO_EMPLOYEE_PROFILE',
     'EMPLOYEE_PENDING',
@@ -81,6 +84,19 @@ function resolveRoleDisplayName(name, displayName) {
     if (explicit)
         return explicit;
     return permissionCatalog_1.DEFAULT_ROLE_DISPLAY_NAMES[name] || name;
+}
+function normalizeOptionalOnecGuid(value) {
+    if (value === undefined)
+        return undefined;
+    if (value === null)
+        return null;
+    const text = String(value).trim().toLowerCase();
+    if (!text)
+        return null;
+    return text;
+}
+function isValidOnecGuid(value) {
+    return value === undefined || value === null || GUID_1C_RE.test(value);
 }
 function resolveEmployeeModerationState(status) {
     if (!status)
@@ -1596,6 +1612,8 @@ router.get('/admin/list', auth_1.authenticateToken, checkUserStatus_1.checkUserS
                     : null,
                 departmentName: u.employeeProfile?.department?.name ?? null,
                 departmentId: u.employeeProfile?.department?.id ?? null,
+                onecUserGuid: u.employeeProfile?.onecUserGuid ?? null,
+                onecPhysicalPersonGuid: u.employeeProfile?.onecPhysicalPersonGuid ?? null,
                 employeeStatus,
                 moderationState,
                 isOnline: presence?.isOnline ?? false,
@@ -2363,6 +2381,22 @@ router.patch('/:userId', auth_1.authenticateToken, checkUserStatus_1.checkUserSt
                 await client_2.default.employeeProfile.updateMany({ where: { userId }, data: { departmentId: Number(depId) } });
             }
         }
+        const onecUserGuid = normalizeOptionalOnecGuid(req.body.onecUserGuid);
+        const onecPhysicalPersonGuid = normalizeOptionalOnecGuid(req.body.onecPhysicalPersonGuid);
+        if (!isValidOnecGuid(onecUserGuid) || !isValidOnecGuid(onecPhysicalPersonGuid)) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный GUID 1С', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        const employeePatch = {};
+        if (onecUserGuid !== undefined)
+            employeePatch.onecUserGuid = onecUserGuid;
+        if (onecPhysicalPersonGuid !== undefined)
+            employeePatch.onecPhysicalPersonGuid = onecPhysicalPersonGuid;
+        if (Object.keys(employeePatch).length) {
+            const updateResult = await client_2.default.employeeProfile.updateMany({ where: { userId }, data: employeePatch });
+            if (updateResult.count === 0) {
+                return res.status(404).json((0, apiResponse_1.errorResponse)('Профиль сотрудника не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+            }
+        }
         const profile = await (0, userService_1.getProfile)(userId);
         return res.json((0, apiResponse_1.successResponse)({ profile }));
     }
@@ -2370,6 +2404,9 @@ router.patch('/:userId', auth_1.authenticateToken, checkUserStatus_1.checkUserSt
         const isNotFound = error?.code === 'P2025';
         if (isNotFound) {
             return res.status(404).json((0, apiResponse_1.errorResponse)('Пользователь не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        if (error?.code === 'P2002') {
+            return res.status(409).json((0, apiResponse_1.errorResponse)('GUID 1С уже привязан к другому сотруднику', apiResponse_1.ErrorCodes.CONFLICT));
         }
         return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления пользователя', apiResponse_1.ErrorCodes.INTERNAL_ERROR, process.env.NODE_ENV === 'development' ? error : undefined));
     }

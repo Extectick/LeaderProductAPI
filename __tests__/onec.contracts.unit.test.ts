@@ -25,6 +25,13 @@ const prismaMock = {
   syncRunItem: {
     createMany: jest.fn(),
   },
+  onecSyncSession: {
+    findUnique: jest.fn(),
+    update: jest.fn(),
+  },
+  onecStageProductPrice: {
+    upsert: jest.fn(),
+  },
   order: {
     findUnique: jest.fn(),
     update: jest.fn(),
@@ -47,6 +54,9 @@ describe('1C route contracts', () => {
     prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
     prismaMock.syncRun.update.mockResolvedValue({});
     prismaMock.syncRunItem.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1' });
+    prismaMock.onecSyncSession.update.mockResolvedValue({});
+    prismaMock.onecStageProductPrice.upsert.mockResolvedValue({});
   });
 
   it('rejects non-export statuses on order ack', async () => {
@@ -67,12 +77,14 @@ describe('1C route contracts', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(response.body.version).toBe('1.0.0');
-    expect(response.body.entities).toHaveLength(7);
+    expect(response.body.version).toBe('1.3.0');
+    expect(response.body.entities).toHaveLength(9);
     expect(response.body.entities.map((entity: any) => entity.code)).toEqual([
       'nomenclature',
       'warehouses',
+      'organizations',
       'counterparties',
+      'contracts',
       'agreements',
       'product-prices',
       'special-prices',
@@ -97,6 +109,7 @@ describe('1C route contracts', () => {
 
     const response = await request(app).post('/api/1c/product-prices/batch').send({
       secret: 'test-secret',
+      sessionId: 'session-1',
       items: [
         {
           productGuid: 'PRODUCT_GUID',
@@ -109,8 +122,7 @@ describe('1C route contracts', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(response.body.results[0].key).toBe(
-      'productGuid=PRODUCT_GUID|priceTypeGuid=PRICE_TYPE_GUID|startDate=2025-01-01T00:00:00.000Z'
-    );
+    expect(response.body.results[0].key).toBe('PRODUCT_GUID||PRICE_TYPE_GUID||2025-01-01T00:00:00.000Z');
+    expect(prismaMock.onecStageProductPrice.upsert).toHaveBeenCalled();
   });
 });

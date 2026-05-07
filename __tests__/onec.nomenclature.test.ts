@@ -30,6 +30,13 @@ const prismaMock = {
   syncRunItem: {
     createMany: jest.fn(),
   },
+  onecSyncSession: {
+    findUnique: jest.fn(),
+    update: jest.fn(),
+  },
+  onecStageNomenclature: {
+    upsert: jest.fn(),
+  },
 };
 
 jest.mock('../src/prisma/client', () => ({
@@ -54,11 +61,15 @@ describe('POST /api/1c/nomenclature/batch', () => {
     prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
     prismaMock.syncRun.update.mockResolvedValue({});
     prismaMock.syncRunItem.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1' });
+    prismaMock.onecSyncSession.update.mockResolvedValue({});
+    prismaMock.onecStageNomenclature.upsert.mockResolvedValue({});
   });
 
   it('returns 200 and upserts entities on success', async () => {
     const response = await request(app).post('/api/1c/nomenclature/batch').send({
       secret: 'test-secret',
+      sessionId: 'session-1',
       items: [
         {
           guid: 'group-guid',
@@ -108,8 +119,12 @@ describe('POST /api/1c/nomenclature/batch', () => {
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
     expect(response.body.count).toBe(2);
-    expect(tx.productGroup.upsert).toHaveBeenCalled();
-    expect(tx.product.upsert).toHaveBeenCalled();
+    expect(prismaMock.onecStageNomenclature.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.onecSyncSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'session-1' },
+      })
+    );
   });
 
   it('returns 400 on validation error', async () => {

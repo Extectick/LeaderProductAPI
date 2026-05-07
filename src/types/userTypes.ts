@@ -131,6 +131,8 @@ export type employeeProfile = {
     lastSeenAt?: Date | string | null;
     isOnline?: boolean;
     status: ProfileStatus;
+    onecUserGuid?: string | null;
+    onecPhysicalPersonGuid?: string | null;
     department: {
     id: number;
     name: string;

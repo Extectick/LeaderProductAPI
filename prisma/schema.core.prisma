@@ -183,6 +183,8 @@ model EmployeeProfile {
   departmentId Int?
   department Department? @relation(fields: [departmentId], references: [id])
   appealLaborHourlyRate Decimal? @db.Decimal(8, 2)
+  onecUserGuid String? @unique
+  onecPhysicalPersonGuid String? @unique
   departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
   avatarUrl String?
   status    ProfileStatus @default(PENDING)
@@ -284,6 +286,7 @@ model User {
   notificationSettings UserNotificationSettings?
   appealMutes          AppealMute[]
   clientOrderSettings  ClientOrderUserSettings?
+  transportTaskSettings UserTransportTaskSettings?
   clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[]
 
   @@index([email])
@@ -886,6 +889,27 @@ model UserNotificationSettings {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+enum TransportTaskDepartureSource {
+  PRESET
+  CUSTOM_MAP
+  DEVICE_LOCATION
+}
+
+model UserTransportTaskSettings {
+  id              Int                          @id @default(autoincrement())
+  userId          Int                          @unique
+  user            User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  departureSource TransportTaskDepartureSource
+  presetKey       String?
+  latitude        Decimal                      @db.Decimal(10, 6)
+  longitude       Decimal                      @db.Decimal(10, 6)
+  address         String?
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
 
   @@index([userId])
 }

@@ -64,7 +64,7 @@ const USER_LIST_SELECT = {
   role: { select: { id: true, name: true, displayName: true } },
   clientProfile: { select: { avatarUrl: true } },
   supplierProfile: { select: { avatarUrl: true } },
-  employeeProfile: { select: { departmentId: true, avatarUrl: true, department: { select: { id: true, name: true } } } },
+  employeeProfile: { select: { departmentId: true, avatarUrl: true, onecUserGuid: true, onecPhysicalPersonGuid: true, department: { select: { id: true, name: true } } } },
 };
 
 const ADMIN_USER_LIST_SELECT = {
@@ -89,6 +89,8 @@ const ADMIN_USER_LIST_SELECT = {
       status: true,
       departmentId: true,
       avatarUrl: true,
+      onecUserGuid: true,
+      onecPhysicalPersonGuid: true,
       department: { select: { id: true, name: true } },
     },
   },
@@ -102,6 +104,7 @@ const ADMIN_USER_LIST_SELECT = {
 const SYSTEM_ROLE_NAME_SET = new Set<string>(SYSTEM_ROLE_NAMES);
 const ADMIN_LIST_SORT_FIELDS = new Set(['createdAt', 'name', 'email', 'lastSeenAt', 'role', 'status']);
 const ADMIN_LIST_SORT_DIRS = new Set(['asc', 'desc']);
+const GUID_1C_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 type AdminModerationState =
   | 'NO_EMPLOYEE_PROFILE'
@@ -120,6 +123,18 @@ function resolveRoleDisplayName(name: string, displayName?: string | null): stri
   const explicit = String(displayName || '').trim();
   if (explicit) return explicit;
   return DEFAULT_ROLE_DISPLAY_NAMES[name] || name;
+}
+
+function normalizeOptionalOnecGuid(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const text = String(value).trim().toLowerCase();
+  if (!text) return null;
+  return text;
+}
+
+function isValidOnecGuid(value: string | null | undefined) {
+  return value === undefined || value === null || GUID_1C_RE.test(value);
 }
 
 function resolveEmployeeModerationState(status: ProfileStatus | null | undefined): AdminModerationState {
@@ -2156,6 +2171,8 @@ router.get(
               : null,
             departmentName: u.employeeProfile?.department?.name ?? null,
             departmentId: u.employeeProfile?.department?.id ?? null,
+            onecUserGuid: u.employeeProfile?.onecUserGuid ?? null,
+            onecPhysicalPersonGuid: u.employeeProfile?.onecPhysicalPersonGuid ?? null,
             employeeStatus,
             moderationState,
             isOnline: presence?.isOnline ?? false,
@@ -3143,7 +3160,7 @@ router.patch(
   checkUserStatus,
   authorizePermissions(['manage_users'], { mode: 'any' }),
   async (
-    req: AuthRequest<{ userId: string }, {}, { firstName?: string; lastName?: string; middleName?: string; email?: string; phone?: string; profileStatus?: ProfileStatus; departmentId?: number | null }>,
+    req: AuthRequest<{ userId: string }, {}, { firstName?: string; lastName?: string; middleName?: string; email?: string; phone?: string; profileStatus?: ProfileStatus; departmentId?: number | null; onecUserGuid?: string | null; onecPhysicalPersonGuid?: string | null }>,
     res: express.Response
   ) => {
     try {
@@ -3187,12 +3204,31 @@ router.patch(
         }
       }
 
+      const onecUserGuid = normalizeOptionalOnecGuid(req.body.onecUserGuid);
+      const onecPhysicalPersonGuid = normalizeOptionalOnecGuid(req.body.onecPhysicalPersonGuid);
+      if (!isValidOnecGuid(onecUserGuid) || !isValidOnecGuid(onecPhysicalPersonGuid)) {
+        return res.status(400).json(errorResponse('Некорректный GUID 1С', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const employeePatch: { onecUserGuid?: string | null; onecPhysicalPersonGuid?: string | null } = {};
+      if (onecUserGuid !== undefined) employeePatch.onecUserGuid = onecUserGuid;
+      if (onecPhysicalPersonGuid !== undefined) employeePatch.onecPhysicalPersonGuid = onecPhysicalPersonGuid;
+      if (Object.keys(employeePatch).length) {
+        const updateResult = await prisma.employeeProfile.updateMany({ where: { userId }, data: employeePatch });
+        if (updateResult.count === 0) {
+          return res.status(404).json(errorResponse('Профиль сотрудника не найден', ErrorCodes.NOT_FOUND));
+        }
+      }
+
       const profile = await getProfile(userId);
       return res.json(successResponse({ profile }));
     } catch (error) {
       const isNotFound = (error as any)?.code === 'P2025';
       if (isNotFound) {
         return res.status(404).json(errorResponse('Пользователь не найден', ErrorCodes.NOT_FOUND));
+      }
+      if ((error as any)?.code === 'P2002') {
+        return res.status(409).json(errorResponse('GUID 1С уже привязан к другому сотруднику', ErrorCodes.CONFLICT));
       }
       return res.status(500).json(
         errorResponse(

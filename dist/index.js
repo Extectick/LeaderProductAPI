@@ -32,7 +32,9 @@ const stockBalances_1 = __importDefault(require("./routes/stockBalances"));
 const notifications_1 = __importDefault(require("./routes/notifications"));
 const home_1 = __importDefault(require("./routes/home"));
 const onec_routes_1 = __importDefault(require("./modules/onec/onec.routes"));
+const onec_lpApp_routes_1 = __importDefault(require("./modules/onec/onec.lpApp.routes"));
 const marketplace_routes_1 = __importDefault(require("./modules/marketplace/marketplace.routes"));
+const clientOrders_routes_1 = __importDefault(require("./modules/clientOrders/clientOrders.routes"));
 const scheduledJobsService_1 = require("./services/scheduledJobsService");
 const redis_1 = require("./lib/redis");
 const cache_1 = require("./middleware/cache");
@@ -117,8 +119,10 @@ app.use('/updates', updates_1.default);
 app.use('/update-files', files_1.default);
 app.use('/files', files_1.default);
 app.use('/notifications', notifications_1.default);
+app.use('/api/1c/lp-app', onec_lpApp_routes_1.default);
 app.use('/api/1c', onec_routes_1.default);
 app.use('/api/marketplace', marketplace_routes_1.default);
+app.use('/api/client-orders', clientOrders_routes_1.default);
 app.use('/appeals', (0, cache_1.cacheByUrl)(15, {
     include: /^\/appeals(\/\d+)?(\?.*)?$/i, // кэшируем список и детали
     exclude: /\/appeals\/\d+\/(messages|assign|status|watchers|claim|department)/i, // исключаем мутации

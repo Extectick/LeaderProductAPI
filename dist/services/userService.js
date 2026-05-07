@@ -133,6 +133,8 @@ const getProfile = async (userId) => {
             lastSeenAt,
             isOnline,
             status: user.employeeProfile.status,
+            onecUserGuid: user.employeeProfile.onecUserGuid ?? null,
+            onecPhysicalPersonGuid: user.employeeProfile.onecPhysicalPersonGuid ?? null,
             department: user.employeeProfile.department
                 ? { id: user.employeeProfile.department.id, name: user.employeeProfile.department.name }
                 : null,

@@ -79,6 +79,14 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
     isSystem: true,
     serviceKey: 'client_orders',
   },
+  {
+    key: 'service_transport_tasks',
+    displayName: 'Сервис: Задания на перевозку',
+    description: 'Права доступа к заданиям на перевозку из 1С.',
+    sortOrder: 140,
+    isSystem: true,
+    serviceKey: 'transport_tasks',
+  },
 ];
 
 export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
@@ -126,6 +134,9 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { name: 'view_stock_balances', displayName: 'Просмотр остатков по складам', description: 'Разрешает просматривать остатки по складам, организациям и сериям.', groupKey: 'service_stock_balances' },
   { name: 'view_client_orders', displayName: 'Просмотр заказов клиентов', description: 'Разрешает просматривать менеджерские заказы клиентов и их статус синхронизации.', groupKey: 'service_client_orders' },
   { name: 'manage_client_orders', displayName: 'Управление заказами клиентов', description: 'Разрешает создавать, редактировать, отправлять и отменять заказы клиентов.', groupKey: 'service_client_orders' },
+  { name: 'view_transport_tasks', displayName: 'Просмотр заданий на перевозку', description: 'Разрешает просматривать задания на перевозку из 1С.', groupKey: 'service_transport_tasks' },
+  { name: 'update_transport_route_order', displayName: 'Изменение порядка маршрута', description: 'Разрешает сохранять новый порядок точек маршрута задания на перевозку.', groupKey: 'service_transport_tasks' },
+  { name: 'manage_transport_tasks', displayName: 'Управление заданиями на перевозку', description: 'Разрешает смотреть задания других водителей и управлять привязками к 1С.', groupKey: 'service_transport_tasks' },
 ];
 
 export const PERMISSION_CATALOG_BY_NAME = new Map(
@@ -168,6 +179,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'manage_appeal_watchers',
     'view_stock_balances',
     'view_client_orders',
+    'view_transport_tasks',
+    'update_transport_route_order',
   ],
   department_manager: [
     'assign_appeal',
@@ -177,5 +190,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'manage_appeal_labor',
     'view_client_orders',
     'manage_client_orders',
+    'manage_transport_tasks',
   ],
 };
