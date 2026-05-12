@@ -21,6 +21,7 @@ const bigintToString = (value: bigint | number | string | null | undefined): str
 export const orderDetailSelect = {
   id: true,
   guid: true,
+  originOnecDocumentGuid: true,
   number1c: true,
   date1c: true,
   source: true,
@@ -198,6 +199,7 @@ export type OrderDetailRecord = Prisma.OrderGetPayload<{ select: typeof orderDet
 export function mapOrderDetail(order: OrderDetailRecord) {
   return {
     guid: order.guid,
+    originOnecDocumentGuid: order.originOnecDocumentGuid,
     number1c: order.number1c,
     date1c: order.date1c,
     source: order.source,

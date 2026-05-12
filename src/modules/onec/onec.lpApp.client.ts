@@ -32,6 +32,8 @@ type RouteOrderBody = {
   route: Array<{ linkKey: string; order: number }>;
 };
 
+type OnecClientOrderUpdateBody = Record<string, unknown>;
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 function getRequiredEnv(name: string) {
@@ -163,6 +165,21 @@ export function getOnecLpAppTransportTasks(query: OnecLpAppQuery) {
 
 export function getOnecLpAppTransportTask(taskGuid: string, query: OnecLpAppQuery) {
   return callOnecLpApp(`/transport-tasks/${encodeURIComponent(taskGuid)}`, { query });
+}
+
+export function getOnecLpAppClientOrders(query: OnecLpAppQuery) {
+  return callOnecLpApp('/client-orders', { query });
+}
+
+export function getOnecLpAppClientOrder(documentGuid: string) {
+  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`);
+}
+
+export function putOnecLpAppClientOrder(documentGuid: string, body: OnecClientOrderUpdateBody) {
+  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, {
+    method: 'PUT',
+    body,
+  });
 }
 
 export function postOnecLpAppRouteOrder(taskGuid: string, body: RouteOrderBody) {

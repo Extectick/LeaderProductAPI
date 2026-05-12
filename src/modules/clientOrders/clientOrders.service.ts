@@ -12,9 +12,19 @@ import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { MarketplaceError } from '../marketplace/marketplace.service';
+import {
+  extractOnecDocumentGuid,
+  fetchOnecClientOrder,
+  fetchOnecClientOrders,
+  getEmployeeOnecUserGuid,
+  isOnecClientOrderGuid,
+  resolveRemoteDateRange,
+  updateOnecClientOrder,
+} from './clientOrders.onec';
 import type {
   ClientOrderCancelBody,
   ClientOrderCreateBody,
+  ClientOrderDeriveDraftBody,
   ClientOrderDefaultsQuery,
   ClientOrderReferenceDetailsParams,
   ClientOrderSettingsUpdateBody,
@@ -45,6 +55,7 @@ type PagedResult<T> = {
   total: number;
   limit: number;
   offset: number;
+  warnings?: string[];
 };
 
 type ReferenceDetailsRow = { label: string; value: unknown };
@@ -78,6 +89,14 @@ type PreparedOrderPayload = {
   items: PreparedOrderLine[];
   totalAmount: Prisma.Decimal;
   generalDiscountAmount: Prisma.Decimal;
+};
+
+type MappedClientOrder = ReturnType<typeof mapOrderDetail> & {
+  origin: 'local' | 'onec';
+  documentGuid?: string | null;
+  status1c?: string | null;
+  isEditable: boolean;
+  readOnlyReason?: string | null;
 };
 
 type DeliveryDateResolution = {
@@ -138,6 +157,37 @@ function ensureEditable(order: { status: OrderStatus; isPostedIn1c: boolean; sou
   if (order.status === OrderStatus.CANCELLED) {
     throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя редактировать');
   }
+}
+
+function mapLocalClientOrder(order: ReturnType<typeof mapOrderDetail>): MappedClientOrder {
+  const isEditable = !order.isPostedIn1c && order.status !== OrderStatus.CANCELLED;
+  return {
+    ...order,
+    origin: 'local',
+    documentGuid: order.originOnecDocumentGuid ?? order.guid,
+    status1c: null,
+    isEditable,
+    readOnlyReason: isEditable ? null : order.isPostedIn1c ? 'Проведенный заказ доступен только для чтения.' : 'Отмененный заказ нельзя редактировать.',
+  };
+}
+
+function includesRemoteSearchToken(value: string | null | undefined, search: string) {
+  return (value || '').toLowerCase().includes(search);
+}
+
+function remoteOrderMatchesFilters(order: any, query: ClientOrdersListQuery, search?: string) {
+  if (query.status && order.status !== query.status) return false;
+  if (query.counterpartyGuid && order.counterparty?.guid !== query.counterpartyGuid) return false;
+  if (!search) return true;
+  return [
+    order.guid,
+    order.documentGuid,
+    order.number1c,
+    order.comment,
+    order.counterparty?.name,
+    order.organization?.name,
+    order.status1c,
+  ].some((value) => includesRemoteSearchToken(value, search));
 }
 
 function assertRevision(currentRevision: number, expectedRevision: number) {
@@ -1073,11 +1123,11 @@ async function saveUserCounterpartyDefaults(tx: Tx, userId: number, guid: string
   });
 }
 
-export async function listClientOrders(query: ClientOrdersListQuery) {
+export async function listClientOrders(userId: number, query: ClientOrdersListQuery) {
   const search = normalizeSearch(query.search);
   const where: Prisma.OrderWhereInput = {
     source: OrderSource.MANAGER_APP,
-    ...(query.status ? { status: query.status } : {}),
+    status: OrderStatus.DRAFT,
     ...(query.counterpartyGuid ? { counterparty: { guid: query.counterpartyGuid } } : {}),
     ...(search
       ? {
@@ -1091,28 +1141,68 @@ export async function listClientOrders(query: ClientOrdersListQuery) {
       : {}),
   };
 
-  const [items, total] = await prisma.$transaction([
+  const [draftItems, draftTotal] = await prisma.$transaction([
     prisma.order.findMany({
       where,
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
-      skip: query.offset,
-      take: query.limit,
+      skip: 0,
+      take: Math.max(query.limit + query.offset, 200),
       select: orderDetailSelect,
     }),
     prisma.order.count({ where }),
   ]);
 
+  const mappedDrafts = draftItems.map((item) => mapLocalClientOrder(mapOrderDetail(item)));
+  const visibleDrafts = mappedDrafts.slice(query.offset, query.offset + query.limit);
+  const remainingLimit = Math.max(0, query.limit - visibleDrafts.length);
+  const remoteOffset = Math.max(0, query.offset - draftTotal);
+  const warnings: string[] = [];
+
+  let remoteItems: any[] = [];
+  let remoteTotal = 0;
+  if (remainingLimit > 0 || remoteOffset > 0 || draftTotal === 0) {
+    const onecUserGuid = query.counterpartyGuid ? null : await getEmployeeOnecUserGuid(userId);
+    if (!query.counterpartyGuid && !onecUserGuid) {
+      warnings.push('missing_onec_user_binding');
+    } else {
+      const { dateFrom, dateTo } = resolveRemoteDateRange({ dateFrom: query.dateFrom, dateTo: query.dateTo });
+      const requiresClientFiltering = Boolean(search || query.status);
+      const remoteLimit = requiresClientFiltering ? 250 : remainingLimit || query.limit;
+      const remoteResponse = await fetchOnecClientOrders({
+        limit: remoteLimit,
+        offset: requiresClientFiltering ? 0 : remoteOffset,
+        dateFrom: dateFrom.toISOString(),
+        dateTo: dateTo.toISOString(),
+        counterpartyGuid: query.counterpartyGuid || undefined,
+        managerGuid: query.counterpartyGuid ? undefined : onecUserGuid || undefined,
+      });
+      const filteredRemote = remoteResponse.items.filter((item) => remoteOrderMatchesFilters(item, query, search));
+      remoteTotal = requiresClientFiltering ? filteredRemote.length : remoteResponse.total;
+      remoteItems = (requiresClientFiltering
+        ? filteredRemote.slice(remoteOffset, remoteOffset + remainingLimit)
+        : filteredRemote.slice(0, remainingLimit));
+    }
+  }
+
   return {
-    items: items.map(mapOrderDetail),
-    total,
+    items: [...visibleDrafts, ...remoteItems],
+    total: draftTotal + remoteTotal,
     limit: query.limit,
     offset: query.offset,
+    warnings,
   };
 }
 
-export async function getClientOrderByGuid(guid: string) {
+export async function getClientOrderByGuid(guid: string, userId?: number) {
+  if (isOnecClientOrderGuid(guid)) {
+    const remote = await fetchOnecClientOrder(extractOnecDocumentGuid(guid));
+    if (!userId) return remote;
+    if (!remote.counterparty?.guid) return remote;
+    return remote;
+  }
+
   const order = await fetchManagerOrderOrThrow(guid);
-  const mapped = mapOrderDetail(order);
+  const mapped = mapLocalClientOrder(mapOrderDetail(order));
   const stockByProductId = await loadStockByProductIdForWarehouse(
     prisma as unknown as Tx,
     order.warehouse?.guid ?? null,
@@ -2487,7 +2577,11 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
   };
 }
 
-export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
+async function createClientOrderInternal(
+  userId: number,
+  body: ClientOrderCreateBody,
+  options: { originOnecDocumentGuid?: string | null } = {}
+) {
   const sourceUpdatedAt = now();
 
   const created = await prisma.$transaction(async (tx) => {
@@ -2499,6 +2593,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
       data: {
         guid,
         source: OrderSource.MANAGER_APP,
+        originOnecDocumentGuid: options.originOnecDocumentGuid ?? null,
         revision: 1,
         syncState: OrderSyncState.DRAFT,
         status: OrderStatus.DRAFT,
@@ -2534,6 +2629,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
       actorUserId: userId,
       payload: {
         organizationGuid: context.organization.guid,
+        originOnecDocumentGuid: options.originOnecDocumentGuid ?? null,
         saveReason: body.saveReason,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
@@ -2546,6 +2642,97 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
   });
 
   return getClientOrderByGuid(created);
+}
+
+function buildCreateBodyFromRemoteOrder(remote: any): ClientOrderCreateBody {
+  return {
+    organizationGuid: remote.organization?.guid || '',
+    counterpartyGuid: remote.counterparty?.guid || '',
+    agreementGuid: remote.agreement?.guid || null,
+    contractGuid: remote.contract?.guid || null,
+    warehouseGuid: remote.warehouse?.guid || null,
+    deliveryAddressGuid: remote.deliveryAddress?.guid || null,
+    deliveryDate: remote.deliveryDate ? new Date(remote.deliveryDate) : undefined,
+    comment: remote.comment || undefined,
+    currency: remote.currency || DEFAULT_ORDER_CURRENCY,
+    saveReason: 'manual',
+    generalDiscountPercent: remote.generalDiscountPercent ?? null,
+    items: Array.isArray(remote.items)
+      ? remote.items.map((item: any) => ({
+          productGuid: item.product?.guid || '',
+          packageGuid: item.package?.guid || undefined,
+          priceTypeGuid: item.priceType?.guid || null,
+          quantity: Number(item.quantity || 0),
+          manualPrice: item.isManualPrice ? Number(item.manualPrice || 0) : null,
+          discountPercent: item.discountPercent ?? null,
+          comment: item.comment || undefined,
+        }))
+      : [],
+  };
+}
+
+function buildOnecUpdateBodyFromLocalOrder(order: MappedClientOrder) {
+  return {
+    guid: order.documentGuid || order.guid,
+    organization: order.organization
+      ? { guid: order.organization.guid, name: order.organization.name, code: order.organization.code || '' }
+      : undefined,
+    counterparty: order.counterparty ? { guid: order.counterparty.guid, name: order.counterparty.name } : undefined,
+    agreement: order.agreement ? { guid: order.agreement.guid, name: order.agreement.name } : undefined,
+    contract: order.contract ? { guid: order.contract.guid, number: order.contract.number } : undefined,
+    warehouse: order.warehouse ? { guid: order.warehouse.guid, name: order.warehouse.name } : undefined,
+    deliveryAddress: order.deliveryAddress
+      ? { guid: order.deliveryAddress.guid || '', fullAddress: order.deliveryAddress.fullAddress || order.deliveryAddress.name || '' }
+      : undefined,
+    comment: order.comment || '',
+    deliveryDate: order.deliveryDate || undefined,
+    items: order.items.map((item) => ({
+      product: {
+        guid: item.product.guid,
+        name: item.product.name,
+      },
+      package: item.package?.guid ? { guid: item.package.guid, name: item.package.name || '' } : undefined,
+      quantity: item.quantity,
+      basePrice: item.basePrice ?? item.price ?? 0,
+      price: item.price ?? item.basePrice ?? 0,
+      manualPrice: item.manualPrice ?? undefined,
+      discountPercent: item.discountPercent ?? undefined,
+      appliedDiscountPercent: item.appliedDiscountPercent ?? item.discountPercent ?? undefined,
+      comment: item.comment || '',
+    })),
+  };
+}
+
+export async function deriveDraftClientOrder(guid: string, userId: number, _body?: ClientOrderDeriveDraftBody) {
+  if (!isOnecClientOrderGuid(guid)) {
+    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Черновик можно создать только из документа 1С');
+  }
+
+  const documentGuid = extractOnecDocumentGuid(guid);
+  const existing = await prisma.order.findFirst({
+    where: {
+      source: OrderSource.MANAGER_APP,
+      status: OrderStatus.DRAFT,
+      createdByUserId: userId,
+      originOnecDocumentGuid: documentGuid,
+    },
+    select: { guid: true },
+  });
+  if (existing?.guid) {
+    return getClientOrderByGuid(existing.guid, userId);
+  }
+
+  const remote = await fetchOnecClientOrder(documentGuid);
+  if (!remote.isEditable) {
+    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, remote.readOnlyReason || 'Документ 1С недоступен для редактирования');
+  }
+
+  const body = buildCreateBodyFromRemoteOrder(remote);
+  return createClientOrderInternal(userId, body, { originOnecDocumentGuid: documentGuid });
+}
+
+export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
+  return createClientOrderInternal(userId, body);
 }
 
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
@@ -2632,6 +2819,67 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
 }
 
 export async function submitClientOrder(guid: string, userId: number, body: ClientOrderSubmitBody) {
+  const remoteDraft = await prisma.order.findFirst({
+    where: { guid, source: OrderSource.MANAGER_APP },
+    select: {
+      guid: true,
+      id: true,
+      revision: true,
+      status: true,
+      source: true,
+      isPostedIn1c: true,
+      originOnecDocumentGuid: true,
+    },
+  });
+
+  if (!remoteDraft) {
+    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+  }
+
+  ensureEditable(remoteDraft);
+  assertRevision(remoteDraft.revision, body.revision);
+
+  if (remoteDraft.originOnecDocumentGuid) {
+    const localOrder = await fetchManagerOrderOrThrow(guid);
+    const mappedLocalOrder = mapLocalClientOrder(mapOrderDetail(localOrder));
+    const remoteOrder = await updateOnecClientOrder(
+      remoteDraft.originOnecDocumentGuid,
+      buildOnecUpdateBodyFromLocalOrder(mappedLocalOrder)
+    );
+    const syncedAt = now();
+
+    await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: remoteDraft.id },
+        data: {
+          revision: remoteDraft.revision + 1,
+          status: remoteOrder.isPostedIn1c ? OrderStatus.CONFIRMED : OrderStatus.SENT_TO_1C,
+          syncState: OrderSyncState.SYNCED,
+          number1c: remoteOrder.number1c ?? null,
+          date1c: remoteOrder.date1c ? new Date(remoteOrder.date1c) : null,
+          sentTo1cAt: syncedAt,
+          lastStatusSyncAt: syncedAt,
+          isPostedIn1c: Boolean(remoteOrder.isPostedIn1c),
+          postedAt1c: remoteOrder.postedAt1c ? new Date(remoteOrder.postedAt1c) : null,
+          last1cError: null,
+          last1cSnapshot: remoteOrder as Prisma.InputJsonValue,
+          sourceUpdatedAt: syncedAt,
+        },
+      });
+      await appendOrderEvent(tx, {
+        orderId: remoteDraft.id,
+        revision: remoteDraft.revision + 1,
+        source: OrderEventSource.ONEC_EDIT,
+        eventType: 'CLIENT_ORDER_UPDATED_IN_ONEC',
+        actorUserId: userId,
+        payload: remoteOrder as Prisma.InputJsonValue,
+      });
+      await saveUserCounterpartyDefaults(tx, userId, guid);
+    });
+
+    return getClientOrderByGuid(guid, userId);
+  }
+
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP },

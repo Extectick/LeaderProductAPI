@@ -566,6 +566,7 @@ model SpecialPrice {
 model Order {
   id                String       @id @default(cuid())
   guid              String?      @unique
+  originOnecDocumentGuid String?
   number1c          String?
   date1c            DateTime?
   source            OrderSource  @default(MARKETPLACE_CLIENT)
@@ -625,6 +626,7 @@ model Order {
   @@index([createdByUserId])
   @@index([status])
   @@index([source])
+  @@index([originOnecDocumentGuid])
   @@index([syncState])
   @@index([revision])
   @@index([queuedAt])

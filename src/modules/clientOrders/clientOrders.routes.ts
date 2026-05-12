@@ -7,6 +7,7 @@ import { errorResponse, ErrorCodes, successResponse } from '../../utils/apiRespo
 import {
   clientOrderCancelSchema,
   clientOrderCreateSchema,
+  clientOrderDeriveDraftSchema,
   clientOrderDefaultsQuerySchema,
   clientOrderReferenceDetailsParamsSchema,
   clientOrderSettingsUpdateSchema,
@@ -27,6 +28,7 @@ import {
   cancelClientOrder,
   ClientOrdersError,
   createClientOrder,
+  deriveDraftClientOrder,
   deleteDraftClientOrder,
   getClientOrderByGuid,
   getClientOrderDefaults,
@@ -75,12 +77,12 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
   }
 
   try {
-    const result = await listClientOrders(parsed.data);
+    const result = await listClientOrders(req.user!.userId, parsed.data);
     return res.json(
       successResponse(
         { items: result.items },
         'Список заказов клиентов',
-        pagedMeta(result.total, result.items.length, result.limit, result.offset)
+        { ...pagedMeta(result.total, result.items.length, result.limit, result.offset), warnings: result.warnings || [] }
       )
     );
   } catch (err) {
@@ -300,10 +302,28 @@ router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: A
   }
 
   try {
-    const result = await getClientOrderByGuid(parsed.data.guid);
+    const result = await getClientOrderByGuid(parsed.data.guid, req.user!.userId);
     return res.json(successResponse(result, 'Карточка заказа клиента'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения карточки заказа клиента');
+  }
+});
+
+router.post('/:guid/derive-draft', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  const body = clientOrderDeriveDraftSchema.safeParse(req.body ?? {});
+  if (!params.success) {
+    return res.status(400).json(errorResponse(params.error.message, ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(body.error.message, ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await deriveDraftClientOrder(params.data.guid, req.user!.userId, body.data);
+    return res.json(successResponse(result, 'Черновик создан из документа 1С'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка создания черновика из документа 1С');
   }
 });
 
