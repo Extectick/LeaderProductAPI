@@ -691,7 +691,7 @@ export async function explainServiceAccessForUser(
     };
   }
 
-  const userRules: UserRuleMatch[] = service.userAccess.map((rule) => ({
+  const userRules: UserRuleMatch[] = (service.userAccess ?? []).map((rule) => ({
     id: rule.id,
     userId: rule.userId,
     userName:
@@ -702,7 +702,7 @@ export async function explainServiceAccessForUser(
     enabled: rule.enabled,
   }));
 
-  const roleRules: RoleRuleMatch[] = service.roleAccess.map((rule) => ({
+  const roleRules: RoleRuleMatch[] = (service.roleAccess ?? []).map((rule) => ({
     id: rule.id,
     roleId: rule.roleId,
     roleName: rule.role.name,
@@ -712,14 +712,14 @@ export async function explainServiceAccessForUser(
     distance: ctx.roleDistanceById.get(rule.roleId) ?? Number.MAX_SAFE_INTEGER,
   }));
 
-  const departmentRules: DepartmentRuleMatch[] = service.departmentAccess.map((rule) => ({
+  const departmentRules: DepartmentRuleMatch[] = (service.departmentAccess ?? []).map((rule) => ({
     id: rule.id,
     departmentId: rule.departmentId,
     departmentName: rule.department.name,
     visible: rule.visible,
     enabled: rule.enabled,
   }));
-  const departmentRoleRules = mapMatchedDepartmentRoleRules(ctx, service.departmentRoleAccess);
+  const departmentRoleRules = mapMatchedDepartmentRoleRules(ctx, service.departmentRoleAccess ?? []);
 
   const decision = applyRuleFlags(
     baseVisible,
@@ -858,15 +858,15 @@ export async function listServicesForUser(
       const decision = applyRuleFlags(
         baseVisible,
         baseEnabled,
-        service.userAccess.map((rule) => ({
+        (service.userAccess ?? []).map((rule) => ({
           id: rule.id,
           userId: rule.userId,
           userName: null,
           visible: rule.visible,
           enabled: rule.enabled,
         })),
-        mapMatchedDepartmentRoleRules(ctx, service.departmentRoleAccess),
-        service.roleAccess.map((rule) => ({
+        mapMatchedDepartmentRoleRules(ctx, service.departmentRoleAccess ?? []),
+        (service.roleAccess ?? []).map((rule) => ({
           id: rule.id,
           roleId: rule.roleId,
           roleName: null,
@@ -875,7 +875,7 @@ export async function listServicesForUser(
           enabled: rule.enabled,
           distance: ctx.roleDistanceById.get(rule.roleId) ?? Number.MAX_SAFE_INTEGER,
         })),
-        service.departmentAccess.map((rule) => ({
+        (service.departmentAccess ?? []).map((rule) => ({
           id: rule.id,
           departmentId: rule.departmentId,
           departmentName: null,
