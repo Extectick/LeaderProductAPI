@@ -1,4 +1,4 @@
-import { ClientOrderDeliveryDateMode, OrderStatus } from '@prisma/client';
+import { ClientOrderDeliveryDateMode, OrderStatus, OrderSyncState } from '@prisma/client';
 import { z } from 'zod';
 
 const parseBooleanFromQuery = (value: unknown): boolean | undefined => {
@@ -17,6 +17,11 @@ const booleanFromQuery = z
   .preprocess((value) => parseBooleanFromQuery(value), z.boolean().optional())
   .default(false);
 
+const optionalBooleanFromQuery = z.preprocess(
+  (value) => parseBooleanFromQuery(value),
+  z.boolean().optional()
+);
+
 const nullableGuid = z.preprocess(
   (value) => (value === '' ? null : value),
   z.string().trim().min(1).nullable().optional()
@@ -27,9 +32,31 @@ const nullableDate = z.preprocess(
   z.coerce.date().optional()
 );
 
+const parseDateFromQuery = (value: unknown): Date | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value;
+  const raw = String(value).trim();
+  const dotted = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  const normalized = dotted ? `${dotted[3]}-${dotted[2]}-${dotted[1]}` : raw;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+};
+
+const queryDate = z.preprocess(parseDateFromQuery, z.date().optional());
+
 const nullableNumber = z.preprocess(
   (value) => (value === '' || value === null || value === undefined ? null : value),
   z.coerce.number().nullable().optional()
+);
+
+const queryNumber = z.preprocess(
+  (value) => (value === undefined || value === null || value === '' ? undefined : String(value).replace(/\s/g, '').replace(',', '.')),
+  z.coerce.number().optional()
+);
+
+const queryInteger = z.preprocess(
+  (value) => (value === undefined || value === null || value === '' ? undefined : value),
+  z.coerce.number().int().min(0).optional()
 );
 
 const saveReasonSchema = z.enum(['manual', 'autosave']).optional().default('manual');
@@ -45,8 +72,22 @@ export const clientOrdersListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
   status: z.nativeEnum(OrderStatus).optional(),
+  syncState: z.nativeEnum(OrderSyncState).optional(),
   search: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
+  organizationGuid: z.string().trim().min(1).optional(),
+  warehouseGuid: z.string().trim().min(1).optional(),
+  priceTypeGuid: z.string().trim().min(1).optional(),
+  amountMin: queryNumber,
+  amountMax: queryNumber,
+  deliveryDateFrom: queryDate,
+  deliveryDateTo: queryDate,
+  updatedFrom: queryDate,
+  updatedTo: queryDate,
+  itemsMin: queryInteger,
+  itemsMax: queryInteger,
+  hasNumber1c: z.enum(['yes', 'no']).optional(),
+  onlyProblems: booleanFromQuery,
 });
 
 export const orderGuidParamsSchema = z.object({
@@ -88,7 +129,15 @@ export const clientOrdersProductsQuerySchema = pagedSearchQuerySchema.extend({
   agreementGuid: z.string().trim().min(1).optional(),
   warehouseGuid: z.string().trim().min(1).optional(),
   priceTypeGuid: z.string().trim().min(1).optional(),
-  inStockOnly: z.coerce.boolean().optional(),
+  inStockOnly: optionalBooleanFromQuery,
+});
+
+export const clientOrdersBatchProductsSchema = z.object({
+  productGuids: z.array(z.string().trim().min(1)).min(1).max(200),
+  counterpartyGuid: z.string().trim().min(1).optional(),
+  agreementGuid: z.string().trim().min(1).optional(),
+  warehouseGuid: z.string().trim().min(1).optional(),
+  priceTypeGuid: z.string().trim().min(1).optional(),
 });
 
 export const clientOrderDefaultsQuerySchema = z.object({
@@ -110,9 +159,9 @@ export const managerOrderItemSchema = z.object({
   productGuid: z.string().min(1),
   packageGuid: z.string().min(1).optional(),
   priceTypeGuid: nullableGuid,
-  quantity: z.coerce.number().positive(),
-  manualPrice: nullableNumber.refine((value) => value === null || value === undefined || value > 0, {
-    message: 'manualPrice must be greater than 0',
+  quantity: z.coerce.number().nonnegative(),
+  manualPrice: nullableNumber.refine((value) => value === null || value === undefined || value >= 0, {
+    message: 'manualPrice must be greater than or equal to 0',
   }),
   discountPercent: nullableNumber.refine(
     (value) => value === null || value === undefined || (value >= 0 && value <= 100),
@@ -162,6 +211,7 @@ export type ClientOrdersWarehousesQuery = z.infer<typeof clientOrdersWarehousesQ
 export type ClientOrdersPriceTypesQuery = z.infer<typeof clientOrdersPriceTypesQuerySchema>;
 export type ClientOrdersDeliveryAddressesQuery = z.infer<typeof clientOrdersDeliveryAddressesQuerySchema>;
 export type ClientOrdersProductsQuery = z.infer<typeof clientOrdersProductsQuerySchema>;
+export type ClientOrdersBatchProductsBody = z.infer<typeof clientOrdersBatchProductsSchema>;
 export type ClientOrderDefaultsQuery = z.infer<typeof clientOrderDefaultsQuerySchema>;
 export type ClientOrderSettingsUpdateBody = z.infer<typeof clientOrderSettingsUpdateSchema>;
 export type ClientOrderCreateBody = z.infer<typeof clientOrderCreateSchema>;

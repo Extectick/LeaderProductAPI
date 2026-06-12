@@ -20,6 +20,7 @@ import type {
   ClientOrderSettingsUpdateBody,
   ClientOrderSubmitBody,
   ClientOrderUpdateBody,
+  ClientOrdersBatchProductsBody,
   ClientOrdersAgreementsQuery,
   ClientOrdersContractsQuery,
   ClientOrdersCounterpartiesQuery,
@@ -90,6 +91,66 @@ type ReceiptPriceInfo = {
   minQty: number | null;
   priceType: { id: string; guid: string; name: string };
 };
+
+const clientOrderSummarySelect = {
+  guid: true,
+  number1c: true,
+  date1c: true,
+  source: true,
+  revision: true,
+  syncState: true,
+  status: true,
+  comment: true,
+  deliveryDate: true,
+  totalAmount: true,
+  currency: true,
+  queuedAt: true,
+  sentTo1cAt: true,
+  lastStatusSyncAt: true,
+  lastExportError: true,
+  last1cError: true,
+  isPostedIn1c: true,
+  cancelRequestedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  counterparty: { select: { guid: true, name: true } },
+  organization: { select: { guid: true, name: true, code: true, isActive: true } },
+  warehouse: { select: { guid: true, name: true, code: true } },
+  _count: { select: { items: true } },
+} satisfies Prisma.OrderSelect;
+
+type ClientOrderSummaryRecord = Prisma.OrderGetPayload<{ select: typeof clientOrderSummarySelect }>;
+
+function mapClientOrderSummary(order: ClientOrderSummaryRecord) {
+  return {
+    guid: order.guid,
+    number1c: order.number1c,
+    date1c: order.date1c,
+    source: order.source,
+    revision: order.revision,
+    syncState: order.syncState,
+    status: order.status,
+    comment: order.comment,
+    deliveryDate: order.deliveryDate,
+    totalAmount: decimalToNumber(order.totalAmount),
+    currency: order.currency,
+    queuedAt: order.queuedAt,
+    sentTo1cAt: order.sentTo1cAt,
+    lastStatusSyncAt: order.lastStatusSyncAt,
+    lastExportError: order.lastExportError,
+    last1cError: order.last1cError,
+    isPostedIn1c: order.isPostedIn1c,
+    cancelRequestedAt: order.cancelRequestedAt,
+    counterparty: order.counterparty,
+    organization: order.organization,
+    warehouse: order.warehouse,
+    itemsCount: order._count.items,
+    items: [],
+    events: [],
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+  };
+}
 
 class ClientOrdersError extends Error {
   public readonly status: number;
@@ -170,33 +231,6 @@ function likeSearchPatterns(search: string) {
     prefix: `${escapeLike(lowered)}%`,
     contains: `%${escapeLike(lowered)}%`,
   };
-}
-
-function rankReferenceItems<T>(
-  items: T[],
-  search: string,
-  fields: ((item: T) => string | null | undefined)[],
-  label: (item: T) => string
-) {
-  const lowered = search.toLowerCase();
-  return [...items]
-    .map((item) => {
-      const values = fields.map((field) => (field(item) ?? '').toLowerCase());
-      const exactIndex = values.findIndex((value) => value === lowered);
-      const prefixIndex = values.findIndex((value) => value.startsWith(lowered));
-      const containsIndex = values.findIndex((value) => value.includes(lowered));
-      const rank =
-        exactIndex >= 0
-          ? exactIndex
-          : prefixIndex >= 0
-            ? 20 + prefixIndex
-            : containsIndex >= 0
-              ? 40 + containsIndex
-              : 100;
-      return { item, rank };
-    })
-    .sort((left, right) => left.rank - right.rank || label(left.item).localeCompare(label(right.item), 'ru'))
-    .map((entry) => entry.item);
 }
 
 function asNumberCount(value: unknown) {
@@ -701,15 +735,19 @@ async function loadPriceTypeByGuid(tx: Tx, guid: string) {
 }
 
 async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): Promise<ManagerOrderContext> {
-  const organization = await loadOrganizationByGuid(tx, body.organizationGuid);
-  const counterparty = await loadCounterpartyByGuid(tx, body.counterpartyGuid);
+  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress] = await Promise.all([
+    loadOrganizationByGuid(tx, body.organizationGuid),
+    loadCounterpartyByGuid(tx, body.counterpartyGuid),
+    body.agreementGuid ? loadAgreementByGuid(tx, body.agreementGuid) : Promise.resolve(null),
+    body.contractGuid ? loadContractByGuid(tx, body.contractGuid) : Promise.resolve(null),
+    body.warehouseGuid ? loadWarehouseByGuid(tx, body.warehouseGuid) : Promise.resolve(null),
+    body.deliveryAddressGuid ? loadDeliveryAddressByGuid(tx, body.deliveryAddressGuid) : Promise.resolve(null),
+  ]);
 
-  const agreement = body.agreementGuid ? await loadAgreementByGuid(tx, body.agreementGuid) : null;
   if (agreement?.counterpartyId && agreement.counterpartyId !== counterparty.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Соглашение не принадлежит выбранному контрагенту');
   }
 
-  const contract = body.contractGuid ? await loadContractByGuid(tx, body.contractGuid) : null;
   if (contract?.counterpartyId !== undefined && contract.counterpartyId !== counterparty.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Договор не принадлежит выбранному контрагенту');
   }
@@ -717,14 +755,10 @@ async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): 
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Договор не соответствует выбранному соглашению');
   }
 
-  const warehouse = body.warehouseGuid ? await loadWarehouseByGuid(tx, body.warehouseGuid) : null;
   if (agreement?.warehouseId && warehouse && agreement.warehouseId !== warehouse.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Склад не соответствует выбранному соглашению');
   }
 
-  const deliveryAddress = body.deliveryAddressGuid
-    ? await loadDeliveryAddressByGuid(tx, body.deliveryAddressGuid)
-    : null;
   if (deliveryAddress && deliveryAddress.counterpartyId !== counterparty.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Адрес доставки не принадлежит выбранному контрагенту');
   }
@@ -783,21 +817,57 @@ async function prepareOrderItems(
   let totalAmount = new Prisma.Decimal(0);
   let generalDiscountAmount = new Prisma.Decimal(0);
   const generalDiscountPercent = body.generalDiscountPercent ?? null;
+  const productGuids = [...new Set(body.items.map((item) => item.productGuid))];
+  const products = await tx.product.findMany({
+    where: { guid: { in: productGuids } },
+    select: {
+      id: true,
+      guid: true,
+      name: true,
+      code: true,
+      article: true,
+      isActive: true,
+      isWeight: true,
+      baseUnit: { select: { id: true, guid: true, name: true, symbol: true } },
+    },
+  });
+  const productByGuid = new Map(products.map((product) => [product.guid, product]));
+  const packageGuids = [...new Set(body.items.map((item) => item.packageGuid).filter(Boolean) as string[])];
+  const packages = packageGuids.length
+    ? await tx.productPackage.findMany({
+        where: { guid: { in: packageGuids } },
+        select: {
+          id: true,
+          guid: true,
+          name: true,
+          productId: true,
+          unitId: true,
+          multiplier: true,
+          unit: { select: { guid: true, name: true, symbol: true } },
+        },
+      })
+    : [];
+  const packageByProductAndGuid = new Map(
+    packages.map((pack) => [`${pack.productId}|${pack.guid}`, pack])
+  );
+  const explicitPriceTypeGuids = [
+    ...new Set(body.items.map((item) => item.priceTypeGuid).filter(Boolean) as string[]),
+  ];
+  const explicitPriceTypes = explicitPriceTypeGuids.length
+    ? await tx.priceType.findMany({
+        where: { guid: { in: explicitPriceTypeGuids } },
+        select: { id: true, guid: true, name: true, isActive: true },
+      })
+    : [];
+  const priceTypeByGuid = new Map(explicitPriceTypes.map((priceType) => [priceType.guid, priceType]));
+  const receiptPriceByProductId = await loadReceiptPriceInfoByProductId(
+    tx,
+    products.map((product) => product.id),
+    sourceUpdatedAt
+  );
 
   for (const item of body.items) {
-    const product = await tx.product.findUnique({
-      where: { guid: item.productGuid },
-      select: {
-        id: true,
-        guid: true,
-        name: true,
-          code: true,
-          article: true,
-          isActive: true,
-          isWeight: true,
-          baseUnit: { select: { id: true, guid: true, name: true, symbol: true } },
-        },
-      });
+    const product = productByGuid.get(item.productGuid);
 
     if (!product) {
       throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Товар ${item.productGuid} не найден`);
@@ -806,28 +876,11 @@ async function prepareOrderItems(
       throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Товар ${formatProductLabel(product)} неактивен`);
     }
 
-    let packageRecord: {
-      id: string;
-      guid: string | null;
-      name: string;
-      unitId: string;
-      multiplier: Prisma.Decimal;
-      unit: { guid: string | null; name: string; symbol: string | null };
-    } | null = null;
+    const packageRecord = item.packageGuid
+      ? packageByProductAndGuid.get(`${product.id}|${item.packageGuid}`) ?? null
+      : null;
 
     if (item.packageGuid) {
-      packageRecord = await tx.productPackage.findFirst({
-        where: { guid: item.packageGuid, productId: product.id },
-        select: {
-          id: true,
-          guid: true,
-          name: true,
-          unitId: true,
-          multiplier: true,
-          unit: { select: { guid: true, name: true, symbol: true } },
-        },
-      });
-
       if (!packageRecord) {
         throw new ClientOrdersError(
           404,
@@ -844,14 +897,20 @@ async function prepareOrderItems(
     const manualPrice = isManualPrice ? toDecimal(item.manualPrice)! : null;
 
     let linePriceType = item.priceTypeGuid
-      ? await loadPriceTypeByGuid(tx, item.priceTypeGuid)
+      ? priceTypeByGuid.get(item.priceTypeGuid) ?? null
       : isManualPrice
         ? null
         : context.priceType;
+    if (item.priceTypeGuid && !linePriceType) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Тип цены ${item.priceTypeGuid} не найден`);
+    }
+    if (linePriceType && 'isActive' in linePriceType && linePriceType.isActive === false) {
+      throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Тип цены ${linePriceType.guid} неактивен`);
+    }
 
     let receiptPrice: ReceiptPriceInfo | null = null;
     if (!isManualPrice) {
-      receiptPrice = (await loadReceiptPriceInfoByProductId(tx, [product.id], sourceUpdatedAt)).get(product.id) ?? null;
+      receiptPrice = receiptPriceByProductId.get(product.id) ?? null;
       linePriceType = receiptPrice?.priceType ?? null;
     }
 
@@ -866,7 +925,7 @@ async function prepareOrderItems(
 
     const quantityBaseValue = decimalToNumber(quantityBase) ?? item.quantity;
     const minQty = product.isWeight ? 0.001 : (receiptPrice?.minQty ?? null);
-    if (minQty !== null && quantityBaseValue < minQty) {
+    if (quantityBaseValue > 0 && minQty !== null && quantityBaseValue < minQty) {
       throw new ClientOrdersError(
         400,
         ErrorCodes.VALIDATION_ERROR,
@@ -1075,36 +1134,118 @@ async function saveUserCounterpartyDefaults(tx: Tx, userId: number, guid: string
 
 export async function listClientOrders(query: ClientOrdersListQuery) {
   const search = normalizeSearch(query.search);
+  const itemCountFilters = query.itemsMin !== undefined || query.itemsMax !== undefined;
+  const itemCountOrderIds = itemCountFilters
+    ? await prisma.orderItem.groupBy({
+        by: ['orderId'],
+        where: { order: { source: OrderSource.MANAGER_APP } },
+        ...(query.itemsMin !== undefined || query.itemsMax !== undefined
+          ? {
+              having: {
+                id: {
+                  _count: {
+                    ...(query.itemsMin !== undefined ? { gte: query.itemsMin } : {}),
+                    ...(query.itemsMax !== undefined ? { lte: query.itemsMax } : {}),
+                  },
+                },
+              },
+            }
+          : {}),
+      })
+    : null;
+  const endOfDay = (date: Date) => {
+    const next = new Date(date);
+    next.setHours(23, 59, 59, 999);
+    return next;
+  };
+  const and: Prisma.OrderWhereInput[] = [];
+  if (query.onlyProblems) {
+    and.push({
+      OR: [
+        { lastExportError: { not: null } },
+        { last1cError: { not: null } },
+        { cancelRequestedAt: { not: null } },
+        { syncState: { in: [OrderSyncState.ERROR, OrderSyncState.CONFLICT, OrderSyncState.CANCEL_REQUESTED] } },
+      ],
+    });
+  }
+  if (search) {
+    and.push({
+      OR: [
+        { guid: { contains: search, mode: 'insensitive' } },
+        { number1c: { contains: search, mode: 'insensitive' } },
+        { comment: { contains: search, mode: 'insensitive' } },
+        { counterparty: { name: { contains: search, mode: 'insensitive' } } },
+      ],
+    });
+  }
   const where: Prisma.OrderWhereInput = {
     source: OrderSource.MANAGER_APP,
+    ...(and.length ? { AND: and } : {}),
     ...(query.status ? { status: query.status } : {}),
+    ...(query.syncState ? { syncState: query.syncState } : {}),
     ...(query.counterpartyGuid ? { counterparty: { guid: query.counterpartyGuid } } : {}),
-    ...(search
+    ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
+    ...(query.warehouseGuid ? { warehouse: { guid: query.warehouseGuid } } : {}),
+    ...(query.priceTypeGuid ? { items: { some: { priceType: { guid: query.priceTypeGuid } } } } : {}),
+    ...(query.amountMin !== undefined || query.amountMax !== undefined
       ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { number1c: { contains: search, mode: 'insensitive' } },
-            { comment: { contains: search, mode: 'insensitive' } },
-            { counterparty: { name: { contains: search, mode: 'insensitive' } } },
-          ],
+          totalAmount: {
+            ...(query.amountMin !== undefined ? { gte: query.amountMin } : {}),
+            ...(query.amountMax !== undefined ? { lte: query.amountMax } : {}),
+          },
         }
       : {}),
+    ...(query.deliveryDateFrom || query.deliveryDateTo
+      ? {
+          deliveryDate: {
+            ...(query.deliveryDateFrom ? { gte: query.deliveryDateFrom } : {}),
+            ...(query.deliveryDateTo ? { lte: endOfDay(query.deliveryDateTo) } : {}),
+          },
+        }
+      : {}),
+    ...(query.updatedFrom || query.updatedTo
+      ? {
+          updatedAt: {
+            ...(query.updatedFrom ? { gte: query.updatedFrom } : {}),
+            ...(query.updatedTo ? { lte: endOfDay(query.updatedTo) } : {}),
+          },
+        }
+      : {}),
+    ...(query.hasNumber1c === 'yes' ? { number1c: { not: null } } : {}),
+    ...(query.hasNumber1c === 'no' ? { number1c: null } : {}),
+    ...(itemCountOrderIds ? { id: { in: itemCountOrderIds.map((item) => item.orderId) } } : {}),
   };
 
-  const [items, total] = await prisma.$transaction([
+  const statusCountsWhere: Prisma.OrderWhereInput = { ...where, status: undefined };
+  const [items, total, statusRows] = await prisma.$transaction([
     prisma.order.findMany({
       where,
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
       skip: query.offset,
       take: query.limit,
-      select: orderDetailSelect,
+      select: clientOrderSummarySelect,
     }),
     prisma.order.count({ where }),
+    prisma.order.groupBy({
+      by: ['status'],
+      where: statusCountsWhere,
+      orderBy: { status: 'asc' },
+      _count: { _all: true },
+    }),
   ]);
+  const countedStatusRows = statusRows as unknown as Array<{
+    status: string;
+    _count: { _all: number };
+  }>;
+  const statusCounts = Object.fromEntries(
+    countedStatusRows.map((row) => [row.status, row._count._all])
+  );
 
   return {
-    items: items.map(mapOrderDetail),
+    items: items.map(mapClientOrderSummary),
     total,
+    statusCounts,
     limit: query.limit,
     offset: query.offset,
   };
@@ -1737,32 +1878,15 @@ async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery,
     prisma.counterparty.findMany({
       where,
       orderBy: [{ name: 'asc' }],
-      take: Math.max(query.limit + query.offset, 150),
+      skip: query.offset,
+      take: query.limit,
       select: { guid: true, name: true, fullName: true, inn: true, kpp: true, isActive: true },
     }),
     prisma.counterparty.count({ where }),
   ]);
 
-  const lowered = search.toLowerCase();
-  const ranked = items
-    .map((item) => {
-      const fields = [item.inn, item.kpp, item.guid, item.name, item.fullName].map((value) => (value ?? '').toLowerCase());
-      let rank = 50;
-      if (fields[0] === lowered) rank = 0;
-      else if (fields[1] === lowered) rank = 1;
-      else if (fields[2] === lowered) rank = 2;
-      else if (fields[3] === lowered) rank = 3;
-      else if (fields[4] === lowered) rank = 4;
-      else if (fields[0].startsWith(lowered)) rank = 5;
-      else if (fields[1].startsWith(lowered)) rank = 6;
-      else if (fields[3].startsWith(lowered)) rank = 7;
-      else if (fields[4].startsWith(lowered)) rank = 8;
-      return { item, rank };
-    })
-    .sort((left, right) => left.rank - right.rank || left.item.name.localeCompare(right.item.name, 'ru'));
-
   return {
-    items: ranked.slice(query.offset, query.offset + query.limit).map((entry) => entry.item),
+    items,
     total,
     limit: query.limit,
     offset: query.offset,
@@ -1905,8 +2029,8 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
     prisma.clientAgreement.findMany({
       where,
       orderBy: [{ name: 'asc' }],
-      skip: search ? 0 : query.offset,
-      take: search ? Math.max(query.limit + query.offset, 150) : query.limit,
+      skip: query.offset,
+      take: query.limit,
       select: {
         guid: true,
         name: true,
@@ -1920,16 +2044,7 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
     prisma.clientAgreement.count({ where }),
   ]);
 
-  const rankedItems = search
-    ? rankReferenceItems(
-        items,
-        search,
-        [(item) => item.guid, (item) => item.name, (item) => item.contract?.number, (item) => item.warehouse?.name],
-        (item) => item.name
-      ).slice(query.offset, query.offset + query.limit)
-    : items;
-
-  return { items: rankedItems, total, limit: query.limit, offset: query.offset };
+  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersContracts(query: ClientOrdersContractsQuery) {
@@ -1958,8 +2073,8 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
     prisma.clientContract.findMany({
       where,
       orderBy: [{ number: 'asc' }],
-      skip: search ? 0 : query.offset,
-      take: search ? Math.max(query.limit + query.offset, 150) : query.limit,
+      skip: query.offset,
+      take: query.limit,
       select: {
         guid: true,
         number: true,
@@ -1972,14 +2087,7 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
     prisma.clientContract.count({ where }),
   ]);
 
-  const rankedItems = search
-    ? rankReferenceItems(items, search, [(item) => item.guid, (item) => item.number], (item) => item.number).slice(
-        query.offset,
-        query.offset + query.limit
-      )
-    : items;
-
-  return { items: rankedItems, total, limit: query.limit, offset: query.offset };
+  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersWarehouses(query: ClientOrdersWarehousesQuery) {
@@ -2002,8 +2110,8 @@ export async function getClientOrdersWarehouses(query: ClientOrdersWarehousesQue
     prisma.warehouse.findMany({
       where,
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
-      skip: search ? 0 : query.offset,
-      take: search ? Math.max(query.limit + query.offset, 150) : query.limit,
+      skip: query.offset,
+      take: query.limit,
       select: {
         guid: true,
         name: true,
@@ -2016,14 +2124,7 @@ export async function getClientOrdersWarehouses(query: ClientOrdersWarehousesQue
     prisma.warehouse.count({ where }),
   ]);
 
-  const rankedItems = search
-    ? rankReferenceItems(items, search, [(item) => item.guid, (item) => item.code, (item) => item.name], (item) => item.name).slice(
-        query.offset,
-        query.offset + query.limit
-      )
-    : items;
-
-  return { items: rankedItems, total, limit: query.limit, offset: query.offset };
+  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersPriceTypes(query: ClientOrdersPriceTypesQuery) {
@@ -2045,21 +2146,14 @@ export async function getClientOrdersPriceTypes(query: ClientOrdersPriceTypesQue
     prisma.priceType.findMany({
       where,
       orderBy: [{ name: 'asc' }],
-      skip: search ? 0 : query.offset,
-      take: search ? Math.max(query.limit + query.offset, 150) : query.limit,
+      skip: query.offset,
+      take: query.limit,
       select: { guid: true, name: true, code: true, isActive: true },
     }),
     prisma.priceType.count({ where }),
   ]);
 
-  const rankedItems = search
-    ? rankReferenceItems(items, search, [(item) => item.guid, (item) => item.code, (item) => item.name], (item) => item.name).slice(
-        query.offset,
-        query.offset + query.limit
-      )
-    : items;
-
-  return { items: rankedItems, total, limit: query.limit, offset: query.offset };
+  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersDeliveryAddresses(query: ClientOrdersDeliveryAddressesQuery) {
@@ -2089,8 +2183,8 @@ export async function getClientOrdersDeliveryAddresses(query: ClientOrdersDelive
     prisma.deliveryAddress.findMany({
       where,
       orderBy: [{ isDefault: 'desc' }, { fullAddress: 'asc' }],
-      skip: search ? 0 : query.offset,
-      take: search ? Math.max(query.limit + query.offset, 150) : query.limit,
+      skip: query.offset,
+      take: query.limit,
       select: {
         guid: true,
         name: true,
@@ -2102,14 +2196,7 @@ export async function getClientOrdersDeliveryAddresses(query: ClientOrdersDelive
     prisma.deliveryAddress.count({ where }),
   ]);
 
-  const rankedItems = search
-    ? rankReferenceItems(items, search, [(item) => item.guid, (item) => item.name, (item) => item.fullAddress], (item) => item.fullAddress).slice(
-        query.offset,
-        query.offset + query.limit
-      )
-    : items;
-
-  return { items: rankedItems, total, limit: query.limit, offset: query.offset };
+  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 type ProductSearchRow = {
@@ -2160,7 +2247,8 @@ async function getProductsFallback(
     prisma.product.findMany({
       where,
       orderBy: [{ name: 'asc' }],
-      take: Math.max(query.limit + query.offset, 200),
+      skip: query.offset,
+      take: query.limit,
       select: {
         id: true,
         guid: true,
@@ -2174,28 +2262,8 @@ async function getProductsFallback(
     prisma.product.count({ where }),
   ]);
 
-  const lowered = search.toLowerCase();
-  const ranked = items
-    .map((item) => {
-      const code = (item.code ?? '').toLowerCase();
-      const article = (item.article ?? '').toLowerCase();
-      const sku = (item.sku ?? '').toLowerCase();
-      const name = item.name.toLowerCase();
-      let rank = 50;
-      if (code === lowered) rank = 0;
-      else if (article === lowered) rank = 1;
-      else if (sku === lowered) rank = 2;
-      else if (name === lowered) rank = 3;
-      else if (code.startsWith(lowered)) rank = 4;
-      else if (article.startsWith(lowered)) rank = 5;
-      else if (sku.startsWith(lowered)) rank = 6;
-      else if (name.startsWith(lowered)) rank = 7;
-      return { item, rank };
-    })
-    .sort((left, right) => left.rank - right.rank || left.item.name.localeCompare(right.item.name, 'ru'));
-
   return {
-    items: ranked.slice(query.offset, query.offset + query.limit).map((entry) => entry.item),
+    items,
     total,
     limit: query.limit,
     offset: query.offset,
@@ -2487,6 +2555,72 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
   };
 }
 
+export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody) {
+  const uniqueGuids = [...new Set(body.productGuids)];
+  const products = await prisma.product.findMany({
+    where: { guid: { in: uniqueGuids }, isActive: true },
+    select: {
+      id: true,
+      guid: true,
+      name: true,
+      code: true,
+      article: true,
+      sku: true,
+      isWeight: true,
+      baseUnit: { select: { guid: true, name: true, symbol: true } },
+      packages: {
+        orderBy: [{ isDefault: 'desc' }, { sortOrder: 'asc' }, { name: 'asc' }],
+        select: {
+          guid: true,
+          name: true,
+          multiplier: true,
+          isDefault: true,
+          unit: { select: { guid: true, name: true, symbol: true } },
+        },
+      },
+    },
+  });
+
+  const productIds = products.map((product) => product.id);
+  const [stockByProductId, receiptPriceByProductId] = await Promise.all([
+    loadStockByProductIdForWarehouse(prisma as unknown as Tx, body.warehouseGuid, productIds),
+    loadReceiptPriceInfoByProductId(prisma as unknown as Tx, productIds, now()),
+  ]);
+  const productByGuid = new Map(products.map((product) => [product.guid, product]));
+
+  return uniqueGuids.flatMap((guid) => {
+    const product = productByGuid.get(guid);
+    if (!product) return [];
+    const receiptPrice = receiptPriceByProductId.get(product.id) ?? null;
+    return [{
+      guid: product.guid,
+      name: product.name,
+      code: product.code,
+      article: product.article,
+      sku: product.sku,
+      isWeight: product.isWeight,
+      baseUnit: product.baseUnit,
+      packages: product.packages.map((pack) => ({
+        ...pack,
+        multiplier: decimalToNumber(pack.multiplier),
+      })),
+      basePrice: receiptPrice?.value ?? null,
+      receiptPrice: receiptPrice?.value ?? null,
+      currency: DEFAULT_ORDER_CURRENCY,
+      priceType: receiptPrice
+        ? { guid: receiptPrice.priceType.guid, name: receiptPrice.priceType.name }
+        : null,
+      priceMatch: receiptPrice
+        ? { source: 'product-prices', level: 'ЦенаПоступления', minQty: receiptPrice.minQty }
+        : null,
+      priceError: receiptPrice
+        ? null
+        : `Не найдена начальная цена ЦенаПоступления для товара ${formatProductLabel(product)}`,
+      stock: stockByProductId.get(product.id) ?? null,
+    }];
+  });
+}
+
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
   const sourceUpdatedAt = now();
 
@@ -2642,6 +2776,12 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         status: true,
         source: true,
         isPostedIn1c: true,
+        items: {
+          select: {
+            quantity: true,
+            basePrice: true,
+          },
+        },
       },
     });
 
@@ -2654,6 +2794,13 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
 
     if (order.status === OrderStatus.CANCELLED) {
       throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя отправить');
+    }
+    if (order.items.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
+      throw new ClientOrdersError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'Исправьте строки с нулевым количеством или ценой перед отправкой'
+      );
     }
 
     const nextRevision = order.revision + 1;

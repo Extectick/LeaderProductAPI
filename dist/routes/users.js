@@ -34,7 +34,17 @@ const USER_LIST_SELECT = {
     role: { select: { id: true, name: true, displayName: true } },
     clientProfile: { select: { avatarUrl: true } },
     supplierProfile: { select: { avatarUrl: true } },
-    employeeProfile: { select: { departmentId: true, avatarUrl: true, onecUserGuid: true, onecPhysicalPersonGuid: true, department: { select: { id: true, name: true } } } },
+    employeeProfile: {
+        select: {
+            departmentId: true,
+            activeDepartmentId: true,
+            avatarUrl: true,
+            onecUserGuid: true,
+            onecPhysicalPersonGuid: true,
+            department: { select: { id: true, name: true } },
+            activeDepartment: { select: { id: true, name: true } },
+        },
+    },
 };
 const ADMIN_USER_LIST_SELECT = {
     id: true,
@@ -57,10 +67,12 @@ const ADMIN_USER_LIST_SELECT = {
         select: {
             status: true,
             departmentId: true,
+            activeDepartmentId: true,
             avatarUrl: true,
             onecUserGuid: true,
             onecPhysicalPersonGuid: true,
             department: { select: { id: true, name: true } },
+            activeDepartment: { select: { id: true, name: true } },
         },
     },
     _count: {
@@ -106,6 +118,28 @@ function resolveEmployeeModerationState(status) {
     if (status === 'BLOCKED')
         return 'EMPLOYEE_BLOCKED';
     return 'EMPLOYEE_PENDING';
+}
+async function ensureDepartmentExists(departmentId) {
+    const department = await client_2.default.department.findUnique({ where: { id: departmentId } });
+    if (!department) {
+        throw new Error('Department not found');
+    }
+    return department;
+}
+async function canUseDepartmentAsActive(userId, departmentId) {
+    const profile = await client_2.default.employeeProfile.findUnique({
+        where: { userId },
+        select: { departmentId: true },
+    });
+    if (!profile)
+        return false;
+    if (profile.departmentId === departmentId)
+        return true;
+    const departmentRole = await client_2.default.departmentRole.findFirst({
+        where: { userId, departmentId },
+        select: { id: true },
+    });
+    return Boolean(departmentRole);
 }
 function resolvePermissionGroupView(input) {
     const group = input.group;
@@ -283,13 +317,15 @@ router.put('/me/department', auth_1.authenticateToken, checkUserStatus_1.checkUs
         if (isNaN(departmentIdNum)) {
             return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный ID отдела', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
         }
-        const department = await client_2.default.department.findUnique({ where: { id: departmentIdNum } });
-        if (!department) {
+        try {
+            await ensureDepartmentExists(departmentIdNum);
+        }
+        catch {
             return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
         }
         await client_2.default.employeeProfile.updateMany({
             where: { userId: Number(userId) },
-            data: { departmentId: departmentIdNum },
+            data: { departmentId: departmentIdNum, activeDepartmentId: departmentIdNum },
         });
         res.json((0, apiResponse_1.successResponse)({ message: 'Отдел пользователя обновлен' }));
     }
@@ -361,13 +397,15 @@ router.put('/:userId/department', auth_1.authenticateToken, checkUserStatus_1.ch
         if (!user) {
             return res.status(404).json((0, apiResponse_1.errorResponse)('Пользователь не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
         }
-        const department = await client_2.default.department.findUnique({ where: { id: departmentIdNum } });
-        if (!department) {
+        try {
+            await ensureDepartmentExists(departmentIdNum);
+        }
+        catch {
             return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
         }
         await client_2.default.employeeProfile.updateMany({
             where: { userId: userIdNum },
-            data: { departmentId: departmentIdNum },
+            data: { departmentId: departmentIdNum, activeDepartmentId: departmentIdNum },
         });
         res.json((0, apiResponse_1.successResponse)({ message: `Отдел пользователя ${userId} обновлен` }));
     }
@@ -378,6 +416,103 @@ router.put('/:userId/department', auth_1.authenticateToken, checkUserStatus_1.ch
         else {
             res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления отдела', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
         }
+    }
+});
+router.put('/me/active-department', auth_1.authenticateToken, checkUserStatus_1.checkUserStatus, (0, audit_1.auditLog)('Пользователь обновил активный отдел'), async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { departmentId } = req.body;
+        const profile = await client_2.default.employeeProfile.findUnique({
+            where: { userId },
+            select: { userId: true },
+        });
+        if (!profile) {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('Профиль сотрудника не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        if (departmentId === null) {
+            await client_2.default.employeeProfile.update({
+                where: { userId },
+                data: { activeDepartmentId: null },
+            });
+            return res.json((0, apiResponse_1.successResponse)({ message: 'Активный отдел сброшен' }));
+        }
+        const departmentIdNum = Number(departmentId);
+        if (Number.isNaN(departmentIdNum)) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный ID отдела', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        try {
+            await ensureDepartmentExists(departmentIdNum);
+        }
+        catch {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        const canUse = await canUseDepartmentAsActive(userId, departmentIdNum);
+        if (!canUse) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Активным можно выбрать только основной отдел или отдел из дополнительных ролей', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        await client_2.default.employeeProfile.update({
+            where: { userId },
+            data: { activeDepartmentId: departmentIdNum },
+        });
+        return res.json((0, apiResponse_1.successResponse)({ message: 'Активный отдел обновлен' }));
+    }
+    catch (error) {
+        if (error instanceof Error) {
+            return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления активного отдела', apiResponse_1.ErrorCodes.INTERNAL_ERROR, process.env.NODE_ENV === 'development' ? error : undefined));
+        }
+        return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления активного отдела', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
+    }
+});
+router.put('/:userId/active-department', auth_1.authenticateToken, checkUserStatus_1.checkUserStatus, (0, auth_1.authorizeRoles)(['admin']), (0, audit_1.auditLog)('Админ обновил активный отдел пользователя'), async (req, res) => {
+    try {
+        const userId = Number(req.params.userId);
+        const { departmentId } = req.body;
+        if (Number.isNaN(userId)) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный ID пользователя', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        const user = await client_2.default.user.findUnique({ where: { id: userId }, select: { id: true } });
+        if (!user) {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('Пользователь не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        const profile = await client_2.default.employeeProfile.findUnique({
+            where: { userId },
+            select: { userId: true },
+        });
+        if (!profile) {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('Профиль сотрудника не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        if (departmentId === null) {
+            await client_2.default.employeeProfile.update({
+                where: { userId },
+                data: { activeDepartmentId: null },
+            });
+            return res.json((0, apiResponse_1.successResponse)({ message: `Активный отдел пользователя ${userId} сброшен` }));
+        }
+        const departmentIdNum = Number(departmentId);
+        if (Number.isNaN(departmentIdNum)) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный ID отдела', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        try {
+            await ensureDepartmentExists(departmentIdNum);
+        }
+        catch {
+            return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
+        }
+        const canUse = await canUseDepartmentAsActive(userId, departmentIdNum);
+        if (!canUse) {
+            return res.status(400).json((0, apiResponse_1.errorResponse)('Активным можно выбрать только основной отдел или отдел из дополнительных ролей', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
+        }
+        await client_2.default.employeeProfile.update({
+            where: { userId },
+            data: { activeDepartmentId: departmentIdNum },
+        });
+        return res.json((0, apiResponse_1.successResponse)({ message: `Активный отдел пользователя ${userId} обновлен` }));
+    }
+    catch (error) {
+        if (error instanceof Error) {
+            return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления активного отдела', apiResponse_1.ErrorCodes.INTERNAL_ERROR, process.env.NODE_ENV === 'development' ? error : undefined));
+        }
+        return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления активного отдела', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
     }
 });
 /**
@@ -809,6 +944,7 @@ router.post('/profiles/employee', auth_1.authenticateToken, checkUserStatus_1.ch
             data: {
                 userId,
                 departmentId,
+                activeDepartmentId: departmentId,
             }
         });
         await client_2.default.user.update({
@@ -928,7 +1064,14 @@ router.delete('/departments/:departmentId', auth_1.authenticateToken, checkUserS
             return res.status(400).json((0, apiResponse_1.errorResponse)('Некорректный ID отдела', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
         }
         // Снимаем ссылки, чтобы не нарушать FK (сотрудники, роли, обращения)
-        await client_2.default.employeeProfile.updateMany({ where: { departmentId }, data: { departmentId: null } });
+        await client_2.default.employeeProfile.updateMany({
+            where: { departmentId },
+            data: { departmentId: null, activeDepartmentId: null },
+        });
+        await client_2.default.employeeProfile.updateMany({
+            where: { activeDepartmentId: departmentId },
+            data: { activeDepartmentId: null },
+        });
         await client_2.default.departmentRole.deleteMany({ where: { departmentId } });
         // обращения, где отдел указан
         // Обнуляем ссылку на отдел в обращениях, чтобы не ломать FK
@@ -1612,6 +1755,8 @@ router.get('/admin/list', auth_1.authenticateToken, checkUserStatus_1.checkUserS
                     : null,
                 departmentName: u.employeeProfile?.department?.name ?? null,
                 departmentId: u.employeeProfile?.department?.id ?? null,
+                activeDepartmentName: u.employeeProfile?.activeDepartment?.name ?? null,
+                activeDepartmentId: u.employeeProfile?.activeDepartment?.id ?? null,
                 onecUserGuid: u.employeeProfile?.onecUserGuid ?? null,
                 onecPhysicalPersonGuid: u.employeeProfile?.onecPhysicalPersonGuid ?? null,
                 employeeStatus,
@@ -1690,7 +1835,14 @@ router.get('/', auth_1.authenticateToken, checkUserStatus_1.checkUserStatus, (0,
                         : u.avatarUrl;
             const avatarUrl = await (0, minio_1.resolveObjectUrl)(rawAvatar ?? null);
             const departmentName = u.employeeProfile?.department?.name ?? null;
-            return { ...u, avatarUrl, departmentName, phone: (0, phone_1.toApiPhoneString)(u.phone) };
+            const activeDepartmentName = u.employeeProfile?.activeDepartment?.name ?? null;
+            return {
+                ...u,
+                avatarUrl,
+                departmentName,
+                activeDepartmentName,
+                phone: (0, phone_1.toApiPhoneString)(u.phone),
+            };
         }));
         const presence = await (0, presenceService_1.getPresenceForUsers)(usersWithAvatar.map((u) => u.id));
         const presenceMap = new Map(presence.map((p) => [p.userId, p]));
@@ -2371,14 +2523,22 @@ router.patch('/:userId', auth_1.authenticateToken, checkUserStatus_1.checkUserSt
         if (req.body.departmentId !== undefined) {
             const depId = req.body.departmentId;
             if (depId === null) {
-                await client_2.default.employeeProfile.updateMany({ where: { userId }, data: { departmentId: null } });
+                await client_2.default.employeeProfile.updateMany({
+                    where: { userId },
+                    data: { departmentId: null, activeDepartmentId: null },
+                });
             }
             else {
-                const department = await client_2.default.department.findUnique({ where: { id: Number(depId) } });
-                if (!department) {
+                try {
+                    await ensureDepartmentExists(Number(depId));
+                }
+                catch {
                     return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
                 }
-                await client_2.default.employeeProfile.updateMany({ where: { userId }, data: { departmentId: Number(depId) } });
+                await client_2.default.employeeProfile.updateMany({
+                    where: { userId },
+                    data: { departmentId: Number(depId), activeDepartmentId: Number(depId) },
+                });
             }
         }
         const onecUserGuid = normalizeOptionalOnecGuid(req.body.onecUserGuid);
@@ -2843,13 +3003,17 @@ router.patch('/:userId/profiles/:type', auth_1.authenticateToken, checkUserStatu
             if (departmentId !== undefined) {
                 if (departmentId === null) {
                     data.departmentId = null;
+                    data.activeDepartmentId = null;
                 }
                 else {
-                    const dep = await client_2.default.department.findUnique({ where: { id: Number(departmentId) } });
-                    if (!dep) {
+                    try {
+                        await ensureDepartmentExists(Number(departmentId));
+                    }
+                    catch {
                         return res.status(404).json((0, apiResponse_1.errorResponse)('Отдел не найден', apiResponse_1.ErrorCodes.NOT_FOUND));
                     }
                     data.departmentId = Number(departmentId);
+                    data.activeDepartmentId = Number(departmentId);
                 }
             }
             if (!Object.keys(data).length) {

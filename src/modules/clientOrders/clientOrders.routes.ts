@@ -12,6 +12,7 @@ import {
   clientOrderSettingsUpdateSchema,
   clientOrderSubmitSchema,
   clientOrderUpdateSchema,
+  clientOrdersBatchProductsSchema,
   clientOrdersAgreementsQuerySchema,
   clientOrdersContractsQuerySchema,
   clientOrdersCounterpartiesQuerySchema,
@@ -37,6 +38,7 @@ import {
   getClientOrdersCounterparties,
   getClientOrdersDeliveryAddresses,
   getClientOrdersPriceTypes,
+  getClientOrdersProductsByGuids,
   getClientOrdersProducts,
   getClientOrdersReferenceData,
   getClientOrdersWarehouses,
@@ -50,12 +52,19 @@ const router = express.Router();
 
 router.use(authenticateToken, checkUserStatus, authorizeServiceAccess('client_orders'));
 
+const validationMessage = (error: ZodError) => {
+  const issue = error.issues[0];
+  if (!issue) return 'Проверьте заполнение полей.';
+  const field = issue.path.length ? `Поле «${issue.path.join('.')}»: ` : '';
+  return `${field}${issue.message}`;
+};
+
 const handleError = (res: express.Response, err: unknown, fallbackMessage: string) => {
   if (err instanceof ClientOrdersError) {
     return res.status(err.status).json(errorResponse(err.message, err.code));
   }
   if (err instanceof ZodError) {
-    return res.status(400).json(errorResponse(err.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(err), ErrorCodes.VALIDATION_ERROR));
   }
   console.error(fallbackMessage, err);
   return res.status(500).json(errorResponse(fallbackMessage, ErrorCodes.INTERNAL_ERROR));
@@ -71,7 +80,7 @@ const pagedMeta = (total: number, count: number, limit: number, offset: number) 
 router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersListQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -80,7 +89,10 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
       successResponse(
         { items: result.items },
         'Список заказов клиентов',
-        pagedMeta(result.total, result.items.length, result.limit, result.offset)
+        {
+          ...pagedMeta(result.total, result.items.length, result.limit, result.offset),
+          statusCounts: result.statusCounts,
+        }
       )
     );
   } catch (err) {
@@ -100,7 +112,7 @@ router.get('/settings', authorizePermissions(['view_client_orders']), async (req
 router.put('/settings', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrderSettingsUpdateSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -114,7 +126,7 @@ router.put('/settings', authorizePermissions(['manage_client_orders']), async (r
 router.get('/defaults', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrderDefaultsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -128,7 +140,7 @@ router.get('/defaults', authorizePermissions(['view_client_orders']), async (req
 router.get('/reference-data', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersReferenceDataQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -142,7 +154,7 @@ router.get('/reference-data', authorizePermissions(['view_client_orders']), asyn
 router.get('/reference-details/:kind/:guid', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrderReferenceDetailsParamsSchema.safeParse(req.params);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -156,7 +168,7 @@ router.get('/reference-details/:kind/:guid', authorizePermissions(['view_client_
 router.get('/counterparties', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersCounterpartiesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -176,7 +188,7 @@ router.get('/counterparties', authorizePermissions(['view_client_orders']), asyn
 router.get('/agreements', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersAgreementsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -196,7 +208,7 @@ router.get('/agreements', authorizePermissions(['view_client_orders']), async (r
 router.get('/contracts', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersContractsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -216,7 +228,7 @@ router.get('/contracts', authorizePermissions(['view_client_orders']), async (re
 router.get('/warehouses', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersWarehousesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -236,7 +248,7 @@ router.get('/warehouses', authorizePermissions(['view_client_orders']), async (r
 router.get('/delivery-addresses', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersDeliveryAddressesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -256,7 +268,7 @@ router.get('/delivery-addresses', authorizePermissions(['view_client_orders']), 
 router.get('/price-types', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersPriceTypesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -276,7 +288,7 @@ router.get('/price-types', authorizePermissions(['view_client_orders']), async (
 router.get('/products', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrdersProductsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -293,10 +305,24 @@ router.get('/products', authorizePermissions(['view_client_orders']), async (req
   }
 });
 
+router.post('/products/batch', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = clientOrdersBatchProductsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const items = await getClientOrdersProductsByGuids(parsed.data);
+    return res.json(successResponse({ items }, 'Данные номенклатуры для заказа клиента'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения данных номенклатуры для заказа клиента');
+  }
+});
+
 router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   const parsed = orderGuidParamsSchema.safeParse(req.params);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -310,7 +336,7 @@ router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: A
 router.post('/', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrderCreateSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json(errorResponse(parsed.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -325,10 +351,10 @@ router.patch('/:guid', authorizePermissions(['manage_client_orders']), async (re
   const params = orderGuidParamsSchema.safeParse(req.params);
   const body = clientOrderUpdateSchema.safeParse(req.body);
   if (!params.success) {
-    return res.status(400).json(errorResponse(params.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
   }
   if (!body.success) {
-    return res.status(400).json(errorResponse(body.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -342,7 +368,7 @@ router.patch('/:guid', authorizePermissions(['manage_client_orders']), async (re
 router.delete('/:guid', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
   const params = orderGuidParamsSchema.safeParse(req.params);
   if (!params.success) {
-    return res.status(400).json(errorResponse(params.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -357,10 +383,10 @@ router.post('/:guid/submit', authorizePermissions(['manage_client_orders']), asy
   const params = orderGuidParamsSchema.safeParse(req.params);
   const body = clientOrderSubmitSchema.safeParse(req.body);
   if (!params.success) {
-    return res.status(400).json(errorResponse(params.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
   }
   if (!body.success) {
-    return res.status(400).json(errorResponse(body.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {
@@ -375,10 +401,10 @@ router.post('/:guid/cancel', authorizePermissions(['manage_client_orders']), asy
   const params = orderGuidParamsSchema.safeParse(req.params);
   const body = clientOrderCancelSchema.safeParse(req.body);
   if (!params.success) {
-    return res.status(400).json(errorResponse(params.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
   }
   if (!body.success) {
-    return res.status(400).json(errorResponse(body.error.message, ErrorCodes.VALIDATION_ERROR));
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
   }
 
   try {

@@ -33,6 +33,7 @@ const getProfile = async (userId) => {
             employeeProfile: {
                 include: {
                     department: true,
+                    activeDepartment: true,
                     departmentRoles: {
                         include: {
                             role: true
@@ -137,6 +138,9 @@ const getProfile = async (userId) => {
             onecPhysicalPersonGuid: user.employeeProfile.onecPhysicalPersonGuid ?? null,
             department: user.employeeProfile.department
                 ? { id: user.employeeProfile.department.id, name: user.employeeProfile.department.name }
+                : null,
+            activeDepartment: user.employeeProfile.activeDepartment
+                ? { id: user.employeeProfile.activeDepartment.id, name: user.employeeProfile.activeDepartment.name }
                 : null,
             departmentRoles: user.employeeProfile.departmentRoles?.map((dr) => ({
                 id: dr.id,

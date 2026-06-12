@@ -319,6 +319,7 @@ model StockBalance {
 
   @@index([organizationId])
   @@index([warehouseId])
+  @@index([warehouseId, productId])
   @@index([seriesGuid])
   @@index([updatedAt])
   @@index([sourceUpdatedAt])
@@ -522,6 +523,7 @@ model ProductPrice {
 
   @@index([productId])
   @@index([priceTypeId])
+  @@index([productId, priceTypeId, isActive])
   @@index([isActive])
   @@index([sourceUpdatedAt])
   @@unique([productId, priceTypeId, startDate])
@@ -625,6 +627,8 @@ model Order {
   @@index([createdByUserId])
   @@index([status])
   @@index([source])
+  @@index([source, updatedAt])
+  @@index([source, status, updatedAt])
   @@index([syncState])
   @@index([revision])
   @@index([queuedAt])
