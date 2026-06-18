@@ -11,7 +11,7 @@ const DEFAULT_LOCAL_TEST_S3_BUCKET = 'leader-api-test';
 const DEFAULT_LOCAL_TEST_S3_ACCESS_KEY = 'minioadmin';
 const DEFAULT_LOCAL_TEST_S3_SECRET_KEY = 'minioadmin';
 
-dotenv.config({ path: path.resolve(process.cwd(), '.env.test') });
+dotenv.config({ path: path.resolve(process.cwd(), '.env.test'), quiet: true });
 
 process.env.DATABASE_URL =
   process.env.DATABASE_URL || process.env.TEST_DATABASE_URL || DEFAULT_LOCAL_TEST_DATABASE_URL;

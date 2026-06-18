@@ -1,6 +1,8 @@
 # ---- build stage ----
-  FROM node:20-alpine AS builder
+  FROM node:24-alpine AS builder
   WORKDIR /app
+  ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+  ENV NPM_CONFIG_FUND=false
   
   # схема нужна ДО npm ci (postinstall: prisma generate)
   RUN apk add --no-cache openssl libc6-compat libstdc++
@@ -20,8 +22,10 @@
   RUN mkdir -p dist/middleware && cp -r src/middleware/debug-ui dist/middleware/
   
   # ---- runtime stage ----
-  FROM node:20-alpine AS runner
+  FROM node:24-alpine AS runner
   WORKDIR /app
+  ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+  ENV NPM_CONFIG_FUND=false
   
   # зависимости для Prisma engines на Alpine (musl)
   RUN apk add --no-cache openssl libc6-compat libstdc++

@@ -7,4 +7,4 @@ const envFile =
   ENV === 'test'       ? '.env.test' :
                          '.env.dev';
 
-dotenv.config({ path: path.resolve(process.cwd(), envFile) });
+dotenv.config({ path: path.resolve(process.cwd(), envFile), quiet: true });

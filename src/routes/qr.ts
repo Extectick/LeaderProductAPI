@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { Parser } from 'json2csv';
+import { Parser } from '@json2csv/plainjs';
 import {
   Prisma,
   AppealStatus,
@@ -21,6 +21,7 @@ import {
 } from '../utils/apiResponse';
 import { cacheGet, cacheSet, cacheDelPrefix } from '../utils/cache';
 import { randomBytes } from 'node:crypto';
+import net from 'node:net';
 
 import {
   QRCreateRequest,
@@ -37,7 +38,7 @@ import {
   QRAnalyticsQueryResponse
 } from 'types/qrTypes';
 import { checkUserStatus } from '../middleware/checkUserStatus';
-import geoip from 'geoip-lite';
+import geoip from 'fast-geoip';
 import {
   assertQrType,
   generateQRCode,
@@ -58,6 +59,39 @@ const generateShortId = () => {
   }
   return out;
 };
+
+function normalizePublicIp(rawIp: string | undefined | null) {
+  if (!rawIp) return null;
+  let ip = rawIp.trim();
+  if (!ip) return null;
+  if (ip.startsWith('[')) ip = ip.slice(1, ip.indexOf(']') > 0 ? ip.indexOf(']') : undefined);
+  if (ip.startsWith('::ffff:')) ip = ip.slice('::ffff:'.length);
+
+  const ipVersion = net.isIP(ip);
+  if (!ipVersion) return null;
+
+  if (ipVersion === 4) {
+    const parts = ip.split('.').map(Number);
+    const [a, b] = parts;
+    const isPrivate =
+      a === 10 ||
+      a === 127 ||
+      a === 0 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168);
+    return isPrivate ? null : ip;
+  }
+
+  const lower = ip.toLowerCase();
+  const isPrivate =
+    lower === '::1' ||
+    lower.startsWith('fc') ||
+    lower.startsWith('fd') ||
+    lower.startsWith('fe80:');
+  return isPrivate ? null : ip;
+}
 
 /**
  * Определение типа вложения на основе MIME.
@@ -1474,7 +1508,8 @@ router.get('/:id/scan', async (req, res) => {
       req.socket.remoteAddress ||
       req.ip;
 
-    const geo = geoip.lookup(ip || '');
+    const publicIp = normalizePublicIp(ip);
+    const geo = publicIp ? await geoip.lookup(publicIp) : null;
     const location = geo
       ? `${geo.city || 'Unknown City'}, ${geo.country || 'Unknown Country'}`
       : 'Unknown';

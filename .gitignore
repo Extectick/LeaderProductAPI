@@ -2,6 +2,8 @@ node_modules/
 dist
 node_modules
 backups
+.tmp-prisma-studio/
+.tmp-*.log
 
 # env files (secrets)
 .env

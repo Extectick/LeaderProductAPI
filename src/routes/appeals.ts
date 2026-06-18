@@ -2,7 +2,8 @@
 import express from 'express';
 
 import multer from 'multer';
-import { Parser } from 'json2csv';
+import { Parser } from '@json2csv/plainjs';
+import writeXlsxFile, { type Cell, type Row } from 'write-excel-file/node';
 import {
   Prisma,
   AppealStatus,
@@ -971,11 +972,8 @@ async function buildXlsxBuffer(
 ) {
   const orderedKeys = Object.keys(rows[0] || footerRow || {});
   const probeRows = footerRow ? [...rows, footerRow] : rows;
-  const { Workbook } = loadExcelJs();
-  const workbook = new Workbook();
-  const sheet = workbook.addWorksheet(sheetName);
 
-  sheet.columns = orderedKeys.map((key) => {
+  const columns = orderedKeys.map((key) => {
     const headerLen = String(key).length;
     const maxCellLen = probeRows.reduce((maxLen, row) => {
       const raw = row?.[key];
@@ -986,60 +984,40 @@ async function buildXlsxBuffer(
       return Math.max(maxLen, lineMax);
     }, 0);
     const width = Math.min(80, Math.max(12, Math.max(headerLen, maxCellLen) + 2));
-    return { header: key, key, width };
+    return { width };
   });
 
+  const makeCell = (key: string, value: ExportCellValue, isHeader = false): Cell => {
+    const format = columnFormats?.[key] ?? 'text';
+    const isNumber = typeof value === 'number' && Number.isFinite(value);
+    return {
+      value: value == null ? '' : value,
+      type: isNumber ? Number : String,
+      format: format === 'number' ? '0.00' : format === 'currency' ? '#,##0.00 [$₽-ru-RU]' : undefined,
+      align: isHeader || format === 'text' ? 'left' : 'right',
+      alignVertical: isHeader ? 'center' : 'top',
+      wrap: true,
+      fontWeight: isHeader ? 'bold' : undefined,
+    };
+  };
+
+  const sheetData: Row[] = [];
   if (orderedKeys.length > 0) {
+    sheetData.push(orderedKeys.map((key) => makeCell(key, key, true)));
     for (const row of rows) {
-      const rowData: Record<string, ExportCellValue> = {};
-      for (const key of orderedKeys) rowData[key] = row?.[key] == null ? '' : row[key];
-      sheet.addRow(rowData);
+      sheetData.push(orderedKeys.map((key) => makeCell(key, row?.[key] == null ? '' : row[key])));
     }
     if (footerRow) {
-      const footerData: Record<string, ExportCellValue> = {};
-      for (const key of orderedKeys) footerData[key] = footerRow?.[key] == null ? '' : footerRow[key];
-      sheet.addRow(footerData);
+      sheetData.push(orderedKeys.map((key) => makeCell(key, footerRow?.[key] == null ? '' : footerRow[key])));
     }
   }
 
-  const dataStartRow = 2;
-  for (let rowNum = dataStartRow; rowNum <= sheet.rowCount; rowNum += 1) {
-    const row = sheet.getRow(rowNum);
-    let maxLines = 1;
-    for (let col = 1; col <= orderedKeys.length; col += 1) {
-      const cell = row.getCell(col);
-      const columnKey = orderedKeys[col - 1];
-      const value = cell.value == null ? '' : String(cell.value);
-      const lines = value ? value.split(/\r?\n/).length : 1;
-      maxLines = Math.max(maxLines, lines);
-      const format = columnFormats?.[columnKey] ?? 'text';
-      cell.alignment = {
-        wrapText: true,
-        vertical: 'top',
-        horizontal: format === 'text' ? 'left' : 'right',
-      };
-      if (format === 'number') cell.numFmt = '0.00';
-      if (format === 'currency') cell.numFmt = '#,##0.00 [$₽-ru-RU]';
-    }
-    row.height = Math.max(18, maxLines * 18 + 2);
-  }
-
-  const headerRow = sheet.getRow(1);
-  headerRow.height = 22;
-  for (let col = 1; col <= orderedKeys.length; col += 1) {
-    headerRow.getCell(col).alignment = { wrapText: true, vertical: 'middle' };
-  }
-
-  const raw = await workbook.xlsx.writeBuffer();
+  const raw = await writeXlsxFile(sheetData, {
+    sheet: sheetName,
+    columns,
+    stickyRowsCount: orderedKeys.length > 0 ? 1 : 0,
+  }).toBuffer();
   return Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
-}
-
-function loadExcelJs(): { Workbook: new () => any } {
-  try {
-    return require('exceljs') as { Workbook: new () => any };
-  } catch (error) {
-    throw new Error('exceljs is not installed. Install dependencies to use XLSX export endpoints.');
-  }
 }
 
 const router = express.Router();

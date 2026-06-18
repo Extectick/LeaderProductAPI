@@ -12,8 +12,9 @@ const serviceAccess_1 = require("../middleware/serviceAccess");
 const apiResponse_1 = require("../utils/apiResponse");
 const cache_1 = require("../utils/cache");
 const node_crypto_1 = require("node:crypto");
+const node_net_1 = __importDefault(require("node:net"));
 const checkUserStatus_1 = require("../middleware/checkUserStatus");
-const geoip_lite_1 = __importDefault(require("geoip-lite"));
+const fast_geoip_1 = __importDefault(require("fast-geoip"));
 const qrService_1 = require("../services/qrService");
 const validator = require('validator');
 const UAParser = require('ua-parser-js');
@@ -27,6 +28,38 @@ const generateShortId = () => {
     }
     return out;
 };
+function normalizePublicIp(rawIp) {
+    if (!rawIp)
+        return null;
+    let ip = rawIp.trim();
+    if (!ip)
+        return null;
+    if (ip.startsWith('['))
+        ip = ip.slice(1, ip.indexOf(']') > 0 ? ip.indexOf(']') : undefined);
+    if (ip.startsWith('::ffff:'))
+        ip = ip.slice('::ffff:'.length);
+    const ipVersion = node_net_1.default.isIP(ip);
+    if (!ipVersion)
+        return null;
+    if (ipVersion === 4) {
+        const parts = ip.split('.').map(Number);
+        const [a, b] = parts;
+        const isPrivate = a === 10 ||
+            a === 127 ||
+            a === 0 ||
+            (a === 100 && b >= 64 && b <= 127) ||
+            (a === 169 && b === 254) ||
+            (a === 172 && b >= 16 && b <= 31) ||
+            (a === 192 && b === 168);
+        return isPrivate ? null : ip;
+    }
+    const lower = ip.toLowerCase();
+    const isPrivate = lower === '::1' ||
+        lower.startsWith('fc') ||
+        lower.startsWith('fd') ||
+        lower.startsWith('fe80:');
+    return isPrivate ? null : ip;
+}
 /**
  * Определение типа вложения на основе MIME.
  */
@@ -1132,7 +1165,8 @@ router.get('/:id/scan', async (req, res) => {
         const ip = req.headers['x-forwarded-for']?.toString().split(',')[0] ||
             req.socket.remoteAddress ||
             req.ip;
-        const geo = geoip_lite_1.default.lookup(ip || '');
+        const publicIp = normalizePublicIp(ip);
+        const geo = publicIp ? await fast_geoip_1.default.lookup(publicIp) : null;
         const location = geo
             ? `${geo.city || 'Unknown City'}, ${geo.country || 'Unknown Country'}`
             : 'Unknown';

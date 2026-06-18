@@ -166,14 +166,17 @@ describe('/api/1c/lp-app proxy', () => {
   });
 
   it('requires JWT', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
     const response = await request(app).get('/api/1c/lp-app/ping');
 
     expect(response.status).toBe(401);
     expect(fetchMock).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
-  it('returns 409 when employee has no 1C user guid', async () => {
-    setScenario({ onecUserGuid: null });
+  it('returns 409 when employee has no 1C binding guid', async () => {
+    setScenario({ onecUserGuid: null, onecPhysicalPersonGuid: null });
 
     const response = await request(app)
       .get('/api/1c/lp-app/transport-tasks')
@@ -193,7 +196,8 @@ describe('/api/1c/lp-app proxy', () => {
 
     const calledUrl = fetchMock.mock.calls[0][0] as URL;
     expect(calledUrl.searchParams.get('driverGuid')).toBeNull();
-    expect(calledUrl.searchParams.get('driverUserGuid')).toBe('11111111-1111-1111-1111-111111111111');
+    expect(calledUrl.searchParams.get('driverPhysicalPersonGuid')).toBe('11111111-1111-1111-1111-111111111111');
+    expect(calledUrl.searchParams.get('driverUserGuid')).toBeNull();
     expect(calledUrl.searchParams.get('limit')).toBe('10');
   });
 
