@@ -20,6 +20,7 @@
     "test:integration:docker": "node scripts/run-integration-tests.js",
     "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts",
     "updates:publish-apk-db": "node scripts/publish-apk-update-db.js",
+    "ota:publish-db": "node scripts/publish-ota-update-db.js",
     "audit:employee-moderation": "node scripts/audit-employee-moderation-consistency.js",
     "fix:employee-moderation": "node scripts/fix-employee-moderation-consistency.js",
     "fix:employee-moderation:apply": "node scripts/fix-employee-moderation-consistency.js --apply"
