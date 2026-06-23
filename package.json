@@ -12,7 +12,6 @@
     "prisma:migrate": "dotenv -e .env.dev -- prisma migrate deploy",
     "studio": "node scripts/run-prisma-studio.js",
     "prisma:seed": "dotenv -e .env.dev -- ts-node --transpile-only src/prisma/seed.ts",
-    "postinstall": "prisma generate",
     "test": "npm run test:unit",
     "test:unit": "cross-env NODE_ENV=test jest --config jest.unit.config.ts",
     "test:integration": "cross-env NODE_ENV=test TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test?schema=public TEST_REDIS_URL=redis://127.0.0.1:6389 jest --config jest.config.ts",
@@ -20,6 +19,7 @@
     "test:integration:db:down": "docker compose -p leaderproductapi-test -f docker-compose.test.yml down -v",
     "test:integration:docker": "node scripts/run-integration-tests.js",
     "db:seed": "ts-node --compiler-options '{\"module\":\"CommonJS\"}' src/prisma/seed.ts",
+    "updates:publish-apk-db": "node scripts/publish-apk-update-db.js",
     "audit:employee-moderation": "node scripts/audit-employee-moderation-consistency.js",
     "fix:employee-moderation": "node scripts/fix-employee-moderation-consistency.js",
     "fix:employee-moderation:apply": "node scripts/fix-employee-moderation-consistency.js --apply"

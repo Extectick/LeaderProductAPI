@@ -4,6 +4,7 @@ node_modules
 backups
 .tmp-prisma-studio/
 .tmp-*.log
+release-artifacts-gh/
 
 # env files (secrets)
 .env

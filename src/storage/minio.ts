@@ -16,7 +16,8 @@ import { signFileToken } from "../utils/fileTokens";
  *  - S3_REGION          (по умолчанию us-east-1)
  *  - S3_ACCESS_KEY
  *  - S3_SECRET_KEY
- *  - S3_BUCKET          (leader-product-dev / leader-product-prod)
+ *  - S3_BUCKET          (например: leader-product)
+ *  - S3_ENV_PREFIX      (dev / prod; по умолчанию NODE_ENV=production ? prod : dev)
  *  - S3_PUBLIC_BASE     (опц., если есть CDN/публичный прокси; напр. https://cdn.example.com/<bucket>)
  *  - FILES_BASE_URL     (опц., если отдаём файлы через API; напр. https://api.example.com)
  *  - FILES_REQUIRE_TOKEN (опц., 1 = требовать токен для /files)
@@ -24,7 +25,7 @@ import { signFileToken } from "../utils/fileTokens";
  *  - FILE_TOKEN_SECRET   (опц., отдельный секрет для файловых токенов)
  *  - PRESIGN_PUT_TTL    (сек., по умолчанию 600)
  *  - PRESIGN_GET_TTL    (сек., по умолчанию 600)
- *  - S3_KEY_PREFIX      (опц., базовый префикс для ключей; по умолчанию "uploads")
+ *  - S3_KEY_PREFIX      (опц., базовый префикс для файлов; по умолчанию "uploads")
  */
 
  const {
@@ -33,6 +34,7 @@ import { signFileToken } from "../utils/fileTokens";
   S3_ACCESS_KEY,
   S3_SECRET_KEY,
   S3_BUCKET,
+  S3_ENV_PREFIX,
   S3_PUBLIC_BASE,
   S3_PRESIGN_ENDPOINT,
   FILES_BASE_URL,
@@ -42,6 +44,7 @@ import { signFileToken } from "../utils/fileTokens";
   PRESIGN_PUT_TTL = "600",
   PRESIGN_GET_TTL = "600",
   S3_KEY_PREFIX = "uploads",
+  NODE_ENV,
 } = process.env;
 
 
@@ -115,6 +118,42 @@ function safeAsciiFilename(original?: string) {
   return trimmed || "file";
 }
 
+function normalizeKeyPart(value?: string | null) {
+  return String(value || "")
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\\/g, "/");
+}
+
+function normalizeEnvPrefix(value?: string | null) {
+  const raw = normalizeKeyPart(value).toLowerCase();
+  if (raw) return raw;
+  return NODE_ENV === "production" ? "prod" : "dev";
+}
+
+export const s3EnvPrefix = normalizeEnvPrefix(S3_ENV_PREFIX);
+
+export function buildStoragePrefix(keyPrefix = S3_KEY_PREFIX) {
+  const rawPrefix = normalizeKeyPart(keyPrefix || S3_KEY_PREFIX);
+  const prefix = rawPrefix || "uploads";
+
+  // Allow explicit fully-scoped prefixes for maintenance scripts and migrations.
+  if (prefix === s3EnvPrefix || prefix.startsWith(`${s3EnvPrefix}/`)) {
+    return prefix;
+  }
+  if (prefix.startsWith("dev/") || prefix.startsWith("prod/")) {
+    return prefix;
+  }
+
+  if (prefix === "updates") return `${s3EnvPrefix}/updates/apk`;
+  if (prefix === "ota") return `${s3EnvPrefix}/updates/ota`;
+  if (prefix === "avatars") return `${s3EnvPrefix}/images/avatars`;
+  if (prefix === "images") return `${s3EnvPrefix}/images`;
+  if (prefix === "uploads") return `${s3EnvPrefix}/files/uploads`;
+
+  return `${s3EnvPrefix}/${prefix}`;
+}
+
 function buildContentDisposition(original?: string) {
   const unicodeName = safeFilename(original);
   const asciiFallback = safeAsciiFilename(unicodeName);
@@ -127,7 +166,7 @@ export function buildObjectKey(originalName?: string, keyPrefix = S3_KEY_PREFIX)
   const ext = path.extname(normalized || "");
   const name = safeFilename(normalized);
   const hash = crypto.randomBytes(4).toString("hex");
-  const key = `${keyPrefix}/${Date.now()}_${hash}${ext || ""}`;
+  const key = `${buildStoragePrefix(keyPrefix)}/${Date.now()}_${hash}${ext || ""}`;
   return { key, fileName: name, ext };
 }
 
@@ -318,7 +357,7 @@ export async function uploadMulterFile(
   const ext = path.extname(normalized || "");
   const name = safeFilename(normalized);
   const hash = crypto.createHash("sha1").update(file.buffer).digest("hex").slice(0, 8);
-  const key = `${keyPrefix}/${Date.now()}_${hash}${ext || ""}`;
+  const key = `${buildStoragePrefix(keyPrefix)}/${Date.now()}_${hash}${ext || ""}`;
 
   const { url, bucket } = await uploadBuffer(
     key,

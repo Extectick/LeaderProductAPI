@@ -3,20 +3,35 @@
   WORKDIR /app
   ENV NPM_CONFIG_UPDATE_NOTIFIER=false
   ENV NPM_CONFIG_FUND=false
+  ENV NPM_CONFIG_AUDIT=false
+  ENV NPM_CONFIG_FETCH_RETRIES=5
+  ENV NPM_CONFIG_FETCH_RETRY_FACTOR=2
+  ENV NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000
+  ENV NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
+  ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
   
-  # схема нужна ДО npm ci (postinstall: prisma generate)
+  # схема нужна ДО npm ci, чтобы Prisma packages видели конфигурацию проекта
   RUN apk add --no-cache openssl libc6-compat libstdc++
   COPY package*.json ./
   COPY prisma.config.js ./
   COPY scripts ./scripts
   COPY prisma ./prisma
-  RUN npm ci
+  RUN for attempt in 1 2 3; do \
+        npm ci && break; \
+        if [ "$attempt" = "3" ]; then exit 1; fi; \
+        npm cache clean --force; \
+        sleep 5; \
+      done
   
   COPY tsconfig.json ./
   COPY src ./src
   
   # генерируем клиент и строим
-  RUN npx prisma generate
+  RUN for attempt in 1 2 3; do \
+        npx prisma generate && break; \
+        if [ "$attempt" = "3" ]; then exit 1; fi; \
+        sleep 5; \
+      done
   RUN npm run build
   # статические файлы debug-ui не попадают в dist при tsc
   RUN mkdir -p dist/middleware && cp -r src/middleware/debug-ui dist/middleware/
@@ -26,6 +41,7 @@
   WORKDIR /app
   ENV NPM_CONFIG_UPDATE_NOTIFIER=false
   ENV NPM_CONFIG_FUND=false
+  ENV NPM_CONFIG_AUDIT=false
   
   # зависимости для Prisma engines на Alpine (musl)
   RUN apk add --no-cache openssl libc6-compat libstdc++
