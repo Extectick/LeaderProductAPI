@@ -10,7 +10,7 @@ import {
 } from '../middleware/auth';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { errorResponse, ErrorCodes, successResponse } from '../utils/apiResponse';
-import { resolveObjectUrl } from '../storage/minio';
+import { deleteObject, resolveObjectUrl } from '../storage/minio';
 
 const router = express.Router();
 const DEFAULT_CHANNEL = 'prod';
@@ -21,6 +21,14 @@ type OtaAssetInput = {
   hash?: string;
   contentType?: string;
   fileExtension?: string;
+};
+
+type CleanupUpdate = {
+  id: number;
+  updateId: string;
+  manifestKey: string | null;
+  launchAssetKey: string;
+  assets: Prisma.JsonValue;
 };
 
 function noUpdate(res: express.Response) {
@@ -89,6 +97,25 @@ function normalizeAssetList(raw: unknown): OtaAssetInput[] {
       fileExtension: asset.fileExtension ? String(asset.fileExtension).trim() : undefined,
     };
   });
+}
+
+function collectUpdateObjectKeys(update: CleanupUpdate) {
+  const keys = new Set<string>();
+  if (update.manifestKey) keys.add(update.manifestKey);
+  if (update.launchAssetKey) keys.add(update.launchAssetKey);
+
+  for (const asset of normalizeAssetList(update.assets)) {
+    if (asset.key) keys.add(asset.key);
+  }
+
+  return Array.from(keys);
+}
+
+function parsePositiveInt(raw: unknown, fallback: number) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
 }
 
 function normalizePublishBody(body: any) {
@@ -317,6 +344,110 @@ router.post(
     } catch (error) {
       console.error('[ota] publish failed', error);
       return res.status(500).json(errorResponse('Ошибка публикации OTA обновления', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.post(
+  '/cleanup',
+  authenticateToken,
+  checkUserStatus,
+  authorizePermissions(['manage_updates']),
+  async (req: AuthRequest<{}, any, any, any>, res) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const platform = parsePlatform(body.platform as string | undefined);
+      const channel = body.channel ? parseChannel(body.channel as string) : undefined;
+      const runtimeVersion = body.runtimeVersion ? String(body.runtimeVersion).trim() : undefined;
+      const includeActive = parseBoolean(body.includeActive, false);
+      const dryRun = parseBoolean(body.dryRun, true);
+      const deleteDbRows = parseBoolean(body.deleteDbRows, false);
+      const keepLast = parsePositiveInt(body.keepLast, 0);
+      const limit = parsePositiveInt(body.limit, 50);
+      const olderThanDays = parsePositiveInt(body.olderThanDays, 0);
+
+      if (keepLast === null || limit === null || olderThanDays === null) {
+        return res.status(400).json(errorResponse('keepLast, limit и olderThanDays должны быть положительными числами', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      if (includeActive && !dryRun) {
+        return res.status(400).json(errorResponse('Активные OTA нельзя удалять через cleanup. Сначала деактивируйте обновление.', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const where: Prisma.AppOtaUpdateWhereInput = {};
+      if (!includeActive) where.isActive = false;
+      if (platform) where.platform = platform;
+      if (channel) where.channel = channel;
+      if (runtimeVersion) where.runtimeVersion = runtimeVersion;
+      if (olderThanDays > 0) {
+        where.createdAt = {
+          lt: new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000),
+        };
+      }
+
+      const updates = await prisma.appOtaUpdate.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(limit + keepLast, 200),
+        select: {
+          id: true,
+          updateId: true,
+          manifestKey: true,
+          launchAssetKey: true,
+          assets: true,
+        },
+      });
+
+      const candidates = updates.slice(keepLast);
+      const files = candidates.flatMap((update) =>
+        collectUpdateObjectKeys(update).map((key) => ({
+          updateId: update.updateId,
+          key,
+        }))
+      );
+
+      const deletedFiles: typeof files = [];
+      const failedFiles: Array<{ updateId: string; key: string; error: string }> = [];
+
+      if (!dryRun) {
+        for (const file of files) {
+          try {
+            await deleteObject(file.key);
+            deletedFiles.push(file);
+          } catch (error) {
+            failedFiles.push({
+              ...file,
+              error: error instanceof Error ? error.message : 'Unknown delete error',
+            });
+          }
+        }
+      }
+
+      let deletedDbRows = 0;
+      if (!dryRun && deleteDbRows && failedFiles.length === 0 && candidates.length > 0) {
+        const result = await prisma.appOtaUpdate.deleteMany({
+          where: { id: { in: candidates.map((update) => update.id) } },
+        });
+        deletedDbRows = result.count;
+      }
+
+      return res.json(successResponse({
+        dryRun,
+        includeActive,
+        keepLast,
+        matchedUpdates: updates.length,
+        cleanupUpdates: candidates.map((update) => ({
+          id: update.id,
+          updateId: update.updateId,
+        })),
+        files,
+        deletedFiles,
+        failedFiles,
+        deletedDbRows,
+      }, dryRun ? 'План очистки OTA файлов' : 'Очистка OTA файлов выполнена'));
+    } catch (error) {
+      console.error('[ota] cleanup failed', error);
+      return res.status(500).json(errorResponse('Ошибка очистки OTA файлов', ErrorCodes.INTERNAL_ERROR));
     }
   }
 );
