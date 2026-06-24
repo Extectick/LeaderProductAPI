@@ -140,6 +140,8 @@ model AppOtaUpdate {
   launchAssetType    String      @default("application/javascript")
   assets             Json?
   metadata           Json?
+  otaSequence        Int?
+  displayVersion     String?
   isActive           Boolean     @default(true)
   rolloutPercent     Int         @default(100)
   commitSha          String?
@@ -149,6 +151,7 @@ model AppOtaUpdate {
 
   @@index([platform, channel, runtimeVersion, createdAt])
   @@index([platform, channel, runtimeVersion, isActive])
+  @@index([platform, channel, runtimeVersion, otaSequence])
 }
 
 model ClientProfile {

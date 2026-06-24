@@ -30,6 +30,7 @@ Selection rules:
 - Newest `createdAt` wins.
 - `rolloutPercent` is applied by deterministic device/update hash.
 - If `expo-current-update-id` already equals the selected update id, API returns `204`.
+- Manifest `metadata.displayVersion` contains the human-readable runtime version, for example `v0.1.12+11.ota.2`.
 
 ## Admin Endpoints
 
@@ -61,14 +62,26 @@ Publish body:
     }
   ],
   "metadata": {
-    "commitSha": "..."
+    "commitSha": "...",
+    "baseVersionName": "0.1.12",
+    "baseVersionCode": 11
   },
+  "otaSequence": 2,
+  "displayVersion": "v0.1.12+11.ota.2",
   "isActive": true,
   "rolloutPercent": 100,
   "commitSha": "...",
   "releaseNotes": "..."
 }
 ```
+
+`otaSequence` and `displayVersion` are optional on publish. When omitted, API calculates the next sequence for the same `platform + channel + runtimeVersion` and builds:
+
+```text
+v<baseVersionName>+<baseVersionCode>.ota.<otaSequence>
+```
+
+If base version metadata is missing, API falls back to `runtimeVersion`.
 
 ## S3 Layout
 

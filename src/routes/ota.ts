@@ -31,6 +31,8 @@ type CleanupUpdate = {
   assets: Prisma.JsonValue;
 };
 
+type OtaMetadataRecord = Record<string, unknown>;
+
 function noUpdate(res: express.Response) {
   res.setHeader('expo-protocol-version', '1');
   res.setHeader('cache-control', 'private, no-cache, no-store');
@@ -118,6 +120,23 @@ function parsePositiveInt(raw: unknown, fallback: number) {
   return Math.floor(value);
 }
 
+function parseOptionalPositiveInt(raw: unknown) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+function asMetadataRecord(raw: unknown): OtaMetadataRecord {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return raw as OtaMetadataRecord;
+}
+
+function cleanString(raw: unknown) {
+  const value = String(raw ?? '').trim();
+  return value || null;
+}
+
 function normalizePublishBody(body: any) {
   const platform = parsePlatform(body?.platform);
   if (!platform) return { ok: false as const, message: 'platform должен быть android или ios' };
@@ -132,6 +151,11 @@ function normalizePublishBody(body: any) {
   const rolloutPercent = parseRollout(body?.rolloutPercent);
   if (rolloutPercent === null) {
     return { ok: false as const, message: 'rolloutPercent должен быть числом от 0 до 100' };
+  }
+
+  const otaSequence = parseOptionalPositiveInt(body?.otaSequence);
+  if (otaSequence === null) {
+    return { ok: false as const, message: 'otaSequence должен быть положительным числом' };
   }
 
   let assets: OtaAssetInput[];
@@ -157,13 +181,63 @@ function normalizePublishBody(body: any) {
       launchAssetHash: body?.launchAssetHash ? String(body.launchAssetHash).trim() : null,
       launchAssetType: String(body?.launchAssetType || 'application/javascript').trim(),
       assets,
-      metadata: body?.metadata && typeof body.metadata === 'object' ? body.metadata : null,
+      metadata: asMetadataRecord(body?.metadata),
+      otaSequence,
+      displayVersion: cleanString(body?.displayVersion),
       isActive: parseBoolean(body?.isActive, true),
       rolloutPercent,
       commitSha: body?.commitSha ? String(body.commitSha).trim() : null,
       releaseNotes: body?.releaseNotes ? String(body.releaseNotes) : null,
     },
   };
+}
+
+async function resolveOtaSequence(data: {
+  platform: AppPlatform;
+  channel: string;
+  runtimeVersion: string;
+  updateId: string;
+  otaSequence?: number;
+}) {
+  const existing = await prisma.appOtaUpdate.findUnique({
+    where: { updateId: data.updateId },
+    select: { otaSequence: true },
+  });
+  if (data.otaSequence) return data.otaSequence;
+  if (existing?.otaSequence) return existing.otaSequence;
+
+  const aggregate = await prisma.appOtaUpdate.aggregate({
+    where: {
+      platform: data.platform,
+      channel: data.channel,
+      runtimeVersion: data.runtimeVersion,
+    },
+    _max: { otaSequence: true },
+    _count: { _all: true },
+  });
+
+  return (aggregate._max.otaSequence ?? aggregate._count._all) + 1;
+}
+
+function buildDisplayVersion(data: {
+  runtimeVersion: string;
+  metadata: OtaMetadataRecord;
+  otaSequence: number;
+  displayVersion?: string | null;
+}) {
+  if (data.displayVersion) return data.displayVersion;
+
+  const baseVersionName =
+    cleanString(data.metadata.baseVersionName) ||
+    cleanString(data.metadata.nativeVersionName) ||
+    data.runtimeVersion;
+  const baseVersionCode =
+    cleanString(data.metadata.baseVersionCode) ||
+    cleanString(data.metadata.nativeBuildVersion) ||
+    cleanString(data.metadata.versionCode);
+  const baseVersion = baseVersionCode ? `v${baseVersionName}+${baseVersionCode}` : `v${baseVersionName}`;
+
+  return `${baseVersion}.ota.${data.otaSequence}`;
 }
 
 async function buildAssetDescriptor(asset: OtaAssetInput) {
@@ -195,6 +269,8 @@ async function buildManifest(update: any) {
     metadata: {
       ...(update.metadata && typeof update.metadata === 'object' ? update.metadata : {}),
       channel: update.channel,
+      otaSequence: update.otaSequence ?? undefined,
+      displayVersion: update.displayVersion ?? undefined,
       commitSha: update.commitSha ?? undefined,
       releaseNotes: update.releaseNotes ?? undefined,
     },
@@ -328,10 +404,25 @@ router.post(
         return res.status(400).json(errorResponse(parsed.message, ErrorCodes.VALIDATION_ERROR));
       }
 
+      const otaSequence = await resolveOtaSequence(parsed.data);
+      const displayVersion = buildDisplayVersion({
+        runtimeVersion: parsed.data.runtimeVersion,
+        metadata: parsed.data.metadata,
+        otaSequence,
+        displayVersion: parsed.data.displayVersion,
+      });
+      const metadata: OtaMetadataRecord = {
+        ...parsed.data.metadata,
+        otaSequence,
+        displayVersion,
+      };
+
       const data: Prisma.AppOtaUpdateUncheckedCreateInput = {
         ...parsed.data,
+        otaSequence,
+        displayVersion,
         assets: parsed.data.assets as unknown as Prisma.InputJsonValue,
-        metadata: parsed.data.metadata as Prisma.InputJsonValue | undefined,
+        metadata: metadata as Prisma.InputJsonValue,
       };
 
       const saved = await prisma.appOtaUpdate.upsert({
@@ -475,6 +566,9 @@ router.put(
         data.rolloutPercent = rollout;
       }
       if (body.releaseNotes !== undefined) data.releaseNotes = body.releaseNotes ? String(body.releaseNotes) : null;
+      if (body.displayVersion !== undefined) {
+        data.displayVersion = body.displayVersion ? String(body.displayVersion).trim() : null;
+      }
 
       const saved = await prisma.appOtaUpdate.update({ where: { id }, data });
       return res.json(successResponse(saved, 'OTA обновление обновлено'));

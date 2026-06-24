@@ -57,6 +57,62 @@ function platform(value) {
   throw new Error('platform must be android or ios');
 }
 
+function clean(value) {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
+}
+
+function metadataObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value;
+}
+
+function parsePositiveInt(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error('otaSequence must be a positive integer');
+  }
+  return Math.floor(parsed);
+}
+
+async function resolveOtaSequence(prisma, payload) {
+  const existing = await prisma.appOtaUpdate.findUnique({
+    where: { updateId: payload.updateId },
+    select: { otaSequence: true },
+  });
+  if (payload.otaSequence) return payload.otaSequence;
+  if (existing?.otaSequence) return existing.otaSequence;
+
+  const aggregate = await prisma.appOtaUpdate.aggregate({
+    where: {
+      platform: payload.platform,
+      channel: payload.channel,
+      runtimeVersion: payload.runtimeVersion,
+    },
+    _max: { otaSequence: true },
+    _count: { _all: true },
+  });
+
+  return (aggregate._max.otaSequence ?? aggregate._count._all) + 1;
+}
+
+function buildDisplayVersion(payload, otaSequence) {
+  if (payload.displayVersion) return payload.displayVersion;
+
+  const baseVersionName =
+    clean(payload.metadata.baseVersionName) ||
+    clean(payload.metadata.nativeVersionName) ||
+    payload.runtimeVersion;
+  const baseVersionCode =
+    clean(payload.metadata.baseVersionCode) ||
+    clean(payload.metadata.nativeBuildVersion) ||
+    clean(payload.metadata.versionCode);
+  const baseVersion = baseVersionCode ? `v${baseVersionName}+${baseVersionCode}` : `v${baseVersionName}`;
+
+  return `${baseVersion}.ota.${otaSequence}`;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const metadataPath = args._[0] || args.metadata;
@@ -77,7 +133,9 @@ async function main() {
     launchAssetHash: metadata.launchAssetHash || null,
     launchAssetType: metadata.launchAssetType || 'application/javascript',
     assets: metadata.assets || [],
-    metadata: metadata.metadata || null,
+    metadata: metadataObject(metadata.metadata),
+    otaSequence: parsePositiveInt(args.otaSequence || metadata.otaSequence),
+    displayVersion: clean(args.displayVersion || metadata.displayVersion),
     isActive: metadata.isActive !== false,
     rolloutPercent: Number(metadata.rolloutPercent ?? 100),
     commitSha: metadata.commitSha || null,
@@ -100,6 +158,19 @@ async function main() {
   const pool = new Pool({ connectionString: databaseUrl });
   const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
   try {
+    const otaSequence = await resolveOtaSequence(prisma, payload);
+    const displayVersion = buildDisplayVersion(payload, otaSequence);
+    payload.otaSequence = otaSequence;
+    payload.displayVersion = displayVersion;
+    payload.metadata = {
+      ...payload.metadata,
+      otaSequence,
+      displayVersion,
+    };
+
+    console.log('Resolved OTA display version:');
+    console.log(JSON.stringify({ otaSequence, displayVersion }, null, 2));
+
     const saved = await prisma.appOtaUpdate.upsert({
       where: { updateId: payload.updateId },
       create: payload,
@@ -112,6 +183,8 @@ async function main() {
       platform: saved.platform,
       channel: saved.channel,
       runtimeVersion: saved.runtimeVersion,
+      otaSequence: saved.otaSequence,
+      displayVersion: saved.displayVersion,
       isActive: saved.isActive,
     }, null, 2));
   } finally {
