@@ -195,12 +195,6 @@ function shouldIncludeUpdate(deviceId: string | undefined, updateId: number, rol
   return bucket < rolloutPercent;
 }
 
-function computeEtag(payload: unknown) {
-  const raw = JSON.stringify(payload);
-  const digest = crypto.createHash('sha1').update(raw).digest('hex');
-  return `W/"${digest}"`;
-}
-
 async function resolveUpdateDownloadUrl(key: string) {
   if (HAS_EXTERNAL_PRESIGN_ENDPOINT) {
     const presigned = await presignGet(key);
@@ -272,8 +266,6 @@ async function safeDeleteApk(key: string | null | undefined, skipUpdateId?: numb
  *     responses:
  *       200:
  *         description: Статус обновления
- *       304:
- *         description: Не изменилось
  *       400:
  *         description: Ошибка валидации параметров
  */
@@ -308,12 +300,7 @@ router.get(
 
       if (!latest) {
         const payload = { updateAvailable: false, mandatory: false };
-        const etag = computeEtag({ payload, platform, channel, versionCode, deviceId });
-        const ifNoneMatch = req.headers['if-none-match'];
-        const match =
-          Array.isArray(ifNoneMatch) ? ifNoneMatch.includes(etag) : ifNoneMatch === etag;
-        if (match) return res.status(304).end();
-        res.setHeader('ETag', etag);
+        res.setHeader('Cache-Control', 'no-store');
         return res.json(successResponse(payload, 'Обновлений не найдено'));
       }
 
@@ -343,16 +330,7 @@ router.get(
       };
 
       const needsFreshUrl = updateAvailable && eligible && Boolean(latest.apkKey);
-      if (!needsFreshUrl) {
-        const etag = computeEtag({ payload, platform, channel, versionCode, deviceId });
-        const ifNoneMatch = req.headers['if-none-match'];
-        const match =
-          Array.isArray(ifNoneMatch) ? ifNoneMatch.includes(etag) : ifNoneMatch === etag;
-        if (match) return res.status(304).end();
-        res.setHeader('ETag', etag);
-      } else {
-        res.setHeader('Cache-Control', 'no-store');
-      }
+      res.setHeader('Cache-Control', 'no-store');
 
       if (needsFreshUrl && latest.apkKey) {
         try {
