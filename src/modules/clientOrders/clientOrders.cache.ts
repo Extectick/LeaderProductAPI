@@ -60,6 +60,10 @@ export function clientOrdersCacheKey(scope: string, payload: unknown) {
   return `${CACHE_PREFIX}:${scope}:${hash}`;
 }
 
+function cacheCircuitScope(scope: string) {
+  return `${CIRCUIT_SCOPE}:${scope}`;
+}
+
 function getMemoryValue<T>(key: string, mode: 'fresh' | 'stale' = 'fresh'): T | null {
   const entry = memoryReads.get(key);
   if (!entry) return null;
@@ -108,7 +112,8 @@ export async function readThroughClientOrdersCache<T>(
     // Redis cache is best-effort; live read remains the source of truth.
   }
 
-  if (await isClientOrdersOnecCircuitOpen()) {
+  const scopedCircuit = cacheCircuitScope(scope);
+  if (await isClientOrdersOnecCircuitOpen(scopedCircuit)) {
     const memoryStale = getMemoryValue<T>(key, 'stale');
     if (memoryStale !== null) return memoryStale;
     throw new ClientOrdersOnecCircuitOpenError();
@@ -126,6 +131,10 @@ export async function readThroughClientOrdersCache<T>(
         // Ignore cache write failures.
       }
       return value;
+    })
+    .catch(async (error) => {
+      await markClientOrdersOnecCircuitOpen(scopedCircuit);
+      throw error;
     })
     .finally(() => {
       pendingReads.delete(key);

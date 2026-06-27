@@ -20,8 +20,6 @@ import {
 import {
   CLIENT_ORDERS_CACHE_TTL,
   ClientOrdersOnecCircuitOpenError,
-  isClientOrdersOnecCircuitOpen,
-  markClientOrdersOnecCircuitOpen,
   readThroughClientOrdersCache,
 } from './clientOrders.cache';
 import {
@@ -250,13 +248,7 @@ async function onecLive<T>(
   message?: string,
   options: { allowCachedWhenCircuitOpen?: boolean } = {}
 ): Promise<T> {
-  if (!options.allowCachedWhenCircuitOpen && await isClientOrdersOnecCircuitOpen()) {
-    throw new ClientOrdersError(
-      502,
-      ErrorCodes.INTERNAL_ERROR,
-      `${message ?? '1С временно недоступна'}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
-    );
-  }
+  void options;
 
   try {
     const result = await operation();
@@ -268,9 +260,6 @@ async function onecLive<T>(
         ErrorCodes.INTERNAL_ERROR,
         `${message ?? '1С временно недоступна'}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
       );
-    }
-    if (isOnecLpAppError(error)) {
-      await markClientOrdersOnecCircuitOpen();
     }
     throwClientOrdersOnecError(error, message);
   }
@@ -1281,22 +1270,11 @@ async function loadLiveReferenceWithCache<T>(
   fallback: () => Promise<T | null>,
   message: string
 ) {
-  if (await isClientOrdersOnecCircuitOpen()) {
-    const cachedValue = await fallback();
-    if (cachedValue) return cachedValue;
-    throw new ClientOrdersError(
-      502,
-      ErrorCodes.INTERNAL_ERROR,
-      `${message}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
-    );
-  }
-
   try {
     const liveValue = await operation();
     if (liveValue) return liveValue;
   } catch (error) {
     if (!isOnecLpAppError(error)) throw error;
-    await markClientOrdersOnecCircuitOpen();
     const cachedValue = await fallback();
     if (cachedValue) return cachedValue;
     throwClientOrdersOnecError(error, message);
