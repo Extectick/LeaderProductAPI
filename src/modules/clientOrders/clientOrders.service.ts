@@ -12,6 +12,46 @@ import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { MarketplaceError } from '../marketplace/marketplace.service';
+import {
+  OnecLpAppConfigError,
+  OnecLpAppHttpError,
+  OnecLpAppNetworkError,
+} from '../onec/onec.lpApp.client';
+import {
+  findLiveAgreement,
+  findLiveContract,
+  findLiveCounterparty,
+  findLiveDeliveryAddress,
+  findLiveOrganization,
+  findLivePriceType,
+  findLiveProduct,
+  findLiveWarehouse,
+  getLiveAgreements,
+  getLiveContracts,
+  getLiveCounterparties,
+  getLiveDeliveryAddresses,
+  findLiveClientOrder,
+  getLiveClientOrder,
+  getLiveClientOrders,
+  getLiveClientOrderDefaults,
+  getLiveOrganizations,
+  getLivePriceTypes,
+  getLiveProducts,
+  getLiveProductsByGuids,
+  getLiveReferenceData,
+  getLiveReferenceDetails,
+  getLiveWarehouses,
+  type LiveAgreement,
+  type LiveContract,
+  type LiveCounterparty,
+  type LiveDeliveryAddress,
+  type LiveClientOrder,
+  type LiveClientOrderDefaults,
+  type LiveOrganization,
+  type LivePriceType,
+  type LiveProduct,
+  type LiveWarehouse,
+} from './clientOrders.onecLive';
 import type {
   ClientOrderCancelBody,
   ClientOrderCreateBody,
@@ -124,9 +164,13 @@ type ClientOrderSummaryRecord = Prisma.OrderGetPayload<{ select: typeof clientOr
 function mapClientOrderSummary(order: ClientOrderSummaryRecord) {
   return {
     guid: order.guid,
+    appGuid: order.guid,
+    documentGuid: order.guid,
     number1c: order.number1c,
     date1c: order.date1c,
     source: order.source,
+    origin: 'local',
+    readOnly: order.isPostedIn1c || order.status === OrderStatus.CANCELLED,
     revision: order.revision,
     syncState: order.syncState,
     status: order.status,
@@ -160,6 +204,46 @@ class ClientOrdersError extends Error {
     super(message);
     this.status = status;
     this.code = code;
+  }
+}
+
+function isOnecLpAppError(error: unknown) {
+  return (
+    error instanceof OnecLpAppHttpError ||
+    error instanceof OnecLpAppNetworkError ||
+    error instanceof OnecLpAppConfigError
+  );
+}
+
+function formatOnecLpAppHttpError(error: OnecLpAppHttpError) {
+  const errorIdMatch = error.message.match(/errorId=([^;\s]+)/i);
+  if (errorIdMatch?.[1]) {
+    return `1С вернула внутреннюю ошибку. Код для журнала 1С: ${errorIdMatch[1]}.`;
+  }
+  return `1С вернула HTTP ${error.upstreamStatus}: ${error.message}`;
+}
+
+function throwClientOrdersOnecError(error: unknown, message = '1С временно недоступна'): never {
+  if (!isOnecLpAppError(error)) {
+    throw error;
+  }
+
+  const detail =
+    error instanceof OnecLpAppConfigError
+      ? 'Не настроено подключение к 1С.'
+      : error instanceof OnecLpAppNetworkError
+        ? 'Не удалось подключиться к 1С.'
+        : error instanceof OnecLpAppHttpError
+          ? formatOnecLpAppHttpError(error)
+          : 'Неизвестная ошибка 1С.';
+  throw new ClientOrdersError(502, ErrorCodes.INTERNAL_ERROR, `${message}: ${detail}`);
+}
+
+async function onecLive<T>(operation: () => Promise<T>, message?: string): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throwClientOrdersOnecError(error, message);
   }
 }
 
@@ -322,6 +406,8 @@ function mapAgreementSummary(
         guid: string;
         name: string;
         currency: string | null;
+        organizationGuid?: string | null;
+        organization?: { guid: string; name: string; code?: string | null } | null;
         isActive?: boolean;
         contract?: { guid: string; number: string } | null;
         warehouse?: { guid: string; name: string } | null;
@@ -335,6 +421,8 @@ function mapAgreementSummary(
     guid: agreement.guid,
     name: agreement.name,
     currency: agreement.currency,
+    organizationGuid: agreement.organizationGuid ?? agreement.organization?.guid ?? null,
+    organization: agreement.organization ?? null,
     isActive: agreement.isActive ?? true,
     contract: agreement.contract ?? null,
     warehouse: agreement.warehouse ?? null,
@@ -347,9 +435,11 @@ function mapContractSummary(
     | {
         guid: string;
         number: string;
-        date?: Date | null;
-        validFrom?: Date | null;
-        validTo?: Date | null;
+        date?: Date | string | null;
+        validFrom?: Date | string | null;
+        validTo?: Date | string | null;
+        organizationGuid?: string | null;
+        organization?: { guid: string; name: string; code?: string | null } | null;
         isActive?: boolean;
       }
     | null
@@ -362,6 +452,8 @@ function mapContractSummary(
     date: contract.date ?? null,
     validFrom: contract.validFrom ?? null,
     validTo: contract.validTo ?? null,
+    organizationGuid: contract.organizationGuid ?? contract.organization?.guid ?? null,
+    organization: contract.organization ?? null,
     isActive: contract.isActive ?? true,
   };
 }
@@ -734,6 +826,771 @@ async function loadPriceTypeByGuid(tx: Tx, guid: string) {
   return priceType;
 }
 
+function parseLiveDate(value?: string | Date | null, fallback: Date | null = null) {
+  if (!value) return fallback;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? fallback : value;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function safeLiveName(value: string | null | undefined, fallback: string) {
+  const prepared = value?.trim();
+  return prepared || fallback;
+}
+
+async function upsertLiveOrganization(tx: Tx, item: LiveOrganization | null, sourceUpdatedAt: Date) {
+  if (!item) return null;
+  return tx.organization.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, code: true, isActive: true },
+  });
+}
+
+async function upsertLiveCounterparty(tx: Tx, item: LiveCounterparty | null, sourceUpdatedAt: Date) {
+  if (!item) return null;
+  return tx.counterparty.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      fullName: item.fullName ?? null,
+      inn: item.inn ?? null,
+      kpp: item.kpp ?? null,
+      phone: item.phone ?? null,
+      email: item.email ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      fullName: item.fullName ?? null,
+      inn: item.inn ?? null,
+      kpp: item.kpp ?? null,
+      phone: item.phone ?? null,
+      email: item.email ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, isActive: true },
+  });
+}
+
+async function upsertLiveWarehouse(tx: Tx, item: LiveWarehouse | null, sourceUpdatedAt: Date) {
+  if (!item) return null;
+  return tx.warehouse.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      address: item.address ?? null,
+      isDefault: item.isDefault,
+      isPickup: item.isPickup,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      address: item.address ?? null,
+      isDefault: item.isDefault,
+      isPickup: item.isPickup,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, isActive: true },
+  });
+}
+
+async function upsertLivePriceType(
+  tx: Tx,
+  item: LivePriceType | { guid: string; name: string; code?: string | null; isActive?: boolean } | null,
+  sourceUpdatedAt: Date
+) {
+  if (!item?.guid) return null;
+  return tx.priceType.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      isActive: item.isActive ?? true,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      isActive: item.isActive ?? true,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, isActive: true },
+  });
+}
+
+async function upsertLiveContract(
+  tx: Tx,
+  item: LiveContract | null,
+  counterpartyId: string | null,
+  organizationId: string | null,
+  sourceUpdatedAt: Date
+) {
+  if (!item || !counterpartyId) return null;
+  const date = parseLiveDate(item.date, sourceUpdatedAt) ?? sourceUpdatedAt;
+  return tx.clientContract.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      counterpartyId,
+      organizationId,
+      name: item.name ?? item.number,
+      number: safeLiveName(item.number, item.guid),
+      date,
+      validFrom: parseLiveDate(item.validFrom),
+      validTo: parseLiveDate(item.validTo),
+      currency: item.currency ?? null,
+      status: item.status ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      counterpartyId,
+      organizationId,
+      name: item.name ?? item.number,
+      number: safeLiveName(item.number, item.guid),
+      date,
+      validFrom: parseLiveDate(item.validFrom),
+      validTo: parseLiveDate(item.validTo),
+      currency: item.currency ?? null,
+      status: item.status ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, number: true, counterpartyId: true, isActive: true },
+  });
+}
+
+async function upsertLiveAgreement(
+  tx: Tx,
+  item: LiveAgreement | null,
+  counterpartyId: string | null,
+  organizationId: string | null,
+  contractId: string | null,
+  warehouseId: string | null,
+  priceTypeId: string | null,
+  sourceUpdatedAt: Date
+) {
+  if (!item) return null;
+  return tx.clientAgreement.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      number: item.number ?? null,
+      date: parseLiveDate(item.date),
+      counterpartyId,
+      organizationId,
+      contractId,
+      warehouseId,
+      priceTypeId,
+      currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
+      status: item.status ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      number: item.number ?? null,
+      date: parseLiveDate(item.date),
+      counterpartyId,
+      organizationId,
+      contractId,
+      warehouseId,
+      priceTypeId,
+      currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
+      status: item.status ?? null,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: {
+      id: true,
+      guid: true,
+      name: true,
+      counterpartyId: true,
+      contractId: true,
+      warehouseId: true,
+      priceTypeId: true,
+      currency: true,
+      isActive: true,
+      status: true,
+    },
+  });
+}
+
+async function upsertLiveDeliveryAddress(
+  tx: Tx,
+  item: LiveDeliveryAddress | null,
+  counterpartyId: string | null,
+  sourceUpdatedAt: Date
+) {
+  if (!item?.guid || !counterpartyId) return null;
+  return tx.deliveryAddress.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      counterpartyId,
+      name: item.name ?? null,
+      fullAddress: safeLiveName(item.fullAddress, item.guid),
+      isDefault: item.isDefault,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      counterpartyId,
+      name: item.name ?? null,
+      fullAddress: safeLiveName(item.fullAddress, item.guid),
+      isDefault: item.isDefault,
+      isActive: item.isActive,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, fullAddress: true, counterpartyId: true, isActive: true },
+  });
+}
+
+async function upsertLiveUnit(
+  tx: Tx,
+  unit: { guid?: string | null; name?: string | null; symbol?: string | null } | null | undefined,
+  fallbackGuid: string,
+  sourceUpdatedAt: Date
+) {
+  const guid = unit?.guid?.trim() || fallbackGuid;
+  const name = safeLiveName(unit?.name, unit?.symbol || 'шт');
+  return tx.unit.upsert({
+    where: { guid },
+    create: {
+      guid,
+      name,
+      code: unit?.symbol ?? null,
+      symbol: unit?.symbol ?? name,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name,
+      code: unit?.symbol ?? null,
+      symbol: unit?.symbol ?? name,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, symbol: true },
+  });
+}
+
+async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: string | null, sourceUpdatedAt: Date) {
+  if (!item) return null;
+  const baseUnit = await upsertLiveUnit(tx, item.baseUnit, `default-unit-${item.guid}`, sourceUpdatedAt);
+  const product = await tx.product.upsert({
+    where: { guid: item.guid },
+    create: {
+      guid: item.guid,
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      article: item.article ?? null,
+      sku: item.sku ?? null,
+      isWeight: item.isWeight,
+      isActive: item.isActive,
+      baseUnitId: baseUnit.id,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      name: safeLiveName(item.name, item.guid),
+      code: item.code ?? null,
+      article: item.article ?? null,
+      sku: item.sku ?? null,
+      isWeight: item.isWeight,
+      isActive: item.isActive,
+      baseUnitId: baseUnit.id,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    select: { id: true, guid: true, name: true, code: true, article: true, isActive: true },
+  });
+
+  for (const pack of item.packages) {
+    if (!pack.guid) continue;
+    const unit = await upsertLiveUnit(tx, pack.unit ?? item.baseUnit, `default-unit-${item.guid}`, sourceUpdatedAt);
+    await tx.productPackage.upsert({
+      where: { guid: pack.guid },
+      create: {
+        guid: pack.guid,
+        productId: product.id,
+        unitId: unit.id,
+        name: safeLiveName(pack.name, pack.guid),
+        multiplier: toDecimal(pack.multiplier ?? 1)!,
+        isDefault: pack.isDefault,
+        sourceUpdatedAt,
+        lastSyncedAt: sourceUpdatedAt,
+      },
+      update: {
+        productId: product.id,
+        unitId: unit.id,
+        name: safeLiveName(pack.name, pack.guid),
+        multiplier: toDecimal(pack.multiplier ?? 1)!,
+        isDefault: pack.isDefault,
+        sourceUpdatedAt,
+        lastSyncedAt: sourceUpdatedAt,
+      },
+    });
+  }
+
+  if (item.receiptPrice !== null && item.receiptPrice !== undefined) {
+    const priceType = await upsertLivePriceType(
+      tx,
+      item.priceType ?? { guid: 'receipt-price-type', name: 'ЦенаПоступления', code: 'ЦенаПоступления' },
+      sourceUpdatedAt
+    );
+    if (priceType) {
+      const startDate = new Date(0);
+      await tx.productPrice.upsert({
+        where: {
+          productId_priceTypeId_startDate: {
+            productId: product.id,
+            priceTypeId: priceType.id,
+            startDate,
+          },
+        },
+        create: {
+          productId: product.id,
+          priceTypeId: priceType.id,
+          price: toDecimal(item.receiptPrice)!,
+          currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
+          startDate,
+          minQty: toDecimal(1),
+          isActive: true,
+          sourceUpdatedAt,
+          lastSyncedAt: sourceUpdatedAt,
+        },
+        update: {
+          price: toDecimal(item.receiptPrice)!,
+          currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
+          isActive: true,
+          sourceUpdatedAt,
+          lastSyncedAt: sourceUpdatedAt,
+        },
+      });
+    }
+  }
+
+  if (warehouseId && item.stock) {
+    await tx.stockBalance.upsert({
+      where: { syncKey: `${warehouseId}|${product.id}` },
+      create: {
+        syncKey: `${warehouseId}|${product.id}`,
+        productId: product.id,
+        warehouseId,
+        quantity: toDecimal(item.stock.quantity ?? item.stock.available ?? 0)!,
+        reserved: item.stock.reserved !== null && item.stock.reserved !== undefined ? toDecimal(item.stock.reserved) : null,
+        available: item.stock.available !== null && item.stock.available !== undefined ? toDecimal(item.stock.available) : null,
+        updatedAt: sourceUpdatedAt,
+        sourceUpdatedAt,
+        lastSyncedAt: sourceUpdatedAt,
+      },
+      update: {
+        quantity: toDecimal(item.stock.quantity ?? item.stock.available ?? 0)!,
+        reserved: item.stock.reserved !== null && item.stock.reserved !== undefined ? toDecimal(item.stock.reserved) : null,
+        available: item.stock.available !== null && item.stock.available !== undefined ? toDecimal(item.stock.available) : null,
+        updatedAt: sourceUpdatedAt,
+        sourceUpdatedAt,
+        lastSyncedAt: sourceUpdatedAt,
+      },
+    });
+  }
+
+  return product;
+}
+
+type LiveOrderMaterialization = {
+  organization: LiveOrganization | null;
+  counterparty: LiveCounterparty | null;
+  agreement: LiveAgreement | null;
+  contract: LiveContract | null;
+  warehouse: LiveWarehouse | null;
+  deliveryAddress: LiveDeliveryAddress | null;
+  explicitPriceTypes: LivePriceType[];
+  products: LiveProduct[];
+};
+
+async function loadLiveReferenceWithCache<T>(
+  operation: () => Promise<T | null>,
+  fallback: () => Promise<T | null>,
+  message: string
+) {
+  try {
+    const liveValue = await operation();
+    if (liveValue) return liveValue;
+  } catch (error) {
+    if (!isOnecLpAppError(error)) throw error;
+    const cachedValue = await fallback();
+    if (cachedValue) return cachedValue;
+    throwClientOrdersOnecError(error, message);
+  }
+
+  return fallback();
+}
+
+async function findCachedOrganization(guid: string): Promise<LiveOrganization | null> {
+  const item = await prisma.organization.findUnique({
+    where: { guid },
+    select: { guid: true, name: true, code: true, isActive: true },
+  });
+  return item ? { guid: item.guid, name: item.name, code: item.code, isActive: item.isActive } : null;
+}
+
+async function findCachedCounterparty(guid: string): Promise<LiveCounterparty | null> {
+  const item = await prisma.counterparty.findUnique({
+    where: { guid },
+    select: {
+      guid: true,
+      name: true,
+      fullName: true,
+      inn: true,
+      kpp: true,
+      phone: true,
+      email: true,
+      isActive: true,
+    },
+  });
+  return item
+    ? {
+        guid: item.guid,
+        name: item.name,
+        fullName: item.fullName,
+        inn: item.inn,
+        kpp: item.kpp,
+        phone: item.phone,
+        email: item.email,
+        isActive: item.isActive,
+      }
+    : null;
+}
+
+async function findCachedWarehouse(guid: string): Promise<LiveWarehouse | null> {
+  const item = await prisma.warehouse.findUnique({
+    where: { guid },
+    select: { guid: true, name: true, code: true, address: true, isDefault: true, isPickup: true, isActive: true },
+  });
+  return item
+    ? {
+        guid: item.guid,
+        name: item.name,
+        code: item.code,
+        address: item.address,
+        isDefault: item.isDefault,
+        isPickup: item.isPickup,
+        isActive: item.isActive,
+      }
+    : null;
+}
+
+async function findCachedPriceType(guid: string): Promise<LivePriceType | null> {
+  const item = await prisma.priceType.findUnique({
+    where: { guid },
+    select: { guid: true, name: true, code: true, isActive: true },
+  });
+  return item ? { guid: item.guid, name: item.name, code: item.code, isActive: item.isActive } : null;
+}
+
+async function findCachedContract(guid: string): Promise<LiveContract | null> {
+  const item = await prisma.clientContract.findUnique({
+    where: { guid },
+    select: {
+      guid: true,
+      number: true,
+      name: true,
+      date: true,
+      validFrom: true,
+      validTo: true,
+      status: true,
+      currency: true,
+      isActive: true,
+      counterparty: { select: { guid: true } },
+      organization: { select: { guid: true, name: true, code: true } },
+    },
+  });
+  return item
+    ? {
+        guid: item.guid,
+        number: item.number,
+        name: item.name,
+        date: item.date,
+        validFrom: item.validFrom,
+        validTo: item.validTo,
+        counterpartyGuid: item.counterparty?.guid ?? null,
+        organizationGuid: item.organization?.guid ?? null,
+        organization: item.organization,
+        status: item.status,
+        currency: item.currency,
+        isActive: item.isActive,
+      }
+    : null;
+}
+
+async function findCachedAgreement(guid: string): Promise<LiveAgreement | null> {
+  const item = await prisma.clientAgreement.findUnique({
+    where: { guid },
+    select: {
+      guid: true,
+      name: true,
+      number: true,
+      date: true,
+      currency: true,
+      status: true,
+      isActive: true,
+      counterparty: { select: { guid: true } },
+      organization: { select: { guid: true, name: true, code: true } },
+      contract: { select: { guid: true, number: true } },
+      warehouse: { select: { guid: true, name: true } },
+      priceType: { select: { guid: true, name: true } },
+    },
+  });
+  return item
+    ? {
+        guid: item.guid,
+        name: item.name,
+        number: item.number,
+        date: item.date,
+        counterpartyGuid: item.counterparty?.guid ?? null,
+        organizationGuid: item.organization?.guid ?? null,
+        organization: item.organization,
+        contractGuid: item.contract?.guid ?? null,
+        warehouseGuid: item.warehouse?.guid ?? null,
+        priceTypeGuid: item.priceType?.guid ?? null,
+        currency: item.currency,
+        status: item.status,
+        isActive: item.isActive,
+        contract: item.contract,
+        warehouse: item.warehouse,
+        priceType: item.priceType,
+      }
+    : null;
+}
+
+async function findCachedDeliveryAddress(guid: string): Promise<LiveDeliveryAddress | null> {
+  const item = await prisma.deliveryAddress.findUnique({
+    where: { guid },
+    select: {
+      guid: true,
+      name: true,
+      fullAddress: true,
+      isDefault: true,
+      isActive: true,
+      counterparty: { select: { guid: true } },
+    },
+  });
+  return item
+    ? {
+        guid: item.guid,
+        name: item.name,
+        fullAddress: item.fullAddress,
+        counterpartyGuid: item.counterparty.guid,
+        isDefault: item.isDefault,
+        isActive: item.isActive,
+      }
+    : null;
+}
+
+async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promise<LiveOrderMaterialization> {
+  const explicitPriceTypeGuids = [...new Set(body.items.map((item) => item.priceTypeGuid).filter(Boolean) as string[])];
+  const productGuids = [...new Set(body.items.map((item) => item.productGuid))];
+  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceTypes, products] =
+    await Promise.all([
+      loadLiveReferenceWithCache(
+        () => findLiveOrganization(body.organizationGuid),
+        () => findCachedOrganization(body.organizationGuid),
+        'Ошибка получения организации из 1С'
+      ),
+      loadLiveReferenceWithCache(
+        () => findLiveCounterparty(body.counterpartyGuid),
+        () => findCachedCounterparty(body.counterpartyGuid),
+        'Ошибка получения контрагента из 1С'
+      ),
+      body.agreementGuid
+        ? loadLiveReferenceWithCache(
+            () => findLiveAgreement(body.agreementGuid!, body.counterpartyGuid),
+            () => findCachedAgreement(body.agreementGuid!),
+            'Ошибка получения соглашения из 1С'
+          )
+        : Promise.resolve(null),
+      body.contractGuid
+        ? loadLiveReferenceWithCache(
+            () => findLiveContract(body.contractGuid!, body.counterpartyGuid),
+            () => findCachedContract(body.contractGuid!),
+            'Ошибка получения договора из 1С'
+          )
+        : Promise.resolve(null),
+      body.warehouseGuid
+        ? loadLiveReferenceWithCache(
+            () => findLiveWarehouse(body.warehouseGuid!),
+            () => findCachedWarehouse(body.warehouseGuid!),
+            'Ошибка получения склада из 1С'
+          )
+        : Promise.resolve(null),
+      body.deliveryAddressGuid
+        ? loadLiveReferenceWithCache(
+            () => findLiveDeliveryAddress(body.deliveryAddressGuid!, body.counterpartyGuid),
+            () => findCachedDeliveryAddress(body.deliveryAddressGuid!),
+            'Ошибка получения адреса доставки из 1С'
+          )
+        : Promise.resolve(null),
+      Promise.all(
+        explicitPriceTypeGuids.map((guid) =>
+          loadLiveReferenceWithCache(
+            () => findLivePriceType(guid),
+            () => findCachedPriceType(guid),
+            'Ошибка получения вида цены из 1С'
+          )
+        )
+      ),
+      Promise.all(
+        productGuids.map((guid) =>
+          onecLive(
+            () =>
+              findLiveProduct(guid, {
+                counterpartyGuid: body.counterpartyGuid,
+                agreementGuid: body.agreementGuid ?? undefined,
+                warehouseGuid: body.warehouseGuid ?? undefined,
+              }),
+            'Ошибка получения номенклатуры из 1С'
+          )
+        )
+      ),
+    ]);
+
+  return {
+    organization,
+    counterparty,
+    agreement,
+    contract,
+    warehouse,
+    deliveryAddress,
+    explicitPriceTypes: explicitPriceTypes.filter(Boolean) as LivePriceType[],
+    products: products.filter(Boolean) as LiveProduct[],
+  };
+}
+
+async function materializeLiveOrderReferences(tx: Tx, data: LiveOrderMaterialization, body: ClientOrderCreateBody, sourceUpdatedAt: Date) {
+  const organization = await upsertLiveOrganization(tx, data.organization, sourceUpdatedAt);
+  const counterparty = await upsertLiveCounterparty(tx, data.counterparty, sourceUpdatedAt);
+  const warehouse = await upsertLiveWarehouse(tx, data.warehouse, sourceUpdatedAt);
+
+  for (const priceType of data.explicitPriceTypes) {
+    await upsertLivePriceType(tx, priceType, sourceUpdatedAt);
+  }
+
+  const agreementPriceType = data.agreement?.priceType ?? null;
+  const materializedAgreementPriceType = await upsertLivePriceType(tx, agreementPriceType, sourceUpdatedAt);
+  const agreementWarehouse =
+    !warehouse && data.agreement?.warehouseGuid
+      ? await upsertLiveWarehouse(
+          tx,
+          data.agreement.warehouse
+            ? {
+                guid: data.agreement.warehouse.guid,
+                name: data.agreement.warehouse.name,
+                code: null,
+                isDefault: false,
+                isPickup: false,
+                isActive: true,
+              }
+            : null,
+          sourceUpdatedAt
+        )
+      : warehouse;
+  const contract = await upsertLiveContract(
+    tx,
+    data.contract,
+    counterparty?.id ?? null,
+    organization?.id ?? null,
+    sourceUpdatedAt
+  );
+  await upsertLiveAgreement(
+    tx,
+    data.agreement,
+    counterparty?.id ?? null,
+    organization?.id ?? null,
+    contract?.id ?? null,
+    agreementWarehouse?.id ?? warehouse?.id ?? null,
+    materializedAgreementPriceType?.id ?? null,
+    sourceUpdatedAt
+  );
+  await upsertLiveDeliveryAddress(tx, data.deliveryAddress, counterparty?.id ?? null, sourceUpdatedAt);
+
+  const effectiveWarehouse = warehouse ?? agreementWarehouse;
+  for (const product of data.products) {
+    await upsertLiveProduct(tx, product, effectiveWarehouse?.id ?? null, sourceUpdatedAt);
+  }
+
+  const missingProduct = body.items.find((item) => !data.products.some((product) => product.guid === item.productGuid));
+  if (missingProduct) {
+    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Товар ${missingProduct.productGuid} не найден в 1С`);
+  }
+}
+
+async function materializeLiveDefaultsReferences(defaults: LiveClientOrderDefaults) {
+  const sourceUpdatedAt = now();
+  await prisma.$transaction(async (tx) => {
+    const organization = await upsertLiveOrganization(tx, defaults.organization, sourceUpdatedAt);
+    const counterparty = await upsertLiveCounterparty(tx, defaults.counterparty, sourceUpdatedAt);
+    const warehouse = await upsertLiveWarehouse(tx, defaults.warehouse, sourceUpdatedAt);
+    const agreementPriceType = await upsertLivePriceType(tx, defaults.priceType ?? defaults.agreement?.priceType ?? null, sourceUpdatedAt);
+    const contract = await upsertLiveContract(
+      tx,
+      defaults.contract,
+      counterparty?.id ?? null,
+      organization?.id ?? null,
+      sourceUpdatedAt
+    );
+    await upsertLiveAgreement(
+      tx,
+      defaults.agreement,
+      counterparty?.id ?? null,
+      organization?.id ?? null,
+      contract?.id ?? null,
+      warehouse?.id ?? null,
+      agreementPriceType?.id ?? null,
+      sourceUpdatedAt
+    );
+    await upsertLiveDeliveryAddress(tx, defaults.deliveryAddress, counterparty?.id ?? null, sourceUpdatedAt);
+  });
+}
+
 async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): Promise<ManagerOrderContext> {
   const [organization, counterparty, agreement, contract, warehouse, deliveryAddress] = await Promise.all([
     loadOrganizationByGuid(tx, body.organizationGuid),
@@ -1021,11 +1878,8 @@ async function prepareOrderItems(
 }
 
 async function getActiveOrganizations() {
-  return prisma.organization.findMany({
-    where: { isActive: true },
-    orderBy: [{ name: 'asc' }],
-    select: { guid: true, name: true, code: true, isActive: true },
-  });
+  const result = await onecLive(() => getLiveOrganizations({ limit: 100, offset: 0 }), 'Ошибка получения организаций из 1С');
+  return result.items;
 }
 
 async function getValidatedPreferredOrganization(
@@ -1132,8 +1986,41 @@ async function saveUserCounterpartyDefaults(tx: Tx, userId: number, guid: string
   });
 }
 
-export async function listClientOrders(query: ClientOrdersListQuery) {
+const PINNED_LOCAL_STATUSES: OrderStatus[] = [
+  OrderStatus.DRAFT,
+  OrderStatus.QUEUED,
+  OrderStatus.REJECTED,
+];
+
+const PINNED_LOCAL_SYNC_STATES: OrderSyncState[] = [
+  OrderSyncState.DRAFT,
+  OrderSyncState.QUEUED,
+  OrderSyncState.ERROR,
+  OrderSyncState.CONFLICT,
+  OrderSyncState.CANCEL_REQUESTED,
+];
+
+const LOCAL_ORDER_STATUS_VALUES = new Set<string>(Object.values(OrderStatus));
+
+type LocalOrderWhereBuildResult = {
+  where: Prisma.OrderWhereInput;
+  statusCountsWhere: Prisma.OrderWhereInput;
+};
+
+async function getManagerGuidForUser(userId: number) {
+  const profile = await prisma.employeeProfile.findUnique({
+    where: { userId },
+    select: { onecUserGuid: true },
+  });
+  return profile?.onecUserGuid?.trim() || null;
+}
+
+async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<LocalOrderWhereBuildResult> {
   const search = normalizeSearch(query.search);
+  const localStatus = query.status && LOCAL_ORDER_STATUS_VALUES.has(query.status)
+    ? query.status as OrderStatus
+    : null;
+  const hasLiveOnlyStatus = !!query.status && !localStatus;
   const itemCountFilters = query.itemsMin !== undefined || query.itemsMax !== undefined;
   const itemCountOrderIds = itemCountFilters
     ? await prisma.orderItem.groupBy({
@@ -1159,6 +2046,9 @@ export async function listClientOrders(query: ClientOrdersListQuery) {
     return next;
   };
   const and: Prisma.OrderWhereInput[] = [];
+  if (hasLiveOnlyStatus) {
+    and.push({ guid: { equals: '__unsupported_live_status__' } });
+  }
   if (query.onlyProblems) {
     and.push({
       OR: [
@@ -1182,7 +2072,7 @@ export async function listClientOrders(query: ClientOrdersListQuery) {
   const where: Prisma.OrderWhereInput = {
     source: OrderSource.MANAGER_APP,
     ...(and.length ? { AND: and } : {}),
-    ...(query.status ? { status: query.status } : {}),
+    ...(localStatus ? { status: localStatus } : {}),
     ...(query.syncState ? { syncState: query.syncState } : {}),
     ...(query.counterpartyGuid ? { counterparty: { guid: query.counterpartyGuid } } : {}),
     ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
@@ -1218,41 +2108,233 @@ export async function listClientOrders(query: ClientOrdersListQuery) {
   };
 
   const statusCountsWhere: Prisma.OrderWhereInput = { ...where, status: undefined };
-  const [items, total, statusRows] = await prisma.$transaction([
-    prisma.order.findMany({
+  return { where, statusCountsWhere };
+}
+
+function isPinnedLocalOrder(order: Pick<ClientOrderSummaryRecord, 'status' | 'syncState' | 'number1c'>) {
+  return (
+    PINNED_LOCAL_STATUSES.includes(order.status) ||
+    PINNED_LOCAL_SYNC_STATES.includes(order.syncState) ||
+    !order.number1c
+  );
+}
+
+function localOrderKey(order: Pick<ClientOrderSummaryRecord, 'guid' | 'number1c'>) {
+  return {
+    appGuid: order.guid?.toLowerCase() || '',
+    number1c: order.number1c?.trim().toLowerCase() || null,
+  };
+}
+
+function liveOrderKey(order: Pick<LiveClientOrder, 'appGuid' | 'number1c'>) {
+  return {
+    appGuid: order.appGuid?.trim().toLowerCase() || null,
+    number1c: order.number1c?.trim().toLowerCase() || null,
+  };
+}
+
+function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRecord | null) {
+  if (!local) return { ...order, readOnly: true };
+  return {
+    ...order,
+    guid: local.guid,
+    appGuid: local.guid,
+    documentGuid: order.documentGuid,
+    origin: 'merged',
+    source: local.source,
+    revision: local.revision,
+    queuedAt: local.queuedAt,
+    sentTo1cAt: local.sentTo1cAt ?? order.sentTo1cAt,
+    lastStatusSyncAt: local.lastStatusSyncAt ?? order.lastStatusSyncAt,
+    lastExportError: local.lastExportError,
+    last1cError: local.last1cError,
+    cancelRequestedAt: local.cancelRequestedAt,
+    readOnly: true,
+  };
+}
+
+function liveUnavailableMeta(error: unknown) {
+  if (error instanceof OnecLpAppConfigError) {
+    return { status: 'not_configured', message: 'Не настроена связь с 1С для live-списка заказов.' };
+  }
+  if (error instanceof OnecLpAppNetworkError) {
+    return { status: 'unavailable', message: '1С временно недоступна. Показаны локальные черновики.' };
+  }
+  if (error instanceof OnecLpAppHttpError) {
+    return { status: 'error', message: `1С вернула ошибку: ${error.message}` };
+  }
+  return { status: 'error', message: 'Не удалось загрузить документы из 1С.' };
+}
+
+export async function listClientOrders(query: ClientOrdersListQuery, userId: number) {
+  const { where, statusCountsWhere } = await buildLocalOrdersWhere(query);
+  const pinnedWhere: Prisma.OrderWhereInput = {
+    AND: [
       where,
+      {
+        OR: [
+          { status: { in: PINNED_LOCAL_STATUSES } },
+          { syncState: { in: PINNED_LOCAL_SYNC_STATES } },
+          { number1c: null },
+        ],
+      },
+    ],
+  };
+
+  const [pinnedItems, pinnedTotal, statusRows, managerGuid] = await Promise.all([
+    prisma.order.findMany({
+      where: pinnedWhere,
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
-      skip: query.offset,
-      take: query.limit,
       select: clientOrderSummarySelect,
     }),
-    prisma.order.count({ where }),
+    prisma.order.count({ where: pinnedWhere }),
     prisma.order.groupBy({
       by: ['status'],
       where: statusCountsWhere,
       orderBy: { status: 'asc' },
       _count: { _all: true },
     }),
+    getManagerGuidForUser(userId),
   ]);
+
   const countedStatusRows = statusRows as unknown as Array<{
     status: string;
     _count: { _all: number };
   }>;
-  const statusCounts = Object.fromEntries(
+  const localStatusCounts = Object.fromEntries(
     countedStatusRows.map((row) => [row.status, row._count._all])
   );
 
+  const localPinnedAppGuids = new Set(pinnedItems.map((item) => localOrderKey(item).appGuid));
+  const localPinnedNumbers = new Set(
+    pinnedItems.flatMap((item) => {
+      const number1c = localOrderKey(item).number1c;
+      return number1c ? [number1c] : [];
+    })
+  );
+
+  let liveMeta: { status: string; message?: string } = managerGuid
+    ? { status: 'ok' }
+    : { status: 'not_configured', message: 'В профиле сотрудника не заполнен GUID пользователя 1С.' };
+  let liveItems: LiveClientOrder[] = [];
+  let liveTotal = 0;
+  const liveOffset = Math.max(0, query.offset - pinnedTotal);
+
+  if (managerGuid) {
+    try {
+      const livePage = await getLiveClientOrders({
+        ...query,
+        managerGuid,
+        offset: liveOffset,
+        limit: query.limit,
+      });
+      liveItems = livePage.items;
+      liveTotal = livePage.total;
+    } catch (error) {
+      liveMeta = liveUnavailableMeta(error);
+      liveItems = [];
+      liveTotal = 0;
+    }
+  }
+
+  const liveAppGuids = liveItems.flatMap((item) => {
+    const key = liveOrderKey(item).appGuid;
+    return key ? [key] : [];
+  });
+  const liveNumbers = liveItems.flatMap((item) => {
+    const key = liveOrderKey(item).number1c;
+    return key ? [key] : [];
+  });
+  const matchingLocals = liveAppGuids.length || liveNumbers.length
+    ? await prisma.order.findMany({
+        where: {
+          AND: [
+            where,
+            {
+              OR: [
+                ...(liveAppGuids.length ? [{ guid: { in: liveAppGuids } }] : []),
+                ...(liveNumbers.length ? [{ number1c: { in: liveNumbers } }] : []),
+              ],
+            },
+          ],
+        },
+        select: clientOrderSummarySelect,
+      })
+    : [];
+  const localByAppGuid = new Map(matchingLocals.map((item) => [localOrderKey(item).appGuid, item]));
+  const localByNumber = new Map(
+    matchingLocals.flatMap((item) => {
+      const number1c = localOrderKey(item).number1c;
+      return number1c ? [[number1c, item] as const] : [];
+    })
+  );
+
+  const mappedPinned = query.offset === 0 ? pinnedItems.map(mapClientOrderSummary) : [];
+  const mappedLive = liveItems.flatMap((item) => {
+    const key = liveOrderKey(item);
+    if ((key.appGuid && localPinnedAppGuids.has(key.appGuid)) || (key.number1c && localPinnedNumbers.has(key.number1c))) {
+      return [];
+    }
+    const local = (key.appGuid ? localByAppGuid.get(key.appGuid) : undefined) ?? (key.number1c ? localByNumber.get(key.number1c) : undefined) ?? null;
+    return [mapMergedLiveOrder(item, local)];
+  });
+
   return {
-    items: items.map(mapClientOrderSummary),
-    total,
-    statusCounts,
+    items: [...mappedPinned, ...mappedLive],
+    total: pinnedTotal + liveTotal,
+    statusCounts: liveMeta.status === 'ok' ? {} : localStatusCounts,
     limit: query.limit,
     offset: query.offset,
+    liveSource: liveMeta,
   };
 }
 
-export async function getClientOrderByGuid(guid: string) {
-  const order = await fetchManagerOrderOrThrow(guid);
+export async function getClientOrderByGuid(guid: string, userId?: number) {
+  const order = await prisma.order.findFirst({
+    where: { guid, source: OrderSource.MANAGER_APP },
+    select: orderDetailSelect,
+  });
+
+  if (!order) {
+    if (!userId) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+    }
+    const managerGuid = await getManagerGuidForUser(userId);
+    if (!managerGuid) {
+      throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'В профиле сотрудника не заполнен GUID пользователя 1С.');
+    }
+    const live = await onecLive(
+      () => getLiveClientOrder(guid, { managerGuid }),
+      'Ошибка получения заказа клиента из 1С'
+    );
+    return { ...live, readOnly: true };
+  }
+
+  if (userId && order.number1c && !isPinnedLocalOrder(order)) {
+    const managerGuid = await getManagerGuidForUser(userId);
+    if (managerGuid) {
+      try {
+        const liveSummary = await findLiveClientOrder({ managerGuid, appGuid: order.guid, number1c: order.number1c });
+        if (liveSummary?.documentGuid) {
+          const liveDetail = await getLiveClientOrder(liveSummary.documentGuid, { managerGuid, appGuid: order.guid });
+          return {
+            ...liveDetail,
+            guid: order.guid,
+            appGuid: order.guid,
+            origin: 'merged',
+            source: order.source,
+            revision: order.revision,
+            lastExportError: order.lastExportError,
+            last1cError: order.last1cError,
+            readOnly: true,
+          };
+        }
+      } catch (error) {
+        if (!isOnecLpAppError(error)) throw error;
+      }
+    }
+  }
+
   const mapped = mapOrderDetail(order);
   const stockByProductId = await loadStockByProductIdForWarehouse(
     prisma as unknown as Tx,
@@ -1262,6 +2344,10 @@ export async function getClientOrderByGuid(guid: string) {
 
   return {
     ...mapped,
+    appGuid: mapped.guid,
+    documentGuid: mapped.guid,
+    origin: 'local',
+    readOnly: mapped.isPostedIn1c || mapped.status === OrderStatus.CANCELLED,
     items: mapped.items.map((item, index) => ({
       ...item,
       stock: stockByProductId.get(order.items[index]?.productId) ?? null,
@@ -1280,6 +2366,9 @@ export async function getClientOrderSettings(userId: number) {
 }
 
 export async function getClientOrderReferenceDetails(params: ClientOrderReferenceDetailsParams) {
+  return onecLive(() => getLiveReferenceDetails(params), 'Ошибка получения карточки реквизита из 1С');
+
+  /*
   const { kind, guid } = params;
 
   if (kind === 'organization') {
@@ -1541,6 +2630,7 @@ export async function getClientOrderReferenceDetails(params: ClientOrderReferenc
     ),
     debug: item,
   });
+  */
 }
 
 export async function updateClientOrderSettings(userId: number, body: ClientOrderSettingsUpdateBody) {
@@ -1551,6 +2641,13 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
     if (!body.preferredOrganizationGuid) {
       preferredOrganizationId = null;
     } else {
+      const liveOrganization = await onecLive(
+        () => findLiveOrganization(body.preferredOrganizationGuid!),
+        'Ошибка получения организации из 1С'
+      );
+      await prisma.$transaction(async (tx) => {
+        await upsertLiveOrganization(tx, liveOrganization, now());
+      });
       preferredOrganizationId = (await loadOrganizationByGuid(prisma as unknown as Tx, body.preferredOrganizationGuid)).id;
     }
   }
@@ -1594,7 +2691,7 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
   return getClientOrderSettings(userId);
 }
 
-export async function getClientOrderDefaults(userId: number, query: ClientOrderDefaultsQuery) {
+async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDefaultsQuery) {
   const [settings, organization, counterparty, rememberedDefaults, defaultWarehouse] = await Promise.all([
     getRawClientOrderSettings(userId),
     prisma.organization.findFirst({
@@ -1762,105 +2859,83 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
   };
 }
 
-export async function getClientOrdersReferenceData(query: ClientOrdersReferenceDataQuery) {
-  const commonWhere = buildReferenceWhere(query.includeInactive);
-  const counterparty = query.counterpartyGuid
-    ? await prisma.counterparty.findUnique({
-        where: { guid: query.counterpartyGuid },
-        select: { id: true, guid: true, name: true, isActive: true },
-      })
-    : null;
-
-  if (query.counterpartyGuid && !counterparty) {
-    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Контрагент ${query.counterpartyGuid} не найден`);
-  }
-  if (counterparty?.isActive === false && !query.includeInactive) {
-    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Контрагент ${query.counterpartyGuid} неактивен`);
-  }
-
-  const counterpartyId = counterparty?.id;
-
-  const [counterparties, agreements, contracts, deliveryAddresses, warehouses] = await Promise.all([
-    prisma.counterparty.findMany({
-      where: commonWhere,
-      orderBy: [{ name: 'asc' }],
-      take: 100,
-      select: {
-        guid: true,
-        name: true,
-        fullName: true,
-        inn: true,
-        kpp: true,
-        isActive: true,
-      },
-    }),
-    counterpartyId
-      ? prisma.clientAgreement.findMany({
-          where: { ...commonWhere, counterpartyId, AND: [agreementNotClosedWhere()] },
-          orderBy: [{ name: 'asc' }],
-          take: 100,
-          select: {
-            guid: true,
-            name: true,
-            currency: true,
-            isActive: true,
-            contract: { select: { guid: true, number: true } },
-            warehouse: { select: { guid: true, name: true } },
-            priceType: { select: { guid: true, name: true } },
-          },
-        })
-      : Promise.resolve([]),
-    counterpartyId
-      ? prisma.clientContract.findMany({
-          where: { ...commonWhere, counterpartyId, AND: [contractNotClosedWhere()] },
-          orderBy: [{ number: 'asc' }],
-          take: 100,
-          select: {
-            guid: true,
-            number: true,
-            date: true,
-            validFrom: true,
-            validTo: true,
-            isActive: true,
-          },
-        })
-      : Promise.resolve([]),
-    counterpartyId
-      ? prisma.deliveryAddress.findMany({
-          where: { ...commonWhere, counterpartyId },
-          orderBy: [{ isDefault: 'desc' }, { fullAddress: 'asc' }],
-          take: 100,
-          select: {
-            guid: true,
-            name: true,
-            fullAddress: true,
-            isDefault: true,
-            isActive: true,
-          },
-        })
-      : Promise.resolve([]),
-    prisma.warehouse.findMany({
-      where: commonWhere,
-      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
-      take: 100,
-      select: {
-        guid: true,
-        name: true,
-        code: true,
-        isDefault: true,
-        isPickup: true,
-        isActive: true,
-      },
-    }),
-  ]);
-
+function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResolution: DeliveryDateResolution) {
+  const agreement = mapAgreementSummary(defaults.agreement);
+  const contract = mapContractSummary(defaults.contract ?? agreement?.contract ?? null);
+  const warehouse = mapWarehouseSummary(defaults.warehouse ?? defaults.agreement?.warehouse ?? null);
+  const deliveryAddress = mapDeliveryAddressSummary(defaults.deliveryAddress);
+  const priceType = defaults.priceType ?? defaults.agreement?.priceType ?? null;
   return {
-    counterparties,
-    agreements,
-    contracts,
-    deliveryAddresses,
-    warehouses,
+    organization: mapOrganizationSummary(defaults.organization),
+    counterparty: defaults.counterparty
+      ? {
+          guid: defaults.counterparty.guid,
+          name: defaults.counterparty.name,
+          fullName: defaults.counterparty.fullName ?? null,
+          inn: defaults.counterparty.inn ?? null,
+          kpp: defaults.counterparty.kpp ?? null,
+        }
+      : null,
+    agreement,
+    contract,
+    warehouse,
+    deliveryAddress,
+    priceType,
+    currency: defaults.currency || DEFAULT_ORDER_CURRENCY,
+    deliveryDate: deliveryDateResolution.resolvedDate,
+    deliveryDateIssue: deliveryDateResolution.issue,
+    deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
+    discountsEnabled: false,
+    warnings: defaults.warnings,
   };
+}
+
+export async function getClientOrderDefaults(userId: number, query: ClientOrderDefaultsQuery) {
+  const settings = await getRawClientOrderSettings(userId);
+  const deliveryDateResolution = resolveDeliveryDateSettings(settings);
+  try {
+    const defaults = await onecLive(
+      () => getLiveClientOrderDefaults(query),
+      'Ошибка получения подсказок по умолчанию из 1С'
+    );
+    try {
+      await materializeLiveDefaultsReferences(defaults);
+    } catch {
+      // Defaults are still useful to the app even if local snapshot caching failed.
+    }
+    return mapLiveDefaults(defaults, deliveryDateResolution);
+  } catch (error) {
+    if (isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502)) {
+      try {
+        const localDefaults = await getLocalClientOrderDefaults(userId, query);
+        return {
+          ...localDefaults,
+          warnings: ['1С временно недоступна, использованы локальные подсказки.'],
+        };
+      } catch {
+        return {
+          organization: null,
+          counterparty: null,
+          agreement: null,
+          contract: null,
+          warehouse: null,
+          deliveryAddress: null,
+          priceType: null,
+          currency: DEFAULT_ORDER_CURRENCY,
+          deliveryDate: deliveryDateResolution.resolvedDate,
+          deliveryDateIssue: deliveryDateResolution.issue,
+          deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
+          discountsEnabled: false,
+          warnings: ['1С временно недоступна, подсказки по умолчанию не загружены.'],
+        };
+      }
+    }
+    throw error;
+  }
+}
+
+export async function getClientOrdersReferenceData(query: ClientOrdersReferenceDataQuery) {
+  return onecLive(() => getLiveReferenceData(query), 'Ошибка получения справочников из 1С');
 }
 
 async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery, search: string): Promise<PagedResult<any>> {
@@ -1896,94 +2971,14 @@ async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery,
 export async function getClientOrdersCounterparties(
   query: ClientOrdersCounterpartiesQuery
 ): Promise<PagedResult<{ guid: string; name: string; fullName: string | null; inn: string | null; kpp: string | null; isActive: boolean }>> {
-  const search = normalizeSearch(query.search);
-  if (!search) {
-    const where: Prisma.CounterpartyWhereInput = query.includeInactive ? {} : { isActive: true };
-    const [items, total] = await prisma.$transaction([
-      prisma.counterparty.findMany({
-        where,
-        orderBy: [{ name: 'asc' }],
-        skip: query.offset,
-        take: query.limit,
-        select: { guid: true, name: true, fullName: true, inn: true, kpp: true, isActive: true },
-      }),
-      prisma.counterparty.count({ where }),
-    ]);
-    return { items, total, limit: query.limit, offset: query.offset };
-  }
-
-  const patterns = likeSearchPatterns(search);
-  const activeFilter = query.includeInactive ? Prisma.empty : Prisma.sql`AND c."isActive" = TRUE`;
+  const search = (query.search || '').trim();
   try {
-    const items = await prisma.$queryRaw<
-      Array<{ guid: string; name: string; fullName: string | null; inn: string | null; kpp: string | null; isActive: boolean }>
-    >(Prisma.sql`
-      SELECT
-        c.guid,
-        c.name,
-        c."fullName",
-        c.inn,
-        c.kpp,
-        c."isActive"
-      FROM "Counterparty" c
-      WHERE 1 = 1
-        ${activeFilter}
-        AND (
-          lower(coalesce(c.guid, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.name, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c."fullName", '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.inn, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.kpp, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR similarity(lower(unaccent(coalesce(c.name, ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
-          OR similarity(lower(unaccent(coalesce(c."fullName", ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
-        )
-      ORDER BY
-        CASE
-          WHEN lower(coalesce(c.inn, '')) = ${patterns.exact} THEN 0
-          WHEN lower(coalesce(c.kpp, '')) = ${patterns.exact} THEN 1
-          WHEN lower(coalesce(c.guid, '')) = ${patterns.exact} THEN 2
-          WHEN lower(unaccent(coalesce(c.name, ''))) = lower(unaccent(${search})) THEN 3
-          WHEN lower(unaccent(coalesce(c."fullName", ''))) = lower(unaccent(${search})) THEN 4
-          WHEN lower(coalesce(c.inn, '')) LIKE ${patterns.prefix} ESCAPE '\\' THEN 5
-          WHEN lower(coalesce(c.kpp, '')) LIKE ${patterns.prefix} ESCAPE '\\' THEN 6
-          WHEN lower(coalesce(c.name, '')) LIKE ${patterns.prefix} ESCAPE '\\' THEN 7
-          WHEN lower(coalesce(c."fullName", '')) LIKE ${patterns.prefix} ESCAPE '\\' THEN 8
-          ELSE 20
-        END ASC,
-        GREATEST(
-          similarity(lower(unaccent(coalesce(c.name, ''))), lower(unaccent(${search}))),
-          similarity(lower(unaccent(coalesce(c."fullName", ''))), lower(unaccent(${search})))
-        ) DESC,
-        c.name ASC
-      LIMIT ${query.limit}
-      OFFSET ${query.offset}
-    `);
-
-    const totalRows = await prisma.$queryRaw<Array<{ total: number | bigint }>>(Prisma.sql`
-      SELECT COUNT(*) AS total
-      FROM "Counterparty" c
-      WHERE 1 = 1
-        ${activeFilter}
-        AND (
-          lower(coalesce(c.guid, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.name, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c."fullName", '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.inn, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR lower(coalesce(c.kpp, '')) LIKE ${patterns.contains} ESCAPE '\\'
-          OR similarity(lower(unaccent(coalesce(c.name, ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
-          OR similarity(lower(unaccent(coalesce(c."fullName", ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
-        )
-    `);
-
-    return {
-      items,
-      total: asNumberCount(totalRows[0]?.total),
-      limit: query.limit,
-      offset: query.offset,
-    };
+    return await onecLive(() => getLiveCounterparties(query), 'Ошибка получения контрагентов из 1С');
   } catch (error) {
-    if (!isSmartSearchExtensionError(error)) throw error;
-    return getCounterpartiesFallback(query, search);
+    if (isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502)) {
+      return getCounterpartiesFallback(query, search);
+    }
+    throw error;
   }
 }
 
@@ -2003,200 +2998,65 @@ async function resolveCounterpartyIdOrNull(counterpartyGuid?: string) {
 }
 
 export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQuery) {
-  const counterpartyId = await resolveCounterpartyIdOrNull(query.counterpartyGuid);
-  if (!counterpartyId) {
+  try {
+    const result = await onecLive(() => getLiveAgreements(query), 'Ошибка получения соглашений из 1С');
+    if (result.items.length || !query.organizationGuid || !query.counterpartyGuid) return result;
+  } catch (error) {
+    if (!(isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502))) throw error;
+  }
+
+  if (!query.organizationGuid || !query.counterpartyGuid) {
     return { items: [], total: 0, limit: query.limit, offset: query.offset };
   }
 
-  const search = normalizeSearch(query.search);
-  const where: Prisma.ClientAgreementWhereInput = {
-    ...(query.includeInactive ? {} : { isActive: true }),
-    AND: [agreementNotClosedWhere()],
-    counterpartyId,
-    ...(search
-      ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { name: { contains: search, mode: 'insensitive' } },
-            { contract: { number: { contains: search, mode: 'insensitive' } } },
-            { warehouse: { name: { contains: search, mode: 'insensitive' } } },
-          ],
-        }
-      : {}),
+  const defaults = await onecLive(
+    () => getLiveClientOrderDefaults({ organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! }),
+    'Ошибка получения соглашения по умолчанию из 1С'
+  );
+  const agreement = mapAgreementSummary(defaults.agreement);
+  return {
+    items: agreement ? [agreement] : [],
+    total: agreement ? 1 : 0,
+    limit: query.limit,
+    offset: query.offset,
   };
-
-  const [items, total] = await prisma.$transaction([
-    prisma.clientAgreement.findMany({
-      where,
-      orderBy: [{ name: 'asc' }],
-      skip: query.offset,
-      take: query.limit,
-      select: {
-        guid: true,
-        name: true,
-        currency: true,
-        isActive: true,
-        contract: { select: { guid: true, number: true } },
-        warehouse: { select: { guid: true, name: true } },
-        priceType: { select: { guid: true, name: true } },
-      },
-    }),
-    prisma.clientAgreement.count({ where }),
-  ]);
-
-  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersContracts(query: ClientOrdersContractsQuery) {
-  const counterpartyId = await resolveCounterpartyIdOrNull(query.counterpartyGuid);
-  if (!counterpartyId) {
+  try {
+    const result = await onecLive(() => getLiveContracts(query), 'Ошибка получения договоров из 1С');
+    if (result.items.length || !query.organizationGuid || !query.counterpartyGuid) return result;
+  } catch (error) {
+    if (!(isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502))) throw error;
+  }
+
+  if (!query.organizationGuid || !query.counterpartyGuid) {
     return { items: [], total: 0, limit: query.limit, offset: query.offset };
   }
 
-  const search = normalizeSearch(query.search);
-  const where: Prisma.ClientContractWhereInput = {
-    ...(query.includeInactive ? {} : { isActive: true }),
-    AND: [contractNotClosedWhere()],
-    counterpartyId,
-    ...(search
-      ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { number: { contains: search, mode: 'insensitive' } },
-            { comment: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
+  const defaults = await onecLive(
+    () => getLiveClientOrderDefaults({ organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! }),
+    'Ошибка получения договора по умолчанию из 1С'
+  );
+  const contract = mapContractSummary(defaults.contract);
+  return {
+    items: contract ? [contract] : [],
+    total: contract ? 1 : 0,
+    limit: query.limit,
+    offset: query.offset,
   };
-
-  const [items, total] = await prisma.$transaction([
-    prisma.clientContract.findMany({
-      where,
-      orderBy: [{ number: 'asc' }],
-      skip: query.offset,
-      take: query.limit,
-      select: {
-        guid: true,
-        number: true,
-        date: true,
-        validFrom: true,
-        validTo: true,
-        isActive: true,
-      },
-    }),
-    prisma.clientContract.count({ where }),
-  ]);
-
-  return { items, total, limit: query.limit, offset: query.offset };
 }
 
 export async function getClientOrdersWarehouses(query: ClientOrdersWarehousesQuery) {
-  const search = normalizeSearch(query.search);
-  const where: Prisma.WarehouseWhereInput = {
-    ...(query.includeInactive ? {} : { isActive: true }),
-    ...(search
-      ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { name: { contains: search, mode: 'insensitive' } },
-            { code: { contains: search, mode: 'insensitive' } },
-            { address: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
-  };
-
-  const [items, total] = await prisma.$transaction([
-    prisma.warehouse.findMany({
-      where,
-      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
-      skip: query.offset,
-      take: query.limit,
-      select: {
-        guid: true,
-        name: true,
-        code: true,
-        isDefault: true,
-        isPickup: true,
-        isActive: true,
-      },
-    }),
-    prisma.warehouse.count({ where }),
-  ]);
-
-  return { items, total, limit: query.limit, offset: query.offset };
+  return onecLive(() => getLiveWarehouses(query), 'Ошибка получения складов из 1С');
 }
 
 export async function getClientOrdersPriceTypes(query: ClientOrdersPriceTypesQuery) {
-  const search = normalizeSearch(query.search);
-  const where: Prisma.PriceTypeWhereInput = {
-    ...(query.includeInactive ? {} : { isActive: true }),
-    ...(search
-      ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { code: { contains: search, mode: 'insensitive' } },
-            { name: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
-  };
-
-  const [items, total] = await prisma.$transaction([
-    prisma.priceType.findMany({
-      where,
-      orderBy: [{ name: 'asc' }],
-      skip: query.offset,
-      take: query.limit,
-      select: { guid: true, name: true, code: true, isActive: true },
-    }),
-    prisma.priceType.count({ where }),
-  ]);
-
-  return { items, total, limit: query.limit, offset: query.offset };
+  return onecLive(() => getLivePriceTypes(query), 'Ошибка получения видов цен из 1С');
 }
 
 export async function getClientOrdersDeliveryAddresses(query: ClientOrdersDeliveryAddressesQuery) {
-  const counterpartyId = await resolveCounterpartyIdOrNull(query.counterpartyGuid);
-  if (!counterpartyId) {
-    return { items: [], total: 0, limit: query.limit, offset: query.offset };
-  }
-
-  const search = normalizeSearch(query.search);
-  const where: Prisma.DeliveryAddressWhereInput = {
-    ...(query.includeInactive ? {} : { isActive: true }),
-    counterpartyId,
-    ...(search
-      ? {
-          OR: [
-            { guid: { contains: search, mode: 'insensitive' } },
-            { name: { contains: search, mode: 'insensitive' } },
-            { fullAddress: { contains: search, mode: 'insensitive' } },
-            { city: { contains: search, mode: 'insensitive' } },
-            { street: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
-  };
-
-  const [items, total] = await prisma.$transaction([
-    prisma.deliveryAddress.findMany({
-      where,
-      orderBy: [{ isDefault: 'desc' }, { fullAddress: 'asc' }],
-      skip: query.offset,
-      take: query.limit,
-      select: {
-        guid: true,
-        name: true,
-        fullAddress: true,
-        isDefault: true,
-        isActive: true,
-      },
-    }),
-    prisma.deliveryAddress.count({ where }),
-  ]);
-
-  return { items, total, limit: query.limit, offset: query.offset };
+  return onecLive(() => getLiveDeliveryAddresses(query), 'Ошибка получения адресов доставки из 1С');
 }
 
 type ProductSearchRow = {
@@ -2348,6 +3208,9 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
 }
 
 export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) {
+  return onecLive(() => getLiveProducts(query), 'Ошибка получения номенклатуры из 1С');
+
+  /*
   const at = now();
   const search = normalizeSearch(query.search);
   const contextCounterparty = query.counterpartyGuid
@@ -2553,9 +3416,13 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
     limit: rankedProducts.limit,
     offset: rankedProducts.offset,
   };
+  */
 }
 
 export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody) {
+  return onecLive(() => getLiveProductsByGuids(body), 'Ошибка получения номенклатуры из 1С');
+
+  /*
   const uniqueGuids = [...new Set(body.productGuids)];
   const products = await prisma.product.findMany({
     where: { guid: { in: uniqueGuids }, isActive: true },
@@ -2619,12 +3486,15 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
       stock: stockByProductId.get(product.id) ?? null,
     }];
   });
+  */
 }
 
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
   const sourceUpdatedAt = now();
+  const liveReferences = await loadLiveOrderMaterialization(body);
 
   const created = await prisma.$transaction(async (tx) => {
+    await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const guid = randomUUID();
@@ -2684,6 +3554,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
 
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
   const sourceUpdatedAt = now();
+  const liveReferences = await loadLiveOrderMaterialization(body);
 
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
@@ -2705,6 +3576,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     ensureEditable(order);
     assertRevision(order.revision, body.revision);
 
+    await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const nextRevision = order.revision + 1;

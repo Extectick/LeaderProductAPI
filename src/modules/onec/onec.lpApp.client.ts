@@ -157,6 +157,73 @@ export function getOnecLpAppPhysicalPersons() {
   return callOnecLpApp('/physical-persons');
 }
 
+export function getOnecLpAppOrganizations(query: OnecLpAppQuery) {
+  return callOnecLpApp('/organizations', { query });
+}
+
+export function getOnecLpAppWarehouses(query: OnecLpAppQuery) {
+  return callOnecLpApp('/warehouses', { query });
+}
+
+export function getOnecLpAppCounterparties(query: OnecLpAppQuery) {
+  return callOnecLpApp('/counterparties', { query });
+}
+
+export function getOnecLpAppContracts(query: OnecLpAppQuery) {
+  return callOnecLpApp('/contracts', { query });
+}
+
+export function getOnecLpAppAgreements(query: OnecLpAppQuery) {
+  return callOnecLpApp('/agreements', { query });
+}
+
+export function getOnecLpAppDeliveryAddresses(query: OnecLpAppQuery) {
+  return callOnecLpApp('/delivery-addresses', { query });
+}
+
+export function getOnecLpAppPriceTypes(query: OnecLpAppQuery) {
+  return callOnecLpApp('/price-types', { query });
+}
+
+export function getOnecLpAppNomenclature(query: OnecLpAppQuery) {
+  return callOnecLpApp('/nomenclature', { query });
+}
+
+export function getOnecLpAppNomenclatureItem(guid: string, query: OnecLpAppQuery = {}) {
+  return callOnecLpApp(`/nomenclature/${encodeURIComponent(guid)}`, { query });
+}
+
+export function getOnecLpAppProductPrices(query: OnecLpAppQuery) {
+  return callOnecLpApp('/product-prices', { query });
+}
+
+export function getOnecLpAppSpecialPrices(query: OnecLpAppQuery) {
+  return callOnecLpApp('/special-prices', { query });
+}
+
+export function getOnecLpAppStock(query: OnecLpAppQuery) {
+  return callOnecLpApp('/stock', { query });
+}
+
+export function getOnecLpAppClientOrders(query: OnecLpAppQuery) {
+  return callOnecLpApp('/client-orders', { query });
+}
+
+export function getOnecLpAppClientOrder(documentGuid: string, query: OnecLpAppQuery = {}) {
+  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, { query });
+}
+
+export function getOnecLpAppClientOrderDefaults(query: OnecLpAppQuery) {
+  return callOnecLpApp('/client-order-defaults', { query });
+}
+
+export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
+  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, {
+    method: 'PUT',
+    body,
+  });
+}
+
 export function getOnecLpAppTransportTasks(query: OnecLpAppQuery) {
   return callOnecLpApp('/transport-tasks', { query });
 }

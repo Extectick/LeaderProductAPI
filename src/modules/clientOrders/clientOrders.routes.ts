@@ -84,7 +84,7 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
   }
 
   try {
-    const result = await listClientOrders(parsed.data);
+    const result = await listClientOrders(parsed.data, req.user!.userId);
     return res.json(
       successResponse(
         { items: result.items },
@@ -92,6 +92,7 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
         {
           ...pagedMeta(result.total, result.items.length, result.limit, result.offset),
           statusCounts: result.statusCounts,
+          liveSource: result.liveSource,
         }
       )
     );
@@ -326,7 +327,7 @@ router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: A
   }
 
   try {
-    const result = await getClientOrderByGuid(parsed.data.guid);
+    const result = await getClientOrderByGuid(parsed.data.guid, req.user!.userId);
     return res.json(successResponse(result, 'Карточка заказа клиента'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения карточки заказа клиента');

@@ -68,10 +68,36 @@ const pagedSearchQuerySchema = z.object({
   includeInactive: booleanFromQuery,
 });
 
+const clientOrderStatusSchema = z.enum([
+  OrderStatus.DRAFT,
+  OrderStatus.QUEUED,
+  OrderStatus.SENT_TO_1C,
+  OrderStatus.CONFIRMED,
+  OrderStatus.PARTIAL,
+  OrderStatus.REJECTED,
+  OrderStatus.CANCELLED,
+  'AWAITING_APPROVAL',
+  'AWAITING_ADVANCE_BEFORE_SUPPLY',
+  'READY_FOR_SUPPLY',
+  'AWAITING_PREPAYMENT_BEFORE_SHIPMENT',
+  'AWAITING_SUPPLY',
+  'READY_FOR_SHIPMENT',
+  'SHIPPING_IN_PROGRESS',
+  'AWAITING_PAYMENT_AFTER_SHIPMENT',
+  'READY_TO_CLOSE',
+  'NOT_CONFIRMED',
+  'TO_SUPPLY',
+  'TO_SHIP',
+  'IN_RESERVE',
+  'TO_FULFILLMENT',
+  'COMPLETED',
+  'CLOSED',
+]);
+
 export const clientOrdersListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
-  status: z.nativeEnum(OrderStatus).optional(),
+  status: clientOrderStatusSchema.optional(),
   syncState: z.nativeEnum(OrderSyncState).optional(),
   search: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
@@ -100,6 +126,7 @@ export const clientOrderReferenceDetailsParamsSchema = z.object({
 });
 
 export const clientOrdersReferenceDataQuerySchema = z.object({
+  organizationGuid: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
   includeInactive: booleanFromQuery,
 });
@@ -108,23 +135,28 @@ export const clientOrdersCounterpartiesQuerySchema = pagedSearchQuerySchema;
 
 export const clientOrdersAgreementsQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
+  organizationGuid: z.string().trim().min(1).optional(),
 });
 
 export const clientOrdersContractsQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
+  organizationGuid: z.string().trim().min(1).optional(),
 });
 
 export const clientOrdersWarehousesQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
+  organizationGuid: z.string().trim().min(1).optional(),
 });
 
 export const clientOrdersPriceTypesQuerySchema = pagedSearchQuerySchema;
 
 export const clientOrdersDeliveryAddressesQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
+  organizationGuid: z.string().trim().min(1).optional(),
 });
 
 export const clientOrdersProductsQuerySchema = pagedSearchQuerySchema.extend({
+  organizationGuid: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
   agreementGuid: z.string().trim().min(1).optional(),
   warehouseGuid: z.string().trim().min(1).optional(),
@@ -134,6 +166,7 @@ export const clientOrdersProductsQuerySchema = pagedSearchQuerySchema.extend({
 
 export const clientOrdersBatchProductsSchema = z.object({
   productGuids: z.array(z.string().trim().min(1)).min(1).max(200),
+  organizationGuid: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
   agreementGuid: z.string().trim().min(1).optional(),
   warehouseGuid: z.string().trim().min(1).optional(),
