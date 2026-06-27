@@ -1013,7 +1013,26 @@ export async function getLiveDeliveryAddresses(query: ClientOrdersDeliveryAddres
 }
 
 export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: string) {
-  return findOneFromList(guid, { counterpartyGuid }, getOnecLpAppDeliveryAddresses, ['deliveryAddresses', 'delivery-addresses'], mapDeliveryAddress);
+  const foundByGuid = await findOneFromList(
+    guid,
+    { counterpartyGuid },
+    getOnecLpAppDeliveryAddresses,
+    ['deliveryAddresses', 'delivery-addresses'],
+    mapDeliveryAddress
+  );
+  if (foundByGuid || !counterpartyGuid) return foundByGuid;
+
+  const limit = 100;
+  let offset = 0;
+  for (let pageNumber = 0; pageNumber < 10; pageNumber += 1) {
+    const page = await getLiveDeliveryAddresses({ counterpartyGuid, limit, offset, includeInactive: false });
+    const found = findItemByGuid(page.items, guid);
+    if (found) return found;
+    if (page.items.length < limit || page.total <= offset + page.items.length) break;
+    offset += limit;
+  }
+
+  return null;
 }
 
 export async function getLiveProducts(query: ClientOrdersProductsQuery) {

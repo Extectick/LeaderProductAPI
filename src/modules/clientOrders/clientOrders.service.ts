@@ -18,13 +18,19 @@ import {
   OnecLpAppNetworkError,
 } from '../onec/onec.lpApp.client';
 import {
+  CLIENT_ORDERS_CACHE_TTL,
+  ClientOrdersOnecCircuitOpenError,
+  isClientOrdersOnecCircuitOpen,
+  markClientOrdersOnecCircuitOpen,
+  readThroughClientOrdersCache,
+} from './clientOrders.cache';
+import {
   findLiveAgreement,
   findLiveContract,
   findLiveCounterparty,
   findLiveDeliveryAddress,
   findLiveOrganization,
   findLivePriceType,
-  findLiveProduct,
   findLiveWarehouse,
   getLiveAgreements,
   getLiveContracts,
@@ -239,10 +245,33 @@ function throwClientOrdersOnecError(error: unknown, message = '1С времен�
   throw new ClientOrdersError(502, ErrorCodes.INTERNAL_ERROR, `${message}: ${detail}`);
 }
 
-async function onecLive<T>(operation: () => Promise<T>, message?: string): Promise<T> {
+async function onecLive<T>(
+  operation: () => Promise<T>,
+  message?: string,
+  options: { allowCachedWhenCircuitOpen?: boolean } = {}
+): Promise<T> {
+  if (!options.allowCachedWhenCircuitOpen && await isClientOrdersOnecCircuitOpen()) {
+    throw new ClientOrdersError(
+      502,
+      ErrorCodes.INTERNAL_ERROR,
+      `${message ?? '1С временно недоступна'}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
+    );
+  }
+
   try {
-    return await operation();
+    const result = await operation();
+    return result;
   } catch (error) {
+    if (error instanceof ClientOrdersOnecCircuitOpenError) {
+      throw new ClientOrdersError(
+        502,
+        ErrorCodes.INTERNAL_ERROR,
+        `${message ?? '1С временно недоступна'}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
+      );
+    }
+    if (isOnecLpAppError(error)) {
+      await markClientOrdersOnecCircuitOpen();
+    }
     throwClientOrdersOnecError(error, message);
   }
 }
@@ -1252,11 +1281,22 @@ async function loadLiveReferenceWithCache<T>(
   fallback: () => Promise<T | null>,
   message: string
 ) {
+  if (await isClientOrdersOnecCircuitOpen()) {
+    const cachedValue = await fallback();
+    if (cachedValue) return cachedValue;
+    throw new ClientOrdersError(
+      502,
+      ErrorCodes.INTERNAL_ERROR,
+      `${message}: недавняя ошибка подключения к 1С, повторите запрос через несколько секунд.`
+    );
+  }
+
   try {
     const liveValue = await operation();
     if (liveValue) return liveValue;
   } catch (error) {
     if (!isOnecLpAppError(error)) throw error;
+    await markClientOrdersOnecCircuitOpen();
     const cachedValue = await fallback();
     if (cachedValue) return cachedValue;
     throwClientOrdersOnecError(error, message);
@@ -1432,39 +1472,69 @@ async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promis
   const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceTypes, products] =
     await Promise.all([
       loadLiveReferenceWithCache(
-        () => findLiveOrganization(body.organizationGuid),
+        () => readThroughClientOrdersCache(
+          'reference:organization',
+          { guid: body.organizationGuid },
+          CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+          () => findLiveOrganization(body.organizationGuid)
+        ),
         () => findCachedOrganization(body.organizationGuid),
         'Ошибка получения организации из 1С'
       ),
       loadLiveReferenceWithCache(
-        () => findLiveCounterparty(body.counterpartyGuid),
+        () => readThroughClientOrdersCache(
+          'reference:counterparty',
+          { guid: body.counterpartyGuid },
+          CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+          () => findLiveCounterparty(body.counterpartyGuid)
+        ),
         () => findCachedCounterparty(body.counterpartyGuid),
         'Ошибка получения контрагента из 1С'
       ),
       body.agreementGuid
         ? loadLiveReferenceWithCache(
-            () => findLiveAgreement(body.agreementGuid!, body.counterpartyGuid),
+            () => readThroughClientOrdersCache(
+              'reference:agreement',
+              { guid: body.agreementGuid, counterpartyGuid: body.counterpartyGuid },
+              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+              () => findLiveAgreement(body.agreementGuid!, body.counterpartyGuid)
+            ),
             () => findCachedAgreement(body.agreementGuid!),
             'Ошибка получения соглашения из 1С'
           )
         : Promise.resolve(null),
       body.contractGuid
         ? loadLiveReferenceWithCache(
-            () => findLiveContract(body.contractGuid!, body.counterpartyGuid),
+            () => readThroughClientOrdersCache(
+              'reference:contract',
+              { guid: body.contractGuid, counterpartyGuid: body.counterpartyGuid },
+              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+              () => findLiveContract(body.contractGuid!, body.counterpartyGuid)
+            ),
             () => findCachedContract(body.contractGuid!),
             'Ошибка получения договора из 1С'
           )
         : Promise.resolve(null),
       body.warehouseGuid
         ? loadLiveReferenceWithCache(
-            () => findLiveWarehouse(body.warehouseGuid!),
+            () => readThroughClientOrdersCache(
+              'reference:warehouse',
+              { guid: body.warehouseGuid },
+              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+              () => findLiveWarehouse(body.warehouseGuid!)
+            ),
             () => findCachedWarehouse(body.warehouseGuid!),
             'Ошибка получения склада из 1С'
           )
         : Promise.resolve(null),
       body.deliveryAddressGuid
         ? loadLiveReferenceWithCache(
-            () => findLiveDeliveryAddress(body.deliveryAddressGuid!, body.counterpartyGuid),
+            () => readThroughClientOrdersCache(
+              'reference:delivery-address',
+              { guid: body.deliveryAddressGuid, counterpartyGuid: body.counterpartyGuid },
+              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+              () => findLiveDeliveryAddress(body.deliveryAddressGuid!, body.counterpartyGuid)
+            ),
             () => findCachedDeliveryAddress(body.deliveryAddressGuid!),
             'Ошибка получения адреса доставки из 1С'
           )
@@ -1472,24 +1542,36 @@ async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promis
       Promise.all(
         explicitPriceTypeGuids.map((guid) =>
           loadLiveReferenceWithCache(
-            () => findLivePriceType(guid),
+            () => readThroughClientOrdersCache(
+              'reference:price-type',
+              { guid },
+              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+              () => findLivePriceType(guid)
+            ),
             () => findCachedPriceType(guid),
             'Ошибка получения вида цены из 1С'
           )
         )
       ),
-      Promise.all(
-        productGuids.map((guid) =>
-          onecLive(
-            () =>
-              findLiveProduct(guid, {
-                counterpartyGuid: body.counterpartyGuid,
-                agreementGuid: body.agreementGuid ?? undefined,
-                warehouseGuid: body.warehouseGuid ?? undefined,
-              }),
-            'Ошибка получения номенклатуры из 1С'
-          )
-        )
+      onecLive(
+        () => readThroughClientOrdersCache(
+          'products:batch',
+          {
+            productGuids: productGuids.slice().sort(),
+            counterpartyGuid: body.counterpartyGuid,
+            agreementGuid: body.agreementGuid ?? undefined,
+            warehouseGuid: body.warehouseGuid ?? undefined,
+          },
+          CLIENT_ORDERS_CACHE_TTL.productsBatch,
+          () => getLiveProductsByGuids({
+            productGuids,
+            counterpartyGuid: body.counterpartyGuid,
+            agreementGuid: body.agreementGuid ?? undefined,
+            warehouseGuid: body.warehouseGuid ?? undefined,
+          })
+        ),
+        'Ошибка получения номенклатуры из 1С',
+        { allowCachedWhenCircuitOpen: true }
       ),
     ]);
 
@@ -1878,7 +1960,17 @@ async function prepareOrderItems(
 }
 
 async function getActiveOrganizations() {
-  const result = await onecLive(() => getLiveOrganizations({ limit: 100, offset: 0 }), 'Ошибка получения организаций из 1С');
+  const query = { limit: 100, offset: 0 };
+  const result = await onecLive(
+    () => readThroughClientOrdersCache(
+      'organizations',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.warehouses,
+      () => getLiveOrganizations(query)
+    ),
+    'Ошибка получения организаций из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
   return result.items;
 }
 
@@ -2154,6 +2246,9 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
 }
 
 function liveUnavailableMeta(error: unknown) {
+  if (error instanceof ClientOrdersError && error.status === 502) {
+    return { status: 'unavailable', message: error.message || '1С временно недоступна. Показаны локальные черновики.' };
+  }
   if (error instanceof OnecLpAppConfigError) {
     return { status: 'not_configured', message: 'Не настроена связь с 1С для live-списка заказов.' };
   }
@@ -2222,12 +2317,22 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
 
   if (managerGuid) {
     try {
-      const livePage = await getLiveClientOrders({
+      const liveQuery = {
         ...query,
         managerGuid,
         offset: liveOffset,
         limit: query.limit,
-      });
+      };
+      const livePage = await onecLive(
+        () => readThroughClientOrdersCache(
+          'orders:list',
+          liveQuery,
+          CLIENT_ORDERS_CACHE_TTL.ordersList,
+          () => getLiveClientOrders(liveQuery)
+        ),
+        'Ошибка получения live-списка заказов из 1С',
+        { allowCachedWhenCircuitOpen: true }
+      );
       liveItems = livePage.items;
       liveTotal = livePage.total;
     } catch (error) {
@@ -2304,8 +2409,14 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
       throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'В профиле сотрудника не заполнен GUID пользователя 1С.');
     }
     const live = await onecLive(
-      () => getLiveClientOrder(guid, { managerGuid }),
-      'Ошибка получения заказа клиента из 1С'
+      () => readThroughClientOrdersCache(
+        'orders:detail',
+        { guid, managerGuid },
+        CLIENT_ORDERS_CACHE_TTL.orderDetail,
+        () => getLiveClientOrder(guid, { managerGuid })
+      ),
+      'Ошибка получения заказа клиента из 1С',
+      { allowCachedWhenCircuitOpen: true }
     );
     return { ...live, readOnly: true };
   }
@@ -2314,9 +2425,27 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     const managerGuid = await getManagerGuidForUser(userId);
     if (managerGuid) {
       try {
-        const liveSummary = await findLiveClientOrder({ managerGuid, appGuid: order.guid, number1c: order.number1c });
+        const liveSummary = await onecLive(
+          () => readThroughClientOrdersCache(
+            'orders:find',
+            { managerGuid, appGuid: order.guid, number1c: order.number1c },
+            CLIENT_ORDERS_CACHE_TTL.ordersList,
+            () => findLiveClientOrder({ managerGuid, appGuid: order.guid, number1c: order.number1c })
+          ),
+          'Ошибка поиска заказа клиента в 1С',
+          { allowCachedWhenCircuitOpen: true }
+        );
         if (liveSummary?.documentGuid) {
-          const liveDetail = await getLiveClientOrder(liveSummary.documentGuid, { managerGuid, appGuid: order.guid });
+          const liveDetail = await onecLive(
+            () => readThroughClientOrdersCache(
+              'orders:detail',
+              { documentGuid: liveSummary.documentGuid, managerGuid, appGuid: order.guid },
+              CLIENT_ORDERS_CACHE_TTL.orderDetail,
+              () => getLiveClientOrder(liveSummary.documentGuid, { managerGuid, appGuid: order.guid })
+            ),
+            'Ошибка получения заказа клиента из 1С',
+            { allowCachedWhenCircuitOpen: true }
+          );
           return {
             ...liveDetail,
             guid: order.guid,
@@ -2330,7 +2459,11 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
           };
         }
       } catch (error) {
-        if (!isOnecLpAppError(error)) throw error;
+        if (error instanceof ClientOrdersError && error.status === 502) {
+          // Keep local snapshot usable when 1C is slow or temporarily unavailable.
+        } else if (!isOnecLpAppError(error)) {
+          throw error;
+        }
       }
     }
   }
@@ -2366,7 +2499,16 @@ export async function getClientOrderSettings(userId: number) {
 }
 
 export async function getClientOrderReferenceDetails(params: ClientOrderReferenceDetailsParams) {
-  return onecLive(() => getLiveReferenceDetails(params), 'Ошибка получения карточки реквизита из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'reference-details',
+      params,
+      CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+      () => getLiveReferenceDetails(params)
+    ),
+    'Ошибка получения карточки реквизита из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 
   /*
   const { kind, guid } = params;
@@ -2642,8 +2784,14 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
       preferredOrganizationId = null;
     } else {
       const liveOrganization = await onecLive(
-        () => findLiveOrganization(body.preferredOrganizationGuid!),
-        'Ошибка получения организации из 1С'
+        () => readThroughClientOrdersCache(
+          'reference:organization',
+          { guid: body.preferredOrganizationGuid },
+          CLIENT_ORDERS_CACHE_TTL.referenceDetails,
+          () => findLiveOrganization(body.preferredOrganizationGuid!)
+        ),
+        'Ошибка получения организации из 1С',
+        { allowCachedWhenCircuitOpen: true }
       );
       await prisma.$transaction(async (tx) => {
         await upsertLiveOrganization(tx, liveOrganization, now());
@@ -2895,8 +3043,14 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
   const deliveryDateResolution = resolveDeliveryDateSettings(settings);
   try {
     const defaults = await onecLive(
-      () => getLiveClientOrderDefaults(query),
-      'Ошибка получения подсказок по умолчанию из 1С'
+      () => readThroughClientOrdersCache(
+        'defaults',
+        query,
+        CLIENT_ORDERS_CACHE_TTL.defaults,
+        () => getLiveClientOrderDefaults(query)
+      ),
+      'Ошибка получения подсказок по умолчанию из 1С',
+      { allowCachedWhenCircuitOpen: true }
     );
     try {
       await materializeLiveDefaultsReferences(defaults);
@@ -2935,7 +3089,16 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
 }
 
 export async function getClientOrdersReferenceData(query: ClientOrdersReferenceDataQuery) {
-  return onecLive(() => getLiveReferenceData(query), 'Ошибка получения справочников из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'reference-data',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.referenceData,
+      () => getLiveReferenceData(query)
+    ),
+    'Ошибка получения справочников из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 }
 
 async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery, search: string): Promise<PagedResult<any>> {
@@ -2973,7 +3136,16 @@ export async function getClientOrdersCounterparties(
 ): Promise<PagedResult<{ guid: string; name: string; fullName: string | null; inn: string | null; kpp: string | null; isActive: boolean }>> {
   const search = (query.search || '').trim();
   try {
-    return await onecLive(() => getLiveCounterparties(query), 'Ошибка получения контрагентов из 1С');
+    return await onecLive(
+      () => readThroughClientOrdersCache(
+        'counterparties',
+        query,
+        CLIENT_ORDERS_CACHE_TTL.counterparties,
+        () => getLiveCounterparties(query)
+      ),
+      'Ошибка получения контрагентов из 1С',
+      { allowCachedWhenCircuitOpen: true }
+    );
   } catch (error) {
     if (isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502)) {
       return getCounterpartiesFallback(query, search);
@@ -2999,7 +3171,16 @@ async function resolveCounterpartyIdOrNull(counterpartyGuid?: string) {
 
 export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQuery) {
   try {
-    const result = await onecLive(() => getLiveAgreements(query), 'Ошибка получения соглашений из 1С');
+    const result = await onecLive(
+      () => readThroughClientOrdersCache(
+        'agreements',
+        query,
+        CLIENT_ORDERS_CACHE_TTL.agreements,
+        () => getLiveAgreements(query)
+      ),
+      'Ошибка получения соглашений из 1С',
+      { allowCachedWhenCircuitOpen: true }
+    );
     if (result.items.length || !query.organizationGuid || !query.counterpartyGuid) return result;
   } catch (error) {
     if (!(isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502))) throw error;
@@ -3009,9 +3190,16 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
     return { items: [], total: 0, limit: query.limit, offset: query.offset };
   }
 
+  const defaultsQuery = { organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! };
   const defaults = await onecLive(
-    () => getLiveClientOrderDefaults({ organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! }),
-    'Ошибка получения соглашения по умолчанию из 1С'
+    () => readThroughClientOrdersCache(
+      'defaults',
+      defaultsQuery,
+      CLIENT_ORDERS_CACHE_TTL.defaults,
+      () => getLiveClientOrderDefaults(defaultsQuery)
+    ),
+    'Ошибка получения соглашения по умолчанию из 1С',
+    { allowCachedWhenCircuitOpen: true }
   );
   const agreement = mapAgreementSummary(defaults.agreement);
   return {
@@ -3024,7 +3212,16 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
 
 export async function getClientOrdersContracts(query: ClientOrdersContractsQuery) {
   try {
-    const result = await onecLive(() => getLiveContracts(query), 'Ошибка получения договоров из 1С');
+    const result = await onecLive(
+      () => readThroughClientOrdersCache(
+        'contracts',
+        query,
+        CLIENT_ORDERS_CACHE_TTL.contracts,
+        () => getLiveContracts(query)
+      ),
+      'Ошибка получения договоров из 1С',
+      { allowCachedWhenCircuitOpen: true }
+    );
     if (result.items.length || !query.organizationGuid || !query.counterpartyGuid) return result;
   } catch (error) {
     if (!(isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502))) throw error;
@@ -3034,9 +3231,16 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
     return { items: [], total: 0, limit: query.limit, offset: query.offset };
   }
 
+  const defaultsQuery = { organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! };
   const defaults = await onecLive(
-    () => getLiveClientOrderDefaults({ organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! }),
-    'Ошибка получения договора по умолчанию из 1С'
+    () => readThroughClientOrdersCache(
+      'defaults',
+      defaultsQuery,
+      CLIENT_ORDERS_CACHE_TTL.defaults,
+      () => getLiveClientOrderDefaults(defaultsQuery)
+    ),
+    'Ошибка получения договора по умолчанию из 1С',
+    { allowCachedWhenCircuitOpen: true }
   );
   const contract = mapContractSummary(defaults.contract);
   return {
@@ -3048,15 +3252,42 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
 }
 
 export async function getClientOrdersWarehouses(query: ClientOrdersWarehousesQuery) {
-  return onecLive(() => getLiveWarehouses(query), 'Ошибка получения складов из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'warehouses',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.warehouses,
+      () => getLiveWarehouses(query)
+    ),
+    'Ошибка получения складов из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 }
 
 export async function getClientOrdersPriceTypes(query: ClientOrdersPriceTypesQuery) {
-  return onecLive(() => getLivePriceTypes(query), 'Ошибка получения видов цен из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'price-types',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.priceTypes,
+      () => getLivePriceTypes(query)
+    ),
+    'Ошибка получения видов цен из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 }
 
 export async function getClientOrdersDeliveryAddresses(query: ClientOrdersDeliveryAddressesQuery) {
-  return onecLive(() => getLiveDeliveryAddresses(query), 'Ошибка получения адресов доставки из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'delivery-addresses',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.deliveryAddresses,
+      () => getLiveDeliveryAddresses(query)
+    ),
+    'Ошибка получения адресов доставки из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 }
 
 type ProductSearchRow = {
@@ -3208,7 +3439,16 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
 }
 
 export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) {
-  return onecLive(() => getLiveProducts(query), 'Ошибка получения номенклатуры из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'products',
+      query,
+      CLIENT_ORDERS_CACHE_TTL.products,
+      () => getLiveProducts(query)
+    ),
+    'Ошибка получения номенклатуры из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 
   /*
   const at = now();
@@ -3420,7 +3660,16 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
 }
 
 export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody) {
-  return onecLive(() => getLiveProductsByGuids(body), 'Ошибка получения номенклатуры из 1С');
+  return onecLive(
+    () => readThroughClientOrdersCache(
+      'products:batch',
+      { ...body, productGuids: [...new Set(body.productGuids)].sort() },
+      CLIENT_ORDERS_CACHE_TTL.productsBatch,
+      () => getLiveProductsByGuids(body)
+    ),
+    'Ошибка получения номенклатуры из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
 
   /*
   const uniqueGuids = [...new Set(body.productGuids)];
