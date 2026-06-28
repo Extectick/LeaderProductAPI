@@ -61,7 +61,17 @@ export type CreateUpdateResponse = SuccessResponse<{
 }> | ErrorResponse;
 
 export type UpdateEventRequest = {
-  eventType: 'CHECK' | 'PROMPT_SHOWN' | 'UPDATE_CLICK' | 'DISMISS';
+  eventType:
+    | 'CHECK'
+    | 'PROMPT_SHOWN'
+    | 'UPDATE_CLICK'
+    | 'DISMISS'
+    | 'DOWNLOAD_START'
+    | 'DOWNLOAD_DONE'
+    | 'VERIFY_FAILED'
+    | 'INSTALL_CLICK'
+    | 'OTA_READY'
+    | 'OTA_RELOAD';
   platform: string;
   channel?: string;
   versionCode: number;

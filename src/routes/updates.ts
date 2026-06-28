@@ -376,7 +376,18 @@ router.post(
           errorResponse('eventType обязателен', ErrorCodes.VALIDATION_ERROR)
         );
       }
-      const allowed = ['CHECK', 'PROMPT_SHOWN', 'UPDATE_CLICK', 'DISMISS'];
+      const allowed = [
+        'CHECK',
+        'PROMPT_SHOWN',
+        'UPDATE_CLICK',
+        'DISMISS',
+        'DOWNLOAD_START',
+        'DOWNLOAD_DONE',
+        'VERIFY_FAILED',
+        'INSTALL_CLICK',
+        'OTA_READY',
+        'OTA_RELOAD',
+      ];
       if (!allowed.includes(eventType)) {
         return res.status(400).json(
           errorResponse('Некорректный eventType', ErrorCodes.VALIDATION_ERROR)
@@ -398,7 +409,7 @@ router.post(
 
       const created = await prisma.appUpdateEvent.create({
         data: {
-          eventType,
+          eventType: eventType as any,
           platform: platformParsed,
           channel,
           versionCode: versionCodeNum,
