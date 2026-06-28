@@ -32,7 +32,7 @@ type RouteOrderBody = {
   route: Array<{ linkKey: string; order: number }>;
 };
 
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 function getRequiredEnv(name: string) {
   const value = process.env[name]?.trim();

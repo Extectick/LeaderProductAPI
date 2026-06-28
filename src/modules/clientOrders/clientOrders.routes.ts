@@ -6,11 +6,14 @@ import { authorizeServiceAccess } from '../../middleware/serviceAccess';
 import { errorResponse, ErrorCodes, successResponse } from '../../utils/apiResponse';
 import {
   clientOrderCancelSchema,
+  clientOrderCopySchema,
   clientOrderCreateSchema,
   clientOrderDefaultsQuerySchema,
   clientOrderReferenceDetailsParamsSchema,
+  clientOrderRestoreSchema,
   clientOrderSettingsUpdateSchema,
   clientOrderSubmitSchema,
+  clientOrderUnqueueSchema,
   clientOrderUpdateSchema,
   clientOrdersBatchProductsSchema,
   clientOrdersAgreementsQuerySchema,
@@ -27,6 +30,7 @@ import {
 import {
   cancelClientOrder,
   ClientOrdersError,
+  copyClientOrder,
   createClientOrder,
   deleteDraftClientOrder,
   getClientOrderByGuid,
@@ -43,7 +47,9 @@ import {
   getClientOrdersReferenceData,
   getClientOrdersWarehouses,
   listClientOrders,
+  restoreClientOrder,
   submitClientOrder,
+  unqueueClientOrder,
   updateClientOrder,
   updateClientOrderSettings,
 } from './clientOrders.service';
@@ -395,6 +401,60 @@ router.post('/:guid/submit', authorizePermissions(['manage_client_orders']), asy
     return res.json(successResponse(result, 'Заказ клиента отправлен в 1С'));
   } catch (err) {
     return handleError(res, err, 'Ошибка отправки заказа клиента в 1С');
+  }
+});
+
+router.post('/:guid/unqueue', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  const body = clientOrderUnqueueSchema.safeParse(req.body);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await unqueueClientOrder(params.data.guid, req.user!.userId, body.data);
+    return res.json(successResponse(result, 'Заказ клиента снят с очереди'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка снятия заказа клиента с очереди');
+  }
+});
+
+router.post('/:guid/copy', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  const body = clientOrderCopySchema.safeParse(req.body);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await copyClientOrder(params.data.guid, req.user!.userId, body.data);
+    return res.status(201).json(successResponse(result, 'Копия заказа клиента создана'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка копирования заказа клиента');
+  }
+});
+
+router.post('/:guid/restore', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  const body = clientOrderRestoreSchema.safeParse(req.body);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await restoreClientOrder(params.data.guid, req.user!.userId, body.data);
+    return res.json(successResponse(result, 'Заказ клиента восстановлен'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка восстановления заказа клиента');
   }
 });
 

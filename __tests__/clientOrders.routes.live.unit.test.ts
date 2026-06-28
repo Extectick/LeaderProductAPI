@@ -31,6 +31,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
   return {
     ClientOrdersError,
     cancelClientOrder: jest.fn(),
+    copyClientOrder: jest.fn(),
     createClientOrder: jest.fn(),
     deleteDraftClientOrder: jest.fn(),
     getClientOrderByGuid: jest.fn(),
@@ -47,7 +48,9 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     getClientOrdersReferenceData: jest.fn(),
     getClientOrdersWarehouses: jest.fn(),
     listClientOrders: jest.fn(),
+    restoreClientOrder: jest.fn(),
     submitClientOrder: jest.fn(),
+    unqueueClientOrder: jest.fn(),
     updateClientOrder: jest.fn(),
     updateClientOrderSettings: jest.fn(),
   };
@@ -256,5 +259,102 @@ describe('/api/client-orders live reference routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.ok).toBe(false);
     expect(service.getClientOrdersProducts).not.toHaveBeenCalled();
+  });
+
+  it('routes queued order unqueue requests to the service', async () => {
+    jest.mocked(service.unqueueClientOrder).mockResolvedValueOnce({
+      guid: 'order-guid',
+      status: 'DRAFT',
+      syncState: 'DRAFT',
+      revision: 8,
+      items: [],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .post('/api/client-orders/order-guid/unqueue')
+      .send({ revision: 7 });
+
+    expect(response.status).toBe(200);
+    expect(service.unqueueClientOrder).toHaveBeenCalledWith('order-guid', 1, { revision: 7 });
+    expect(response.body.data).toMatchObject({ guid: 'order-guid', status: 'DRAFT', syncState: 'DRAFT' });
+  });
+
+  it('rejects invalid unqueue body before calling service', async () => {
+    const response = await request(app)
+      .post('/api/client-orders/order-guid/unqueue')
+      .send({ revision: 0 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.ok).toBe(false);
+    expect(service.unqueueClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('routes order copy requests to the service', async () => {
+    jest.mocked(service.copyClientOrder).mockResolvedValueOnce({
+      guid: 'copy-guid',
+      status: 'DRAFT',
+      syncState: 'DRAFT',
+      revision: 1,
+      items: [],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .post('/api/client-orders/source-guid/copy')
+      .send({ revision: 3 });
+
+    expect(response.status).toBe(201);
+    expect(service.copyClientOrder).toHaveBeenCalledWith('source-guid', 1, { revision: 3 });
+    expect(response.body.data).toMatchObject({ guid: 'copy-guid', status: 'DRAFT' });
+  });
+
+  it('routes cancelled order restore requests to the service', async () => {
+    jest.mocked(service.restoreClientOrder).mockResolvedValueOnce({
+      guid: 'cancelled-guid',
+      status: 'DRAFT',
+      syncState: 'DRAFT',
+      revision: 4,
+      items: [],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .post('/api/client-orders/cancelled-guid/restore')
+      .send({ revision: 3 });
+
+    expect(response.status).toBe(200);
+    expect(service.restoreClientOrder).toHaveBeenCalledWith('cancelled-guid', 1, { revision: 3 });
+    expect(response.body.data).toMatchObject({ guid: 'cancelled-guid', status: 'DRAFT' });
+  });
+
+  it('routes local draft and queued deletes to the service', async () => {
+    jest.mocked(service.deleteDraftClientOrder).mockResolvedValueOnce({ deleted: true, guid: 'queued-guid' } as any);
+
+    const response = await request(app)
+      .delete('/api/client-orders/queued-guid');
+
+    expect(response.status).toBe(200);
+    expect(service.deleteDraftClientOrder).toHaveBeenCalledWith('queued-guid');
+    expect(response.body.data).toEqual({ deleted: true, guid: 'queued-guid' });
+  });
+
+  it('keeps cancel route compatible for queued-order unqueue fallback', async () => {
+    jest.mocked(service.cancelClientOrder).mockResolvedValueOnce({
+      guid: 'queued-guid',
+      status: 'DRAFT',
+      syncState: 'DRAFT',
+      revision: 9,
+      items: [],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .post('/api/client-orders/queued-guid/cancel')
+      .send({ revision: 8, reason: 'cancel queue' });
+
+    expect(response.status).toBe(200);
+    expect(service.cancelClientOrder).toHaveBeenCalledWith('queued-guid', 1, { revision: 8, reason: 'cancel queue' });
+    expect(response.body.data).toMatchObject({ guid: 'queued-guid', status: 'DRAFT' });
   });
 });

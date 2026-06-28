@@ -29,13 +29,18 @@ function jsonResponse(body: unknown, status = 200) {
 describe('onec.lpApp.client client-orders live routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.useRealTimers();
     process.env.ONEC_LP_APP_BASE_URL = 'http://onec.local/WMS10/hs/lp-app/';
     process.env.ONEC_LP_APP_API_KEY = 'lp-app-key';
-    process.env.ONEC_LP_APP_TIMEOUT_MS = '15000';
+    process.env.ONEC_LP_APP_TIMEOUT_MS = '10000';
     delete process.env.ONEC_LP_APP_BASIC_USER;
     delete process.env.ONEC_LP_APP_BASIC_PASSWORD;
     (globalThis as any).fetch = fetchMock;
     fetchMock.mockResolvedValue(jsonResponse({ items: [], limit: 10, offset: 5, hasMore: false }));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it.each([
@@ -123,5 +128,23 @@ describe('onec.lpApp.client client-orders live routes', () => {
       upstreamStatus: 409,
       message: '1C validation failed',
     });
+  });
+
+  it('aborts stalled 1C requests after 10 seconds', async () => {
+    jest.useFakeTimers();
+    fetchMock.mockImplementationOnce((_url: URL, init?: RequestInit) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      });
+    }));
+
+    const request = getOnecLpAppClientOrders({ limit: 1, offset: 0 });
+    const expectation = expect(request).rejects.toMatchObject({
+      name: 'OnecLpAppNetworkError',
+      message: '1C request timed out',
+    });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    await expectation;
   });
 });

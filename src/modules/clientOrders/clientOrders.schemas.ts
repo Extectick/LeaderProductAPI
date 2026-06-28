@@ -229,6 +229,18 @@ export const clientOrderSubmitSchema = z.object({
   revision: z.coerce.number().int().min(1),
 });
 
+export const clientOrderUnqueueSchema = z.object({
+  revision: z.coerce.number().int().min(1),
+});
+
+export const clientOrderRestoreSchema = z.object({
+  revision: z.coerce.number().int().min(1),
+});
+
+export const clientOrderCopySchema = z.object({
+  revision: z.coerce.number().int().min(1).optional(),
+});
+
 export const clientOrderCancelSchema = z.object({
   revision: z.coerce.number().int().min(1),
   reason: z.string().trim().min(1).max(1000).optional(),
@@ -250,4 +262,7 @@ export type ClientOrderSettingsUpdateBody = z.infer<typeof clientOrderSettingsUp
 export type ClientOrderCreateBody = z.infer<typeof clientOrderCreateSchema>;
 export type ClientOrderUpdateBody = z.infer<typeof clientOrderUpdateSchema>;
 export type ClientOrderSubmitBody = z.infer<typeof clientOrderSubmitSchema>;
+export type ClientOrderUnqueueBody = z.infer<typeof clientOrderUnqueueSchema>;
+export type ClientOrderRestoreBody = z.infer<typeof clientOrderRestoreSchema>;
+export type ClientOrderCopyBody = z.infer<typeof clientOrderCopySchema>;
 export type ClientOrderCancelBody = z.infer<typeof clientOrderCancelSchema>;

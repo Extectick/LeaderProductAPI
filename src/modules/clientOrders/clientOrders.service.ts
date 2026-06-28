@@ -58,11 +58,14 @@ import {
 } from './clientOrders.onecLive';
 import type {
   ClientOrderCancelBody,
+  ClientOrderCopyBody,
   ClientOrderCreateBody,
   ClientOrderDefaultsQuery,
   ClientOrderReferenceDetailsParams,
+  ClientOrderRestoreBody,
   ClientOrderSettingsUpdateBody,
   ClientOrderSubmitBody,
+  ClientOrderUnqueueBody,
   ClientOrderUpdateBody,
   ClientOrdersBatchProductsBody,
   ClientOrdersAgreementsQuery,
@@ -137,6 +140,7 @@ type ReceiptPriceInfo = {
 };
 
 const clientOrderSummarySelect = {
+  id: true,
   guid: true,
   number1c: true,
   date1c: true,
@@ -165,7 +169,45 @@ const clientOrderSummarySelect = {
 
 type ClientOrderSummaryRecord = Prisma.OrderGetPayload<{ select: typeof clientOrderSummarySelect }>;
 
-function mapClientOrderSummary(order: ClientOrderSummaryRecord) {
+function isOrderQueued(order: Pick<ClientOrderSummaryRecord, 'status' | 'syncState'>) {
+  return order.status === OrderStatus.QUEUED || order.syncState === OrderSyncState.QUEUED;
+}
+
+function queueMapKey(guid?: string | null) {
+  return guid?.trim().toLowerCase() || '';
+}
+
+async function loadQueuedOrderPositions() {
+  const rows = await prisma.order.findMany({
+    where: {
+      source: OrderSource.MANAGER_APP,
+      OR: [{ syncState: OrderSyncState.QUEUED }, { status: OrderStatus.QUEUED }],
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { guid: true, queuedAt: true, createdAt: true, id: true },
+  });
+  rows.sort((a, b) => {
+    const aTime = (a.queuedAt ?? a.createdAt).getTime();
+    const bTime = (b.queuedAt ?? b.createdAt).getTime();
+    return aTime - bTime || String(a.id).localeCompare(String(b.id));
+  });
+  return new Map(
+    rows.flatMap((row, index) => {
+      const key = queueMapKey(row.guid);
+      return key ? [[key, index + 1] as const] : [];
+    })
+  );
+}
+
+function resolveQueuePosition(
+  order: Pick<ClientOrderSummaryRecord, 'guid' | 'status' | 'syncState'>,
+  queuePositions?: Map<string, number>
+) {
+  if (!isOrderQueued(order)) return null;
+  return queuePositions?.get(queueMapKey(order.guid)) ?? null;
+}
+
+function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?: Map<string, number>) {
   return {
     guid: order.guid,
     appGuid: order.guid,
@@ -178,6 +220,7 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord) {
     revision: order.revision,
     syncState: order.syncState,
     status: order.status,
+    queuePosition: resolveQueuePosition(order, queuePositions),
     comment: order.comment,
     deliveryDate: order.deliveryDate,
     totalAmount: decimalToNumber(order.totalAmount),
@@ -2203,7 +2246,7 @@ function liveOrderKey(order: Pick<LiveClientOrder, 'appGuid' | 'number1c'>) {
   };
 }
 
-function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRecord | null) {
+function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRecord | null, queuePositions?: Map<string, number>) {
   if (!local) return { ...order, readOnly: true };
   return {
     ...order,
@@ -2214,6 +2257,7 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
     source: local.source,
     revision: local.revision,
     queuedAt: local.queuedAt,
+    queuePosition: resolveQueuePosition(local, queuePositions),
     sentTo1cAt: local.sentTo1cAt ?? order.sentTo1cAt,
     lastStatusSyncAt: local.lastStatusSyncAt ?? order.lastStatusSyncAt,
     lastExportError: local.lastExportError,
@@ -2254,10 +2298,10 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     ],
   };
 
-  const [pinnedItems, pinnedTotal, statusRows, managerGuid] = await Promise.all([
+  const [pinnedItems, pinnedTotal, statusRows, managerGuid, queuePositions] = await Promise.all([
     prisma.order.findMany({
       where: pinnedWhere,
-      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
       select: clientOrderSummarySelect,
     }),
     prisma.order.count({ where: pinnedWhere }),
@@ -2268,6 +2312,7 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
       _count: { _all: true },
     }),
     getManagerGuidForUser(userId),
+    loadQueuedOrderPositions(),
   ]);
 
   const countedStatusRows = statusRows as unknown as Array<{
@@ -2352,14 +2397,14 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     })
   );
 
-  const mappedPinned = query.offset === 0 ? pinnedItems.map(mapClientOrderSummary) : [];
+  const mappedPinned = query.offset === 0 ? pinnedItems.map((item) => mapClientOrderSummary(item, queuePositions)) : [];
   const mappedLive = liveItems.flatMap((item) => {
     const key = liveOrderKey(item);
     if ((key.appGuid && localPinnedAppGuids.has(key.appGuid)) || (key.number1c && localPinnedNumbers.has(key.number1c))) {
       return [];
     }
     const local = (key.appGuid ? localByAppGuid.get(key.appGuid) : undefined) ?? (key.number1c ? localByNumber.get(key.number1c) : undefined) ?? null;
-    return [mapMergedLiveOrder(item, local)];
+    return [mapMergedLiveOrder(item, local, queuePositions)];
   });
 
   return {
@@ -2431,6 +2476,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             origin: 'merged',
             source: order.source,
             revision: order.revision,
+            queuePosition: null,
             lastExportError: order.lastExportError,
             last1cError: order.last1cError,
             readOnly: true,
@@ -2447,6 +2493,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
   }
 
   const mapped = mapOrderDetail(order);
+  const queuePositions = isOrderQueued(order) ? await loadQueuedOrderPositions() : undefined;
   const stockByProductId = await loadStockByProductIdForWarehouse(
     prisma as unknown as Tx,
     order.warehouse?.guid ?? null,
@@ -2458,6 +2505,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     appGuid: mapped.guid,
     documentGuid: mapped.guid,
     origin: 'local',
+    queuePosition: resolveQueuePosition(order, queuePositions),
     readOnly: mapped.isPostedIn1c || mapped.status === OrderStatus.CANCELLED,
     items: mapped.items.map((item, index) => ({
       ...item,
@@ -3779,6 +3827,55 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
   return getClientOrderByGuid(created);
 }
 
+function dateForCreatePayload(value: unknown) {
+  if (!value) return undefined;
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+function getCopyEntityGuid(value: unknown, label: string) {
+  const guid = (value && typeof value === 'object' && 'guid' in value ? (value as { guid?: unknown }).guid : null);
+  if (typeof guid === 'string' && guid.trim()) return guid.trim();
+  throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Нельзя скопировать заказ: не заполнено поле ${label}`);
+}
+
+function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
+  const items = Array.isArray(source?.items) ? source.items : [];
+  if (!items.length) {
+    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Нельзя скопировать заказ без товаров');
+  }
+
+  return {
+    organizationGuid: getCopyEntityGuid(source.organization, 'организация'),
+    counterpartyGuid: getCopyEntityGuid(source.counterparty, 'контрагент'),
+    agreementGuid: source.agreement?.guid ?? null,
+    contractGuid: source.contract?.guid ?? null,
+    warehouseGuid: source.warehouse?.guid ?? null,
+    deliveryAddressGuid: source.deliveryAddress?.guid ?? null,
+    deliveryDate: dateForCreatePayload(source.deliveryDate),
+    comment: source.comment ?? undefined,
+    currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
+    saveReason: 'manual',
+    generalDiscountPercent: source.generalDiscountPercent ?? null,
+    items: items.map((item: any) => {
+      const productGuid = getCopyEntityGuid(item.product, 'товар');
+      const isManualPrice = !!item.isManualPrice || item.manualPrice !== null && item.manualPrice !== undefined;
+      const manualPrice = isManualPrice
+        ? item.manualPrice ?? item.basePrice ?? item.price ?? null
+        : undefined;
+      return {
+        productGuid,
+        packageGuid: item.package?.guid || undefined,
+        priceTypeGuid: isManualPrice ? null : item.priceType?.guid ?? source.priceType?.guid ?? source.agreement?.priceType?.guid ?? null,
+        quantity: Number(item.quantity ?? 0),
+        manualPrice,
+        discountPercent: item.discountPercent ?? null,
+        comment: item.comment ?? undefined,
+      };
+    }),
+  };
+}
+
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
   const sourceUpdatedAt = now();
   const liveReferences = await loadLiveOrderMaterialization(body);
@@ -3934,6 +4031,76 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
   return getClientOrderByGuid(guid);
 }
 
+async function unqueueClientOrderInTransaction(
+  tx: Tx,
+  order: { id: string; guid: string | null; revision: number },
+  userId: number,
+  reason: string | null
+) {
+  const nextRevision = order.revision + 1;
+  const changedAt = now();
+
+  await tx.order.update({
+    where: { id: order.id },
+    data: {
+      revision: nextRevision,
+      status: OrderStatus.DRAFT,
+      syncState: OrderSyncState.DRAFT,
+      queuedAt: null,
+      cancelRequestedAt: null,
+      cancelReason: null,
+      last1cError: null,
+      lastExportError: null,
+      sourceUpdatedAt: changedAt,
+    },
+  });
+
+  await appendOrderEvent(tx, {
+    orderId: order.id,
+    revision: nextRevision,
+    source: OrderEventSource.APP_MANAGER,
+    eventType: 'CLIENT_ORDER_UNQUEUED',
+    actorUserId: userId,
+    note: reason,
+    payload: {
+      reason,
+      changedAt: changedAt.toISOString(),
+    },
+  });
+}
+
+export async function unqueueClientOrder(guid: string, userId: number, body: ClientOrderUnqueueBody) {
+  await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findFirst({
+      where: { guid, source: OrderSource.MANAGER_APP },
+      select: {
+        id: true,
+        guid: true,
+        revision: true,
+        status: true,
+        syncState: true,
+        source: true,
+        isPostedIn1c: true,
+      },
+    });
+
+    if (!order) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+    }
+    if (order.isPostedIn1c) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Проведенный заказ в 1С доступен только для чтения');
+    }
+    if (!isOrderQueued(order)) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Снять с очереди можно только заказ в очереди');
+    }
+
+    assertRevision(order.revision, body.revision);
+    await unqueueClientOrderInTransaction(tx, order, userId, 'Снят с очереди менеджером из приложения');
+  });
+
+  return getClientOrderByGuid(guid);
+}
+
 export async function deleteDraftClientOrder(guid: string) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
@@ -3944,6 +4111,8 @@ export async function deleteDraftClientOrder(guid: string) {
         status: true,
         source: true,
         isPostedIn1c: true,
+        number1c: true,
+        sentTo1cAt: true,
       },
     });
 
@@ -3951,8 +4120,16 @@ export async function deleteDraftClientOrder(guid: string) {
       throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
     }
 
-    if (order.status !== OrderStatus.DRAFT || order.isPostedIn1c) {
-      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Можно удалить только черновик заказа клиента');
+    const canDeleteLocal = (
+      order.status === OrderStatus.DRAFT ||
+      order.status === OrderStatus.QUEUED ||
+      order.status === OrderStatus.CANCELLED
+    )
+      && !order.isPostedIn1c
+      && !order.number1c
+      && !order.sentTo1cAt;
+    if (!canDeleteLocal) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Можно удалить только локальный черновик, заказ в очереди или отмененный заказ, который еще не создан в 1С');
     }
 
     await tx.orderItem.deleteMany({ where: { orderId: order.id } });
@@ -3960,6 +4137,67 @@ export async function deleteDraftClientOrder(guid: string) {
   });
 
   return { deleted: true, guid };
+}
+
+export async function restoreClientOrder(guid: string, userId: number, body: ClientOrderRestoreBody) {
+  await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findFirst({
+      where: { guid, source: OrderSource.MANAGER_APP },
+      select: {
+        id: true,
+        guid: true,
+        revision: true,
+        status: true,
+        source: true,
+        isPostedIn1c: true,
+        number1c: true,
+        sentTo1cAt: true,
+      },
+    });
+
+    if (!order) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+    }
+    if (order.status !== OrderStatus.CANCELLED) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Восстановить можно только отмененный заказ');
+    }
+    if (order.isPostedIn1c || order.number1c || order.sentTo1cAt) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Заказ, уже созданный в 1С, нельзя восстановить из приложения');
+    }
+
+    assertRevision(order.revision, body.revision);
+
+    const restoredAt = now();
+    const nextRevision = order.revision + 1;
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        revision: nextRevision,
+        status: OrderStatus.DRAFT,
+        syncState: OrderSyncState.DRAFT,
+        queuedAt: null,
+        cancelRequestedAt: null,
+        cancelReason: null,
+        lastExportError: null,
+        last1cError: null,
+        sourceUpdatedAt: restoredAt,
+      },
+    });
+
+    await appendOrderEvent(tx, {
+      orderId: order.id,
+      revision: nextRevision,
+      source: OrderEventSource.APP_MANAGER,
+      eventType: 'CLIENT_ORDER_RESTORED',
+      actorUserId: userId,
+      note: 'Отмененный заказ восстановлен менеджером из приложения',
+      payload: {
+        restoredAt: restoredAt.toISOString(),
+      },
+    });
+  });
+
+  return getClientOrderByGuid(guid);
 }
 
 export async function cancelClientOrder(guid: string, userId: number, body: ClientOrderCancelBody) {
@@ -3971,6 +4209,7 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
         guid: true,
         revision: true,
         status: true,
+        syncState: true,
         source: true,
         isPostedIn1c: true,
       },
@@ -3980,8 +4219,17 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
       throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
     }
 
-    ensureEditable(order);
+    if (order.status === OrderStatus.CANCELLED) {
+      return;
+    }
     assertRevision(order.revision, body.revision);
+
+    if (isOrderQueued(order)) {
+      await unqueueClientOrderInTransaction(tx, order, userId, body.reason ?? 'Снят с очереди менеджером из приложения');
+      return;
+    }
+
+    ensureEditable(order);
 
     const nextRevision = order.revision + 1;
     const cancelledAt = now();
@@ -4015,6 +4263,20 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
   });
 
   return getClientOrderByGuid(guid);
+}
+
+export async function copyClientOrder(guid: string, userId: number, body: ClientOrderCopyBody = {}) {
+  if (body.revision !== undefined) {
+    const local = await prisma.order.findFirst({
+      where: { guid, source: OrderSource.MANAGER_APP },
+      select: { revision: true },
+    });
+    if (local) assertRevision(local.revision, body.revision);
+  }
+
+  const source = await getClientOrderByGuid(guid, userId);
+  const payload = buildClientOrderCopyPayload(source);
+  return createClientOrder(userId, payload);
 }
 
 export { ClientOrdersError };
