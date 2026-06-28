@@ -231,13 +231,8 @@ function buildDisplayVersion(data: {
     cleanString(data.metadata.baseVersionName) ||
     cleanString(data.metadata.nativeVersionName) ||
     data.runtimeVersion;
-  const baseVersionCode =
-    cleanString(data.metadata.baseVersionCode) ||
-    cleanString(data.metadata.nativeBuildVersion) ||
-    cleanString(data.metadata.versionCode);
-  const baseVersion = baseVersionCode ? `v${baseVersionName}+${baseVersionCode}` : `v${baseVersionName}`;
 
-  return `${baseVersion}.ota.${data.otaSequence}`;
+  return `${baseVersionName}.${data.otaSequence}`;
 }
 
 async function buildAssetDescriptor(asset: OtaAssetInput) {

@@ -104,13 +104,8 @@ function buildDisplayVersion(payload, otaSequence) {
     clean(payload.metadata.baseVersionName) ||
     clean(payload.metadata.nativeVersionName) ||
     payload.runtimeVersion;
-  const baseVersionCode =
-    clean(payload.metadata.baseVersionCode) ||
-    clean(payload.metadata.nativeBuildVersion) ||
-    clean(payload.metadata.versionCode);
-  const baseVersion = baseVersionCode ? `v${baseVersionName}+${baseVersionCode}` : `v${baseVersionName}`;
 
-  return `${baseVersion}.ota.${otaSequence}`;
+  return `${baseVersionName}.${otaSequence}`;
 }
 
 async function main() {
