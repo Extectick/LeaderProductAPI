@@ -42,6 +42,13 @@ enum ClientOrderDeliveryDateMode {
   FIXED_DATE
 }
 
+enum ProductImageSyncState {
+  PENDING
+  SYNCED
+  ERROR
+  DELETED
+}
+
 model Counterparty {
   id                       String   @id @default(cuid())
   guid                     String   @unique
@@ -210,6 +217,34 @@ model Product {
   @@index([sourceUpdatedAt])
   @@index([sku])
   @@index([article])
+}
+
+model ProductImage {
+  id            String                @id @default(cuid())
+  productGuid   String
+  fileGuid      String
+  isMain        Boolean               @default(false)
+  fileName      String?
+  contentType   String?
+  size          Int?
+  width         Int?
+  height        Int?
+  hashSha256    String
+  s3KeyThumb    String
+  s3KeyPreview  String
+  s3KeyOriginal String?
+  modifiedAt1c  DateTime?
+  syncedAt      DateTime              @default(now())
+  deletedAt     DateTime?
+  syncState     ProductImageSyncState @default(SYNCED)
+  lastError     String?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@unique([fileGuid, hashSha256])
+  @@index([productGuid, isMain])
+  @@index([productGuid, deletedAt])
+  @@index([syncState])
 }
 
 model ProductPackage {

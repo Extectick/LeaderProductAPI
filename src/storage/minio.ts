@@ -310,7 +310,8 @@ export async function uploadBuffer(
   buffer: Buffer,
   contentType = "application/octet-stream",
   asAttachment = false,
-  originalName?: string
+  originalName?: string,
+  options?: { cacheControl?: string }
 ) {
   const contentDisposition = asAttachment ? buildContentDisposition(originalName) : undefined;
 
@@ -321,6 +322,7 @@ export async function uploadBuffer(
       Body: buffer,
       ContentType: contentType,
       ContentDisposition: contentDisposition,
+      CacheControl: options?.cacheControl,
     })
   );
 

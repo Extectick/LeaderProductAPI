@@ -145,6 +145,67 @@ async function callOnecLpApp(path: string, options: { method?: string; query?: O
   }
 }
 
+function buildBinaryHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: '*/*',
+    'X-API-Key': getApiKey(),
+  };
+
+  const basicUser = process.env.ONEC_LP_APP_BASIC_USER?.trim();
+  const basicPassword = process.env.ONEC_LP_APP_BASIC_PASSWORD ?? '';
+  if (basicUser) {
+    headers.Authorization = `Basic ${Buffer.from(`${basicUser}:${basicPassword}`, 'utf8').toString('base64')}`;
+  }
+
+  return headers;
+}
+
+async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
+
+  try {
+    const response = await fetch(buildUrl(path, query), {
+      method: 'GET',
+      headers: buildBinaryHeaders(),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = await readResponsePayload(response);
+      throw new OnecLpAppHttpError(
+        response.status,
+        payload,
+        extractUpstreamMessage(payload, `1C responded with HTTP ${response.status}`)
+      );
+    }
+
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    const contentLength = Number(response.headers.get('content-length'));
+    const body = Buffer.from(await response.arrayBuffer());
+
+    return {
+      body,
+      contentType,
+      contentLength: Number.isFinite(contentLength) ? contentLength : body.length,
+    };
+  } catch (error: unknown) {
+    if (error instanceof OnecLpAppHttpError || error instanceof OnecLpAppConfigError) {
+      throw error;
+    }
+
+    const message =
+      error instanceof Error && error.name === 'AbortError'
+        ? '1C request timed out'
+        : error instanceof Error
+          ? error.message
+          : '1C request failed';
+    throw new OnecLpAppNetworkError(message);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function pingOnecLpApp() {
   return callOnecLpApp('/ping');
 }
@@ -191,6 +252,14 @@ export function getOnecLpAppNomenclature(query: OnecLpAppQuery) {
 
 export function getOnecLpAppNomenclatureItem(guid: string, query: OnecLpAppQuery = {}) {
   return callOnecLpApp(`/nomenclature/${encodeURIComponent(guid)}`, { query });
+}
+
+export function getOnecLpAppNomenclatureImages(query: OnecLpAppQuery) {
+  return callOnecLpApp('/nomenclature-images', { query });
+}
+
+export function getOnecLpAppNomenclatureImageContent(fileGuid: string, query: OnecLpAppQuery = {}) {
+  return callOnecLpAppBinary(`/nomenclature-images/${encodeURIComponent(fileGuid)}/content`, query);
 }
 
 export function getOnecLpAppProductPrices(query: OnecLpAppQuery) {

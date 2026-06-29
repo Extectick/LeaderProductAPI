@@ -173,6 +173,18 @@ export const clientOrdersBatchProductsSchema = z.object({
   priceTypeGuid: z.string().trim().min(1).optional(),
 });
 
+export const clientOrderProductImagesSyncSchema = z.object({
+  productGuid: z.string().trim().min(1).optional(),
+  changedSince: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  includeDeleted: optionalBooleanFromQuery,
+});
+
+export const clientOrderProductImagesCleanupSchema = z.object({
+  retentionDays: z.coerce.number().int().min(1).max(365).optional().default(14),
+});
+
 export const clientOrderDefaultsQuerySchema = z.object({
   organizationGuid: z.string().trim().min(1),
   counterpartyGuid: z.string().trim().min(1),

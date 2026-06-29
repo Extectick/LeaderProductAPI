@@ -23,6 +23,13 @@ import {
   readThroughClientOrdersCache,
 } from './clientOrders.cache';
 import {
+  cleanupProductImages,
+  enrichOrderItemsWithImages,
+  enrichProductsWithImages,
+  getProductImagesStatus,
+  syncProductImages,
+} from './clientOrders.productImages';
+import {
   findLiveAgreement,
   findLiveContract,
   findLiveCounterparty,
@@ -2441,7 +2448,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
       'Ошибка получения заказа клиента из 1С',
       { allowCachedWhenCircuitOpen: true }
     );
-    return { ...live, readOnly: true };
+    return enrichOrderItemsWithImages({ ...live, readOnly: true });
   }
 
   if (userId && order.number1c && !isPinnedLocalOrder(order)) {
@@ -2469,7 +2476,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             'Ошибка получения заказа клиента из 1С',
             { allowCachedWhenCircuitOpen: true }
           );
-          return {
+          return enrichOrderItemsWithImages({
             ...liveDetail,
             guid: order.guid,
             appGuid: order.guid,
@@ -2480,7 +2487,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             lastExportError: order.lastExportError,
             last1cError: order.last1cError,
             readOnly: true,
-          };
+          });
         }
       } catch (error) {
         if (error instanceof ClientOrdersError && error.status === 502) {
@@ -2500,7 +2507,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     order.items.map((item) => item.productId)
   );
 
-  return {
+  return enrichOrderItemsWithImages({
     ...mapped,
     appGuid: mapped.guid,
     documentGuid: mapped.guid,
@@ -2511,7 +2518,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
       ...item,
       stock: stockByProductId.get(order.items[index]?.productId) ?? null,
     })),
-  };
+  });
 }
 
 export async function getClientOrderSettings(userId: number) {
@@ -3465,7 +3472,7 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
 }
 
 export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) {
-  return onecLive(
+  const result = await onecLive(
     () => readThroughClientOrdersCache(
       'products',
       query,
@@ -3475,6 +3482,11 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
   );
+
+  return {
+    ...result,
+    items: await enrichProductsWithImages(result.items),
+  };
 
   /*
   const at = now();
@@ -3686,7 +3698,7 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
 }
 
 export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody) {
-  return onecLive(
+  const items = await onecLive(
     () => readThroughClientOrdersCache(
       'products:batch',
       { ...body, productGuids: [...new Set(body.productGuids)].sort() },
@@ -3696,6 +3708,8 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
   );
+
+  return enrichProductsWithImages(items);
 
   /*
   const uniqueGuids = [...new Set(body.productGuids)];
@@ -4277,6 +4291,24 @@ export async function copyClientOrder(guid: string, userId: number, body: Client
   const source = await getClientOrderByGuid(guid, userId);
   const payload = buildClientOrderCopyPayload(source);
   return createClientOrder(userId, payload);
+}
+
+export async function getClientOrderProductImagesStatus() {
+  return getProductImagesStatus();
+}
+
+export async function syncClientOrderProductImages(params: {
+  productGuid?: string;
+  changedSince?: string;
+  limit?: number;
+  offset?: number;
+  includeDeleted?: boolean;
+}) {
+  return syncProductImages(params);
+}
+
+export async function cleanupClientOrderProductImages(retentionDays: number) {
+  return cleanupProductImages(retentionDays);
 }
 
 export { ClientOrdersError };

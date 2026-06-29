@@ -9,6 +9,8 @@ import {
   clientOrderCopySchema,
   clientOrderCreateSchema,
   clientOrderDefaultsQuerySchema,
+  clientOrderProductImagesCleanupSchema,
+  clientOrderProductImagesSyncSchema,
   clientOrderReferenceDetailsParamsSchema,
   clientOrderRestoreSchema,
   clientOrderSettingsUpdateSchema,
@@ -30,11 +32,13 @@ import {
 import {
   cancelClientOrder,
   ClientOrdersError,
+  cleanupClientOrderProductImages,
   copyClientOrder,
   createClientOrder,
   deleteDraftClientOrder,
   getClientOrderByGuid,
   getClientOrderDefaults,
+  getClientOrderProductImagesStatus,
   getClientOrderReferenceDetails,
   getClientOrderSettings,
   getClientOrdersAgreements,
@@ -48,6 +52,7 @@ import {
   getClientOrdersWarehouses,
   listClientOrders,
   restoreClientOrder,
+  syncClientOrderProductImages,
   submitClientOrder,
   unqueueClientOrder,
   updateClientOrder,
@@ -323,6 +328,58 @@ router.post('/products/batch', authorizePermissions(['view_client_orders']), asy
     return res.json(successResponse({ items }, 'Данные номенклатуры для заказа клиента'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения данных номенклатуры для заказа клиента');
+  }
+});
+
+router.get('/product-images/status', authorizePermissions(['manage_client_orders']), async (_req: AuthRequest, res) => {
+  try {
+    const result = await getClientOrderProductImagesStatus();
+    return res.json(successResponse(result, 'Статус синхронизации фотографий номенклатуры'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения статуса фотографий номенклатуры');
+  }
+});
+
+router.post('/product-images/sync', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = clientOrderProductImagesSyncSchema.safeParse({ ...req.query, ...req.body });
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await syncClientOrderProductImages(parsed.data);
+    return res.json(successResponse(result, 'Синхронизация фотографий номенклатуры выполнена'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка синхронизации фотографий номенклатуры');
+  }
+});
+
+router.post('/product-images/sync/:productGuid', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const productGuid = (req.params as { productGuid?: string }).productGuid;
+  const parsed = clientOrderProductImagesSyncSchema.safeParse({ ...req.query, ...req.body, productGuid });
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await syncClientOrderProductImages(parsed.data);
+    return res.json(successResponse(result, 'Синхронизация фотографий номенклатуры выполнена'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка синхронизации фотографий номенклатуры');
+  }
+});
+
+router.post('/product-images/cleanup', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = clientOrderProductImagesCleanupSchema.safeParse({ ...req.query, ...req.body });
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await cleanupClientOrderProductImages(parsed.data.retentionDays);
+    return res.json(successResponse(result, 'Очистка старых фотографий номенклатуры выполнена'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка очистки старых фотографий номенклатуры');
   }
 });
 
