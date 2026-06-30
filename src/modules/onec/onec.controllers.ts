@@ -13,9 +13,11 @@ import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
 import { ZodError } from 'zod';
 import { fromZodError } from 'zod-validation-error';
+import { getRedis } from '../../lib/redis';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
+import { buildQueuedOrderPayload, clientOrderDirectPushLockKey, queuedOrderSelect } from './onec.orderQueuePayload';
 import {
   agreementsBatchSchema,
   contractsBatchSchema,
@@ -62,15 +64,23 @@ type ClearEntityCode =
 
 const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
 
+async function filterDirectPushLockedOrders<T extends { id: string; guid: string | null }>(orders: T[]) {
+  if (orders.length === 0) return orders;
+
+  try {
+    const redis = getRedis();
+    if (!redis.isOpen) return orders;
+
+    const keys = orders.map((order) => clientOrderDirectPushLockKey(order.guid ?? order.id));
+    const locks = await redis.mGet(keys);
+    return orders.filter((_, index) => !locks[index]);
+  } catch {
+    return orders;
+  }
+}
+
 const toDecimal = (value?: number | null) =>
   value === undefined || value === null ? undefined : new Prisma.Decimal(value);
-
-const decimalToNumber = (value: Prisma.Decimal | number | string | null | undefined): number | null => {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'number') return value;
-  if (typeof value === 'string') return Number(value);
-  return value.toNumber();
-};
 
 const now = () => new Date();
 const toSingleString = (value: unknown): string | undefined => {
@@ -717,119 +727,21 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
       },
       orderBy: [{ queuedAt: 'asc' }, { createdAt: 'asc' }],
       take: limit,
-      select: {
-        id: true,
-        guid: true,
-        source: true,
-        revision: true,
-        syncState: true,
-        status: true,
-        queuedAt: true,
-        sentTo1cAt: true,
-        deliveryDate: true,
-        comment: true,
-        currency: true,
-        totalAmount: true,
-        generalDiscountPercent: true,
-        generalDiscountAmount: true,
-        exportAttempts: true,
-        lastExportError: true,
-        isPostedIn1c: true,
-        postedAt1c: true,
-        cancelRequestedAt: true,
-        cancelReason: true,
-        last1cError: true,
-        counterparty: {
-          select: { guid: true, name: true, inn: true, kpp: true, isActive: true },
-        },
-        agreement: {
-          select: { guid: true, name: true, isActive: true },
-        },
-        contract: {
-          select: { guid: true, number: true, date: true, isActive: true },
-        },
-        warehouse: {
-          select: { guid: true, name: true, isActive: true, isDefault: true, isPickup: true },
-        },
-        deliveryAddress: {
-          select: { guid: true, name: true, fullAddress: true, isActive: true },
-        },
-        organization: {
-          select: { guid: true, name: true, code: true, isActive: true },
-        },
-        items: {
-          orderBy: [{ createdAt: 'asc' }],
-          select: {
-            id: true,
-            quantity: true,
-            quantityBase: true,
-            basePrice: true,
-            price: true,
-            isManualPrice: true,
-            manualPrice: true,
-            priceSource: true,
-            priceType: { select: { guid: true, name: true } },
-            discountPercent: true,
-            appliedDiscountPercent: true,
-            lineAmount: true,
-            comment: true,
-            product: { select: { guid: true, name: true, sku: true, article: true, isActive: true } },
-            package: { select: { guid: true, name: true, isDefault: true } },
-            unit: { select: { guid: true, name: true, symbol: true } },
-          },
-        },
-      },
+      select: queuedOrderSelect,
     });
 
-    const payload = orders.map((order) => ({
-      guid: order.guid ?? order.id,
-      source: order.source,
-      revision: order.revision,
-      syncState: order.syncState,
-      status: order.status,
-      queuedAt: order.queuedAt,
-      sentTo1cAt: order.sentTo1cAt,
-      deliveryDate: order.deliveryDate,
-      comment: order.comment,
-      currency: order.currency,
-      totalAmount: decimalToNumber(order.totalAmount),
-      generalDiscountPercent: decimalToNumber(order.generalDiscountPercent),
-      generalDiscountAmount: decimalToNumber(order.generalDiscountAmount),
-      exportAttempts: order.exportAttempts,
-      lastExportError: order.lastExportError,
-      isPostedIn1c: order.isPostedIn1c,
-      postedAt1c: order.postedAt1c,
-      cancelRequestedAt: order.cancelRequestedAt,
-      cancelReason: order.cancelReason,
-      last1cError: order.last1cError,
-      counterparty: order.counterparty,
-      agreement: order.agreement,
-      contract: order.contract,
-      warehouse: order.warehouse,
-      deliveryAddress: order.deliveryAddress,
-      organization: order.organization,
-      items: order.items.map((item) => ({
-        id: item.id,
-        product: item.product,
-        package: item.package,
-        unit: item.unit,
-        quantity: decimalToNumber(item.quantity),
-        quantityBase: decimalToNumber(item.quantityBase),
-        basePrice: decimalToNumber(item.basePrice),
-        price: decimalToNumber(item.price),
-        isManualPrice: item.isManualPrice,
-        manualPrice: decimalToNumber(item.manualPrice),
-        priceSource: item.priceSource,
-        priceType: item.priceType,
-        discountPercent: decimalToNumber(item.discountPercent),
-        appliedDiscountPercent: decimalToNumber(item.appliedDiscountPercent),
-        lineAmount: decimalToNumber(item.lineAmount),
-        comment: item.comment,
-      })),
-    }));
+    const exportableOrders = await filterDirectPushLockedOrders(orders);
+    const payload = exportableOrders.map(buildQueuedOrderPayload);
 
     const results: BatchResult[] = payload.map((order) => ({ key: String(order.guid), status: 'ok' }));
     await safeCompleteSyncRun(runId, results, { ...baseMeta, exportedCount: payload.length });
+
+    console.info('[client-orders-queue] exported queued orders', {
+      count: payload.length,
+      includeSent,
+      limit,
+      guids: payload.map((order) => order.guid),
+    });
 
     return res.json({
       success: true,
@@ -902,6 +814,10 @@ export const handleOrderAck = async (req: Request, res: Response) => {
       });
       const results: BatchResult[] = [{ key: order.guid ?? orderGuid, status: 'error', error: parsed.error }];
       await safeCompleteSyncRun(runId, results, baseMeta, 'Order export acknowledged with error');
+      console.warn('[client-orders-queue] 1C acknowledged order with error', {
+        orderGuid,
+        error: parsed.error,
+      });
       return res.json({ success: true, acknowledged: true, error: parsed.error });
     }
 
@@ -941,6 +857,11 @@ export const handleOrderAck = async (req: Request, res: Response) => {
 
     const results: BatchResult[] = [{ key: order.guid ?? orderGuid, status: 'ok' }];
     await safeCompleteSyncRun(runId, results, { ...baseMeta, status: nextStatus });
+    console.info('[client-orders-queue] 1C acknowledged order successfully', {
+      orderGuid,
+      status: nextStatus,
+      number1c: parsed.number1c ?? null,
+    });
 
     return res.json({ success: true, acknowledged: true, status: nextStatus });
   } catch (error) {
@@ -1072,6 +993,8 @@ async function replaceOrderItemsFromSnapshot(
   tx: Prisma.TransactionClient,
   orderId: string,
   items: Array<{
+    lineGuid?: string | null | undefined;
+    appLineGuid?: string | null | undefined;
     product: { guid: string };
     package?: { guid?: string | undefined } | null;
     unit?: { guid?: string | undefined } | null;
@@ -1083,17 +1006,33 @@ async function replaceOrderItemsFromSnapshot(
     isManualPrice?: boolean | undefined;
     manualPrice?: number | null | undefined;
     priceSource?: string | undefined;
+    isCancelled?: boolean | undefined;
+    cancelReasonGuid?: string | null | undefined;
+    cancelReasonName?: string | null | undefined;
+    cancelReason?: string | null | undefined;
+    cancelledAmount?: number | null | undefined;
     discountPercent?: number | null | undefined;
     appliedDiscountPercent?: number | null | undefined;
     lineAmount?: number | null | undefined;
     comment?: string | null | undefined;
   }>
 ) {
+  const usedLineGuids = new Set<string>();
+  for (const item of items) {
+    const lineGuid = item.lineGuid?.trim() || item.appLineGuid?.trim() || randomUUID();
+    const lineGuidKey = lineGuid.toLowerCase();
+    if (usedLineGuids.has(lineGuidKey)) {
+      throw new Error(`Duplicate lineGuid ${lineGuid} in order snapshot`);
+    }
+    usedLineGuids.add(lineGuidKey);
+  }
+
   await tx.orderItem.deleteMany({ where: { orderId } });
 
   let computedTotal = new Prisma.Decimal(0);
 
   for (const item of items) {
+    const lineGuid = item.lineGuid?.trim() || item.appLineGuid?.trim() || randomUUID();
     const product = await tx.product.findUnique({
       where: { guid: item.product.guid },
       select: {
@@ -1113,6 +1052,11 @@ async function replaceOrderItemsFromSnapshot(
           select: { id: true, unitId: true, multiplier: true },
         })
       : null;
+    const packageMultiplier = packageRecord?.multiplier ?? null;
+    const isBasePackage =
+      packageMultiplier !== null &&
+      Math.abs(packageMultiplier.toNumber() - 1) < 0.000001;
+    const effectivePackage = isBasePackage ? null : packageRecord;
 
     const explicitUnit = item.unit?.guid
       ? await tx.unit.findUnique({ where: { guid: item.unit.guid }, select: { id: true } })
@@ -1122,8 +1066,8 @@ async function replaceOrderItemsFromSnapshot(
     const quantityBase =
       item.quantityBase !== undefined && item.quantityBase !== null
         ? new Prisma.Decimal(item.quantityBase)
-        : packageRecord?.multiplier
-          ? quantity.mul(packageRecord.multiplier)
+        : effectivePackage?.multiplier
+          ? quantity.mul(effectivePackage.multiplier)
           : quantity;
     const price =
       item.price !== undefined && item.price !== null
@@ -1140,14 +1084,17 @@ async function replaceOrderItemsFromSnapshot(
       ? await tx.priceType.findUnique({ where: { guid: item.priceType.guid }, select: { id: true } })
       : null;
 
-    computedTotal = computedTotal.add(lineAmount);
+    if (!item.isCancelled) {
+      computedTotal = computedTotal.add(lineAmount);
+    }
 
     await tx.orderItem.create({
       data: {
         orderId,
+        lineGuid,
         productId: product.id,
-        packageId: packageRecord?.id ?? null,
-        unitId: explicitUnit?.id ?? packageRecord?.unitId ?? product.baseUnit?.id ?? null,
+        packageId: effectivePackage?.id ?? null,
+        unitId: explicitUnit?.id ?? effectivePackage?.unitId ?? product.baseUnit?.id ?? null,
         priceTypeId: priceType?.id ?? null,
         quantity,
         quantityBase,
@@ -1156,6 +1103,16 @@ async function replaceOrderItemsFromSnapshot(
         isManualPrice: item.isManualPrice ?? false,
         manualPrice: item.manualPrice !== undefined && item.manualPrice !== null ? new Prisma.Decimal(item.manualPrice) : null,
         priceSource: item.priceSource ?? null,
+        isCancelled: item.isCancelled ?? false,
+        cancelReasonGuid: item.cancelReasonGuid ?? null,
+        cancelReasonName: item.cancelReasonName ?? null,
+        cancelReason: item.cancelReason ?? null,
+        cancelledAmount:
+          item.cancelledAmount !== undefined && item.cancelledAmount !== null
+            ? new Prisma.Decimal(item.cancelledAmount)
+            : item.isCancelled
+              ? lineAmount
+              : null,
         discountPercent:
           item.discountPercent !== undefined && item.discountPercent !== null
             ? new Prisma.Decimal(item.discountPercent)
@@ -1194,7 +1151,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
       for (const item of parsed.items) {
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
-          select: { id: true, guid: true, revision: true, source: true },
+          select: { id: true, guid: true, revision: true, source: true, status: true, syncState: true },
         });
 
         if (!order) {
@@ -1224,7 +1181,58 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
           continue;
         }
 
+        if (
+          order.status === OrderStatus.QUEUED ||
+          order.syncState === OrderSyncState.QUEUED ||
+          order.syncState === OrderSyncState.ERROR ||
+          order.syncState === OrderSyncState.CONFLICT
+        ) {
+          const message = `Snapshot 1С отложен: заказ в состоянии ${order.status}/${order.syncState}, локальные строки не перезаписаны.`;
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              last1cSnapshot: item as unknown as Prisma.InputJsonValue,
+              lastSyncedAt: syncedAt,
+              lastStatusSyncAt: syncedAt,
+            },
+          });
+          await appendOrderEvent(tx, {
+            orderId: order.id,
+            revision: order.revision,
+            source: OrderEventSource.ONEC_IMPORT,
+            eventType: 'ONEC_ORDER_SNAPSHOT_DEFERRED',
+            payload: item as unknown as Prisma.InputJsonValue,
+            note: message,
+          });
+          results.push({ key: item.guid, status: 'ok' });
+          continue;
+        }
+
         try {
+          const existingItemsCount = await tx.orderItem.count({ where: { orderId: order.id } });
+          if (existingItemsCount > 0 && item.items.length === 0) {
+            const message = `1С прислала snapshot заказа без строк товаров, но в API есть ${existingItemsCount} строк. Snapshot отклонен, чтобы не потерять данные.`;
+            await tx.order.update({
+              where: { id: order.id },
+              data: {
+                syncState: OrderSyncState.ERROR,
+                last1cError: message,
+                last1cSnapshot: item as unknown as Prisma.InputJsonValue,
+                lastSyncedAt: syncedAt,
+              },
+            });
+            await appendOrderEvent(tx, {
+              orderId: order.id,
+              revision: order.revision,
+              source: OrderEventSource.ONEC_IMPORT,
+              eventType: 'ONEC_ORDER_SNAPSHOT_REJECTED_EMPTY_ITEMS',
+              payload: item as unknown as Prisma.InputJsonValue,
+              note: message,
+            });
+            results.push({ key: item.guid, status: 'error', error: message });
+            continue;
+          }
+
           const organizationId = await upsertSnapshotOrganization(tx, item.organization);
           const computedTotal = await replaceOrderItemsFromSnapshot(tx, order.id, item.items);
           const nextRevision = item.revision ?? order.revision + 1;
@@ -1243,6 +1251,8 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
               date1c: item.date1c ?? undefined,
               isPostedIn1c: item.isPostedIn1c ?? false,
               postedAt1c: item.postedAt1c ?? undefined,
+              hasRealization: item.hasRealization ?? false,
+              realizationDetectedAt: item.hasRealization ? syncedAt : null,
               organizationId: organizationId ?? undefined,
               comment: item.comment ?? null,
               deliveryDate: item.deliveryDate ?? null,

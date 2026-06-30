@@ -441,6 +441,7 @@ model PriceType {
   lastSyncedAt    DateTime?
 
   agreements    ClientAgreement[]
+  orders        Order[]
   orderItems    OrderItem[]
   productPrices ProductPrice[]
   specialPrices SpecialPrice[]
@@ -615,6 +616,7 @@ model Order {
   warehouseId       String?
   deliveryAddressId String?
   organizationId    String?
+  priceTypeId       String?
   createdByUserId   Int?
 
   status            OrderStatus @default(DRAFT)
@@ -632,6 +634,8 @@ model Order {
   lastExportError   String?
   isPostedIn1c      Boolean    @default(false)
   postedAt1c        DateTime?
+  hasRealization    Boolean    @default(false)
+  realizationDetectedAt DateTime?
   cancelRequestedAt DateTime?
   cancelReason      String?
   last1cError       String?
@@ -646,6 +650,7 @@ model Order {
   warehouse         Warehouse?      @relation(fields: [warehouseId], references: [id])
   deliveryAddress   DeliveryAddress? @relation(fields: [deliveryAddressId], references: [id])
   organization      Organization?   @relation(fields: [organizationId], references: [id])
+  priceType         PriceType?      @relation(fields: [priceTypeId], references: [id])
   createdByUser     User?           @relation("OrdersCreatedBy", fields: [createdByUserId], references: [id])
 
   items             OrderItem[]
@@ -659,6 +664,7 @@ model Order {
   @@index([contractId])
   @@index([warehouseId])
   @@index([organizationId])
+  @@index([priceTypeId])
   @@index([createdByUserId])
   @@index([status])
   @@index([source])
@@ -668,12 +674,14 @@ model Order {
   @@index([revision])
   @@index([queuedAt])
   @@index([sentTo1cAt])
+  @@index([hasRealization])
   @@index([sourceUpdatedAt])
 }
 
 model OrderItem {
   id              String   @id @default(cuid())
   orderId         String
+  lineGuid        String   @default(uuid())
   productId       String
   packageId       String?
   unitId          String?
@@ -686,6 +694,11 @@ model OrderItem {
   isManualPrice   Boolean  @default(false)
   manualPrice     Decimal? @db.Decimal(18, 4)
   priceSource     String?
+  isCancelled     Boolean  @default(false)
+  cancelReasonGuid String?
+  cancelReasonName String?
+  cancelReason    String?
+  cancelledAmount Decimal? @db.Decimal(18, 2)
   discountPercent Decimal? @db.Decimal(5, 2)
   appliedDiscountPercent Decimal? @db.Decimal(5, 2)
   lineAmount      Decimal? @db.Decimal(18, 2)
@@ -704,6 +717,8 @@ model OrderItem {
   updatedAt       DateTime @updatedAt
 
   @@index([orderId])
+  @@unique([orderId, lineGuid])
+  @@index([lineGuid])
   @@index([productId])
   @@index([priceTypeId])
   @@index([sourceUpdatedAt])

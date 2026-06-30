@@ -176,6 +176,7 @@ export type LiveClientOrder = {
   origin: 'onec';
   readOnly: boolean;
   readOnlyReason: string | null;
+  hasRealization: boolean;
   revision: number;
   syncState: 'SYNCED';
   status: string;
@@ -203,6 +204,7 @@ export type LiveClientOrder = {
   itemsCount: number;
   items: Array<{
     id?: string | null;
+    lineGuid?: string | null;
     quantity: number | null;
     quantityBase: number | null;
     basePrice: number | null;
@@ -210,6 +212,11 @@ export type LiveClientOrder = {
     isManualPrice: boolean;
     manualPrice: number | null;
     priceSource: string | null;
+    isCancelled?: boolean;
+    cancelReasonGuid?: string | null;
+    cancelReasonName?: string | null;
+    cancelReason?: string | null;
+    cancelledAmount?: number | null;
     priceType: { guid: string; name: string } | null;
     discountPercent: number | null;
     appliedDiscountPercent: number | null;
@@ -405,6 +412,121 @@ function visiblePage<T extends { isActive?: boolean }>(page: LivePagedResult<T>,
     ...page,
     items,
     total: Math.min(page.total, page.offset + items.length + (page.total > page.offset + page.items.length ? 1 : 0)),
+  };
+}
+
+function normalizeSmartSearchText(value: unknown): string {
+  return String(value ?? '')
+    .toLocaleLowerCase('ru')
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function smartSearchTokens(search?: string | null) {
+  const normalized = normalizeSmartSearchText(search);
+  if (!normalized) return [];
+  return Array.from(new Set(normalized.split(' ').filter((token) => token.length >= 2)));
+}
+
+function flattenSearchText(value: unknown, depth = 0): string {
+  if (value === null || value === undefined || depth > 4) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => flattenSearchText(item, depth + 1)).join(' ');
+  }
+  if (typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>)
+      .map((item) => flattenSearchText(item, depth + 1))
+      .join(' ');
+  }
+  return '';
+}
+
+function scoreSmartSearchItem(item: unknown, search: string) {
+  const tokens = smartSearchTokens(search);
+  if (!tokens.length) return { matched: true, allTokens: true, score: 0 };
+
+  const textValue = normalizeSmartSearchText(flattenSearchText(item));
+  const phrase = normalizeSmartSearchText(search);
+  const phraseMatch = phrase.length > 0 && textValue.includes(phrase);
+  const matchedTokens = tokens.filter((token) => textValue.includes(token));
+  const allTokens = matchedTokens.length === tokens.length;
+  const prefixTokens = tokens.filter((token) => textValue.split(' ').some((word) => word.startsWith(token))).length;
+
+  return {
+    matched: matchedTokens.length > 0,
+    allTokens,
+    score:
+      matchedTokens.length * 100 +
+      prefixTokens * 20 +
+      (allTokens ? 500 : 0) +
+      (phraseMatch ? 250 : 0),
+  };
+}
+
+function smartDedupeKey(item: unknown, index: number) {
+  const record = asRecord(item);
+  return text(record, ['guid', 'id', 'documentGuid', 'number1c'], null) ?? `${normalizeSmartSearchText(flattenSearchText(item)).slice(0, 160)}:${index}`;
+}
+
+async function liveSmartPaged<T extends { isActive?: boolean }>(
+  query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean },
+  loader: (query: OnecLpAppQuery) => Promise<unknown>,
+  keys: string[],
+  mapper: (item: AnyRecord) => T | null
+): Promise<LivePagedResult<T>> {
+  const normalized = normalizeQuery(query);
+  const limit = Number(normalized.limit ?? DEFAULT_LIMIT);
+  const offset = Number(normalized.offset ?? 0);
+  const search = String(normalized.search ?? '').trim();
+  const tokens = smartSearchTokens(search);
+
+  if (tokens.length < 2) {
+    return visiblePage(paged(await loader(normalized), keys, mapper, { limit, offset }), query.includeInactive);
+  }
+
+  const fetchLimit = Math.min(100, Math.max(limit + offset, limit * 4, 50));
+  const variants = Array.from(new Set([search, ...tokens])).filter(Boolean);
+  const payloads = await Promise.allSettled(
+    variants.map((variant) => loader({ ...normalized, search: variant, limit: fetchLimit, offset: 0 }))
+  );
+
+  const combined: T[] = [];
+  let sourceCanHaveMore = false;
+  for (const payload of payloads) {
+    if (payload.status !== 'fulfilled') continue;
+    const page = visiblePage(paged(payload.value, keys, mapper, { limit: fetchLimit, offset: 0 }), query.includeInactive);
+    sourceCanHaveMore = sourceCanHaveMore || page.total > page.items.length;
+    combined.push(...page.items);
+  }
+
+  const known = new Set<string>();
+  const unique = combined.filter((item, index) => {
+    const key = smartDedupeKey(item, index);
+    if (known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+
+  const scored = unique
+    .map((item, index) => ({ item, index, ...scoreSmartSearchItem(item, search) }))
+    .filter((row) => row.matched);
+  const strict = scored.filter((row) => row.allTokens);
+  const ranked = (strict.length ? strict : scored)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((row) => row.item);
+  const items = ranked.slice(offset, offset + limit);
+  const hasMore = sourceCanHaveMore || ranked.length > offset + items.length;
+
+  return {
+    items,
+    total: Math.max(ranked.length, offset + items.length + (hasMore ? 1 : 0)),
+    limit,
+    offset,
   };
 }
 
@@ -815,8 +937,10 @@ function mapOrderItem(record: AnyRecord, index: number): LiveClientOrder['items'
   const packageRecord = readObject(record, ['package', 'packaging', 'unitPackage']);
   const unitRecord = readObject(record, ['unit', 'baseUnit']);
   const priceTypeRecord = readObject(record, ['priceType']);
+  const lineGuid = text(record, ['lineGuid', 'appLineGuid', 'МЗИП_AppLineGuid', 'lineId', 'id'], null) ?? `${productGuid}-${index + 1}`;
   return {
-    id: text(record, ['id', 'lineId'], `${productGuid}-${index + 1}`),
+    id: text(record, ['id', 'lineId'], lineGuid),
+    lineGuid,
     quantity: numberValue(record, ['quantity', 'Количество'], 0),
     quantityBase: numberValue(record, ['quantityBase', 'baseQuantity', 'КоличествоБаза'], null),
     basePrice: numberValue(record, ['basePrice', 'price', 'Цена'], null),
@@ -824,6 +948,11 @@ function mapOrderItem(record: AnyRecord, index: number): LiveClientOrder['items'
     isManualPrice: bool(record, ['isManualPrice', 'manualPriceEnabled'], false),
     manualPrice: numberValue(record, ['manualPrice'], null),
     priceSource: text(record, ['priceSource'], null),
+    isCancelled: bool(record, ['isCancelled', 'cancelled', 'Отменено'], false),
+    cancelReasonGuid: text(record, ['cancelReasonGuid', 'cancelReasonId'], null),
+    cancelReasonName: text(record, ['cancelReasonName'], null),
+    cancelReason: text(record, ['cancelReason', 'cancelReasonName'], null),
+    cancelledAmount: numberValue(record, ['cancelledAmount', 'cancelledSum', 'СуммаОтменено'], null),
     priceType: mapNamedRef(priceTypeRecord, ['guid', 'priceTypeGuid'], ['name', 'priceTypeName']),
     discountPercent: numberValue(record, ['discountPercent', 'Скидка'], null),
     appliedDiscountPercent: numberValue(record, ['appliedDiscountPercent', 'discountPercent'], null),
@@ -868,6 +997,7 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
   const orderGuid = preferDocumentGuid ? (documentGuid ?? appGuid) : (appGuid ?? documentGuid);
   const isPosted = bool(record, ['isPostedIn1c', 'isPosted', 'posted', 'Проведен'], false);
   const remoteEditable = bool(record, ['isEditable', 'editable'], false);
+  const hasRealization = bool(record, ['hasRealization', 'realizationExists'], false);
   const priceType = mapNamedRef(readObject(record, ['priceType']), ['guid', 'priceTypeGuid'], ['name', 'priceTypeName']);
   const currentState1c = text(record, ['currentState1c', 'currentState', 'state1c', 'stateName', 'Состояние'], null);
   const documentStatus1c = text(record, ['documentStatus1c', 'documentStatus', 'СтатусДокумента'], null);
@@ -880,8 +1010,9 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     date1c: text(record, ['date1c', 'documentDate', 'date', 'Дата'], null),
     source: 'ONEC_LIVE',
     origin: 'onec',
-    readOnly: true,
-    readOnlyReason: text(record, ['readOnlyReason'], null) ?? (remoteEditable ? 'Документ 1С открыт только для просмотра в приложении.' : null),
+    readOnly: hasRealization || !remoteEditable,
+    readOnlyReason: text(record, ['readOnlyReason'], null) ?? (!remoteEditable ? 'Документ 1С открыт только для просмотра в приложении.' : null),
+    hasRealization,
     revision: numberValue(record, ['revision'], 1) ?? 1,
     syncState: 'SYNCED',
     status: mapOrderStatus(record),
@@ -944,11 +1075,7 @@ async function findOneFromList<T extends { guid: string | null; isActive?: boole
 }
 
 export async function getLiveOrganizations(query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean } = {}) {
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppOrganizations(normalized), ['organizations'], mapOrganization, {
-    limit: Number(normalized.limit ?? DEFAULT_LIMIT),
-    offset: Number(normalized.offset ?? 0),
-  }), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppOrganizations, ['organizations'], mapOrganization);
 }
 
 export async function findLiveOrganization(guid: string) {
@@ -956,8 +1083,7 @@ export async function findLiveOrganization(guid: string) {
 }
 
 export async function getLiveCounterparties(query: ClientOrdersCounterpartiesQuery) {
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppCounterparties(normalized), ['counterparties'], mapCounterparty, query), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppCounterparties, ['counterparties'], mapCounterparty);
 }
 
 export async function findLiveCounterparty(guid: string) {
@@ -966,8 +1092,7 @@ export async function findLiveCounterparty(guid: string) {
 
 export async function getLiveAgreements(query: ClientOrdersAgreementsQuery) {
   if (!query.counterpartyGuid) return { items: [], total: 0, limit: query.limit, offset: query.offset };
-  const normalized = normalizeQuery(query);
-  const page = visiblePage(paged(await getOnecLpAppAgreements(normalized), ['agreements'], mapAgreement, query), query.includeInactive);
+  const page = await liveSmartPaged(query, getOnecLpAppAgreements, ['agreements'], mapAgreement);
   return { ...page, items: await enrichOrganizationNames(page.items) };
 }
 
@@ -978,8 +1103,7 @@ export async function findLiveAgreement(guid: string, counterpartyGuid?: string)
 
 export async function getLiveContracts(query: ClientOrdersContractsQuery) {
   if (!query.counterpartyGuid) return { items: [], total: 0, limit: query.limit, offset: query.offset };
-  const normalized = normalizeQuery(query);
-  const page = visiblePage(paged(await getOnecLpAppContracts(normalized), ['contracts'], mapContract, query), query.includeInactive);
+  const page = await liveSmartPaged(query, getOnecLpAppContracts, ['contracts'], mapContract);
   return { ...page, items: await enrichOrganizationNames(page.items) };
 }
 
@@ -989,8 +1113,7 @@ export async function findLiveContract(guid: string, counterpartyGuid?: string) 
 }
 
 export async function getLiveWarehouses(query: ClientOrdersWarehousesQuery) {
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppWarehouses(normalized), ['warehouses'], mapWarehouse, query), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppWarehouses, ['warehouses'], mapWarehouse);
 }
 
 export async function findLiveWarehouse(guid: string) {
@@ -998,8 +1121,7 @@ export async function findLiveWarehouse(guid: string) {
 }
 
 export async function getLivePriceTypes(query: ClientOrdersPriceTypesQuery) {
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppPriceTypes(normalized), ['priceTypes', 'price-types'], mapPriceType, query), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppPriceTypes, ['priceTypes', 'price-types'], mapPriceType);
 }
 
 export async function findLivePriceType(guid: string) {
@@ -1008,8 +1130,7 @@ export async function findLivePriceType(guid: string) {
 
 export async function getLiveDeliveryAddresses(query: ClientOrdersDeliveryAddressesQuery) {
   if (!query.counterpartyGuid) return { items: [], total: 0, limit: query.limit, offset: query.offset };
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppDeliveryAddresses(normalized), ['deliveryAddresses', 'delivery-addresses'], mapDeliveryAddress, query), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppDeliveryAddresses, ['deliveryAddresses', 'delivery-addresses'], mapDeliveryAddress);
 }
 
 export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: string) {
@@ -1036,8 +1157,7 @@ export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: s
 }
 
 export async function getLiveProducts(query: ClientOrdersProductsQuery) {
-  const normalized = normalizeQuery(query);
-  return visiblePage(paged(await getOnecLpAppNomenclature(normalized), ['nomenclature', 'products'], mapProduct, query), query.includeInactive);
+  return liveSmartPaged(query, getOnecLpAppNomenclature, ['nomenclature', 'products'], mapProduct);
 }
 
 export async function getLiveClientOrders(query: ClientOrdersListQuery & { managerGuid: string }) {

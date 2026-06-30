@@ -382,12 +382,14 @@ const snapshotProductSchema = z.object({
 });
 
 const orderSnapshotItemLineSchema = z.object({
+  lineGuid: z.string().trim().min(1).max(128).optional(),
+  appLineGuid: z.string().trim().min(1).max(128).optional(),
   product: snapshotProductSchema,
   package: snapshotPackageSchema.nullable().optional(),
   unit: snapshotUnitSchema.nullable().optional(),
   priceType: priceTypeSchema.nullable().optional(),
-  quantity: z.number().positive(),
-  quantityBase: z.number().positive().optional(),
+  quantity: z.number().nonnegative(),
+  quantityBase: z.number().nonnegative().optional(),
   basePrice: z.number().nullable().optional(),
   price: z.number().nullable().optional(),
   isManualPrice: z.boolean().optional(),
@@ -397,6 +399,11 @@ const orderSnapshotItemLineSchema = z.object({
   appliedDiscountPercent: z.number().min(0).max(100).nullable().optional(),
   lineAmount: z.number().nullable().optional(),
   comment: z.string().nullable().optional(),
+  isCancelled: z.boolean().optional(),
+  cancelReasonGuid: z.string().nullable().optional(),
+  cancelReasonName: z.string().nullable().optional(),
+  cancelReason: z.string().nullable().optional(),
+  cancelledAmount: z.number().nullable().optional(),
 });
 
 const orderSnapshotItemSchema = z.object({
@@ -409,6 +416,8 @@ const orderSnapshotItemSchema = z.object({
   date1c: nullableDate,
   isPostedIn1c: z.boolean().optional(),
   postedAt1c: nullableDate,
+  hasRealization: z.boolean().optional(),
+  readOnlyReason: z.string().nullable().optional(),
   organization: snapshotOrganizationSchema.optional(),
   comment: z.string().nullable().optional(),
   deliveryDate: nullableDate,
@@ -427,7 +436,7 @@ export const ordersSnapshotBatchSchema = z.object({
   items: z.array(orderSnapshotItemSchema).min(1),
 });
 
-const orderAckStatusSchema = z.literal(OrderStatus.SENT_TO_1C);
+const orderAckStatusSchema = z.union([z.literal(OrderStatus.SENT_TO_1C), z.literal(OrderStatus.CANCELLED)]);
 
 export const orderAckSchema = z.object({
   ...envelope,

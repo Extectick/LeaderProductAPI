@@ -1,5 +1,8 @@
 import { Kafka, logLevel, type Producer, type Message } from 'kafkajs';
 
+const KAFKAJS_CHECK_PENDING_REQUESTS_INTERVAL_MS = 10;
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+
 const brokers = (process.env.KAFKA_BROKERS || '')
   .split(',')
   .map((s) => s.trim())
@@ -16,9 +19,55 @@ let connecting = false;
 let connected = false;
 let flushing = false;
 const queue: Message[] = [];
+let requestQueueTimeoutPatchApplied = false;
+
+function applyKafkaJsRequestQueueTimeoutPatch() {
+  if (requestQueueTimeoutPatchApplied) return;
+  requestQueueTimeoutPatchApplied = true;
+
+  try {
+    // KafkaJS 2.2.x can schedule a timeout with throttledUntil=-1 when the
+    // pending queue is empty. Node 24 correctly warns about that negative delay.
+    // Keep KafkaJS behavior for real pending work, but avoid scheduling no-op
+    // negative timers.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const RequestQueue = require('kafkajs/src/network/requestQueue');
+    const prototype = RequestQueue?.prototype;
+    if (!prototype || typeof prototype.scheduleCheckPendingRequests !== 'function') return;
+    if (prototype.__leaderProductNoNegativeTimeoutPatch === true) return;
+
+    Object.defineProperty(prototype, '__leaderProductNoNegativeTimeoutPatch', {
+      value: true,
+      enumerable: false,
+      configurable: false,
+    });
+
+    prototype.scheduleCheckPendingRequests = function scheduleCheckPendingRequests(this: any) {
+      if (this.throttleCheckTimeoutId) return;
+
+      const pendingLength = Array.isArray(this.pending) ? this.pending.length : 0;
+      const throttledUntil = Number(this.throttledUntil);
+      let scheduleAt = Number.isFinite(throttledUntil) ? throttledUntil - Date.now() : 0;
+
+      if (scheduleAt <= 0) {
+        if (pendingLength === 0) return;
+        scheduleAt = KAFKAJS_CHECK_PENDING_REQUESTS_INTERVAL_MS;
+      }
+
+      scheduleAt = Math.min(MAX_NODE_TIMEOUT_MS, Math.max(1, Math.trunc(scheduleAt)));
+      this.throttleCheckTimeoutId = setTimeout(() => {
+        this.throttleCheckTimeoutId = null;
+        this.checkPendingRequests();
+      }, scheduleAt);
+    };
+  } catch (error: any) {
+    console.warn('[kafka] failed to apply RequestQueue timeout patch:', error?.message || error);
+  }
+}
 
 function getKafka() {
   if (!kafka) {
+    applyKafkaJsRequestQueueTimeoutPatch();
     kafka = new Kafka({
       clientId,
       brokers,

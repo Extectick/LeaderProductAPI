@@ -31,6 +31,10 @@ import onecLpAppRouter from './modules/onec/onec.lpApp.routes';
 import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
+import {
+  startClientOrdersExportWorker,
+  stopClientOrdersExportWorker,
+} from './services/clientOrdersExportWorker';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 import { markUserOffline, markUserOnline } from './services/presenceService';
@@ -76,6 +80,45 @@ app.set('etag', false);
 
 const port = Number(process.env.PORT) || 3000;
 
+const SENSITIVE_QUERY_KEYS = new Set([
+  'secret',
+  'token',
+  'access_token',
+  'accessToken',
+  'refresh_token',
+  'refreshToken',
+  'api_key',
+  'apiKey',
+  'key',
+  'password',
+]);
+
+function redactSensitiveUrl(originalUrl: string): string {
+  try {
+    const url = new URL(originalUrl, 'http://leaderproduct.local');
+    let changed = false;
+    url.searchParams.forEach((_value, key) => {
+      const normalized = key.toLowerCase();
+      if (
+        SENSITIVE_QUERY_KEYS.has(key) ||
+        SENSITIVE_QUERY_KEYS.has(normalized) ||
+        normalized.includes('secret') ||
+        normalized.includes('token') ||
+        normalized.includes('password')
+      ) {
+        url.searchParams.set(key, '***');
+        changed = true;
+      }
+    });
+    return changed ? `${url.pathname}${url.search}${url.hash}` : originalUrl;
+  } catch {
+    return originalUrl.replace(
+      /([?&][^=\s&]*(?:secret|token|password|api[_-]?key|key)[^=\s&]*=)[^&\s]+/gi,
+      '$1***'
+    );
+  }
+}
+
 // ---- CORS ----
 // Разрешаем все origin, чтобы веб и мобильные клиенты работали из любой сети.
 // Если понадобится ограничение по доменам, верните проверку и список разрешённых.
@@ -105,7 +148,8 @@ app.use(
 );
 
 // ---- Common middlewares ----
-app.use(morgan('dev'));
+morgan.token('safe-url', (req) => redactSensitiveUrl((req as any).originalUrl || req.url || ''));
+app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
@@ -427,8 +471,9 @@ if (ENV !== 'test') {
       console.log(`Docs:   http://localhost:${port}/docs`);
     });
 
-    // 4) Запускаем планировщик фоновых задач (напоминания о непрочитанных, закрытии)
+    // 4) Запускаем фоновые задачи приложения
     startScheduledJobs();
+    startClientOrdersExportWorker();
 
     // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
     if (isTelegramBotConfigured()) {
@@ -480,6 +525,7 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
+  stopClientOrdersExportWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
@@ -490,6 +536,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
+  stopClientOrdersExportWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});

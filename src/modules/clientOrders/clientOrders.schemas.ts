@@ -201,10 +201,14 @@ export const clientOrderSettingsUpdateSchema = z.object({
 });
 
 export const managerOrderItemSchema = z.object({
+  lineGuid: z.string().trim().min(1).max(128).optional(),
   productGuid: z.string().min(1),
   packageGuid: z.string().min(1).optional(),
   priceTypeGuid: nullableGuid,
   quantity: z.coerce.number().nonnegative(),
+  basePrice: nullableNumber.refine((value) => value === null || value === undefined || value >= 0, {
+    message: 'basePrice must be greater than or equal to 0',
+  }),
   manualPrice: nullableNumber.refine((value) => value === null || value === undefined || value >= 0, {
     message: 'manualPrice must be greater than or equal to 0',
   }),
@@ -213,6 +217,13 @@ export const managerOrderItemSchema = z.object({
     { message: 'discountPercent must be between 0 and 100' }
   ),
   comment: z.string().trim().min(1).optional(),
+  isCancelled: z.boolean().optional(),
+  cancelReasonGuid: nullableGuid,
+  cancelReasonName: z.string().trim().max(512).optional(),
+  cancelReason: z.string().trim().max(1000).optional(),
+  cancelledAmount: nullableNumber.refine((value) => value === null || value === undefined || value >= 0, {
+    message: 'cancelledAmount must be greater than or equal to 0',
+  }),
 });
 
 export const clientOrderCreateSchema = z.object({
@@ -222,6 +233,7 @@ export const clientOrderCreateSchema = z.object({
   contractGuid: nullableGuid,
   warehouseGuid: nullableGuid,
   deliveryAddressGuid: nullableGuid,
+  priceTypeGuid: nullableGuid,
   deliveryDate: nullableDate,
   comment: z.string().trim().max(2000).optional(),
   currency: z.string().trim().min(1).max(16).optional(),

@@ -293,6 +293,13 @@ export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
   });
 }
 
+export function postOnecLpAppClientOrder(body: unknown) {
+  return callOnecLpApp('/client-orders', {
+    method: 'POST',
+    body,
+  });
+}
+
 export function getOnecLpAppTransportTasks(query: OnecLpAppQuery) {
   return callOnecLpApp('/transport-tasks', { query });
 }

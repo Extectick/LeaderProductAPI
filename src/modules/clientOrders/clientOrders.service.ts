@@ -8,6 +8,7 @@ import {
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import prisma from '../../prisma/client';
+import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
@@ -146,6 +147,11 @@ type ReceiptPriceInfo = {
   priceType: { id: string; guid: string; name: string };
 };
 
+type ProductPriceLookupPair = {
+  productId: string;
+  priceTypeId: string;
+};
+
 const clientOrderSummarySelect = {
   id: true,
   guid: true,
@@ -165,30 +171,93 @@ const clientOrderSummarySelect = {
   lastExportError: true,
   last1cError: true,
   isPostedIn1c: true,
+  hasRealization: true,
+  realizationDetectedAt: true,
   cancelRequestedAt: true,
   createdAt: true,
   updatedAt: true,
   counterparty: { select: { guid: true, name: true } },
   organization: { select: { guid: true, name: true, code: true, isActive: true } },
   warehouse: { select: { guid: true, name: true, code: true } },
+  priceType: { select: { guid: true, name: true } },
+  items: { where: { isCancelled: false }, select: { id: true } },
   _count: { select: { items: true } },
 } satisfies Prisma.OrderSelect;
 
 type ClientOrderSummaryRecord = Prisma.OrderGetPayload<{ select: typeof clientOrderSummarySelect }>;
 
 function isOrderQueued(order: Pick<ClientOrderSummaryRecord, 'status' | 'syncState'>) {
-  return order.status === OrderStatus.QUEUED || order.syncState === OrderSyncState.QUEUED;
+  return order.syncState === OrderSyncState.QUEUED || order.syncState === OrderSyncState.CANCEL_REQUESTED;
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function jsonString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function jsonNumber(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function latestExportValidationFromEvents(events: Array<{ eventType: string; payload: unknown }>) {
+  for (const event of events) {
+    if (event.eventType !== 'ONEC_ORDER_PUSH_ERROR') continue;
+    const payload = jsonRecord(event.payload);
+    if (!payload) continue;
+    const itemErrors = Array.isArray(payload.itemErrors)
+      ? payload.itemErrors.flatMap((item) => {
+          const record = jsonRecord(item);
+          const lineGuid = jsonString(record?.lineGuid);
+          const message = jsonString(record?.message);
+          if (!record || !lineGuid || !message) return [];
+          return [{
+            code: jsonString(record.code) ?? 'EXPORT_VALIDATION',
+            lineGuid,
+            productGuid: jsonString(record.productGuid),
+            productName: jsonString(record.productName),
+            requiredBase: jsonNumber(record.requiredBase),
+            available: jsonNumber(record.available),
+            message,
+          }];
+        })
+      : [];
+    const message = jsonString(payload.error);
+    if (itemErrors.length || message) {
+      return {
+        message,
+        itemErrors,
+      };
+    }
+  }
+  return null;
 }
 
 function queueMapKey(guid?: string | null) {
   return guid?.trim().toLowerCase() || '';
 }
 
+function normalizeLineGuid(value?: string | null) {
+  const normalized = value?.trim();
+  return normalized || null;
+}
+
+function ensureLineGuid(value?: string | null) {
+  return normalizeLineGuid(value) ?? randomUUID();
+}
+
 async function loadQueuedOrderPositions() {
   const rows = await prisma.order.findMany({
     where: {
       source: OrderSource.MANAGER_APP,
-      OR: [{ syncState: OrderSyncState.QUEUED }, { status: OrderStatus.QUEUED }],
+      syncState: { in: [OrderSyncState.QUEUED, OrderSyncState.CANCEL_REQUESTED] },
     },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { guid: true, queuedAt: true, createdAt: true, id: true },
@@ -223,7 +292,8 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     date1c: order.date1c,
     source: order.source,
     origin: 'local',
-    readOnly: order.isPostedIn1c || order.status === OrderStatus.CANCELLED,
+    readOnly: order.hasRealization || order.status === OrderStatus.CANCELLED,
+    readOnlyReason: order.hasRealization ? 'По заказу создана проведенная реализация товаров и услуг.' : null,
     revision: order.revision,
     syncState: order.syncState,
     status: order.status,
@@ -238,11 +308,14 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     lastExportError: order.lastExportError,
     last1cError: order.last1cError,
     isPostedIn1c: order.isPostedIn1c,
+    hasRealization: order.hasRealization,
+    realizationDetectedAt: order.realizationDetectedAt,
     cancelRequestedAt: order.cancelRequestedAt,
     counterparty: order.counterparty,
     organization: order.organization,
     warehouse: order.warehouse,
-    itemsCount: order._count.items,
+    priceType: order.priceType,
+    itemsCount: order.items.length,
     items: [],
     events: [],
     createdAt: order.createdAt,
@@ -341,12 +414,12 @@ function isClosedContractStatus(status?: string | null) {
   return status?.trim().toLocaleLowerCase('ru') === CLOSED_CONTRACT_STATUS.toLocaleLowerCase('ru');
 }
 
-function ensureEditable(order: { status: OrderStatus; isPostedIn1c: boolean; source: OrderSource }) {
+function ensureEditable(order: { status: OrderStatus; hasRealization?: boolean | null; source: OrderSource }) {
   if (order.source !== OrderSource.MANAGER_APP) {
     throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ менеджера не найден');
   }
-  if (order.isPostedIn1c) {
-    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Проведенный заказ в 1С доступен только для чтения');
+  if (order.hasRealization) {
+    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'По заказу создана реализация товаров и услуг. Документ доступен только для чтения');
   }
   if (order.status === OrderStatus.CANCELLED) {
     throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя редактировать');
@@ -673,6 +746,65 @@ async function loadReceiptPriceInfoByProductId(
       value: decimalToNumber(row.price) ?? 0,
       minQty: decimalToNumber(row.minQty),
       priceType: { id: priceType.id, guid: priceType.guid, name: priceType.name },
+    });
+  }
+
+  return result;
+}
+
+async function loadProductPriceInfoByProductAndPriceTypeId(
+  client: Pick<Tx, 'productPrice'>,
+  pairs: ProductPriceLookupPair[],
+  at: Date
+) {
+  const result = new Map<string, ReceiptPriceInfo>();
+  const uniquePairs = Array.from(
+    new Map(pairs.map((pair) => [`${pair.productId}|${pair.priceTypeId}`, pair])).values()
+  );
+  if (!uniquePairs.length) return result;
+
+  const productIds = [...new Set(uniquePairs.map((pair) => pair.productId))];
+  const priceTypeIds = [...new Set(uniquePairs.map((pair) => pair.priceTypeId))];
+  const allowedKeys = new Set(uniquePairs.map((pair) => `${pair.productId}|${pair.priceTypeId}`));
+
+  const rows = await client.productPrice.findMany({
+    where: {
+      isActive: true,
+      productId: { in: productIds },
+      priceTypeId: { in: priceTypeIds },
+      AND: [
+        { OR: [{ startDate: null }, { startDate: { lte: at } }] },
+        { OR: [{ endDate: null }, { endDate: { gte: at } }] },
+      ],
+    },
+    orderBy: [
+      { productId: 'asc' },
+      { priceTypeId: 'asc' },
+      { startDate: 'desc' },
+      { sourceUpdatedAt: 'desc' },
+      { createdAt: 'desc' },
+    ],
+    select: {
+      productId: true,
+      price: true,
+      minQty: true,
+      priceTypeId: true,
+      priceType: { select: { id: true, guid: true, name: true } },
+    },
+  });
+
+  for (const row of rows) {
+    if (!row.priceTypeId || !row.priceType) continue;
+    const key = `${row.productId}|${row.priceTypeId}`;
+    if (!allowedKeys.has(key) || result.has(key)) continue;
+    result.set(key, {
+      value: decimalToNumber(row.price) ?? 0,
+      minQty: decimalToNumber(row.minQty),
+      priceType: {
+        id: row.priceType.id,
+        guid: row.priceType.guid,
+        name: row.priceType.name,
+      },
     });
   }
 
@@ -1180,6 +1312,50 @@ async function upsertLiveUnit(
   });
 }
 
+async function upsertLiveProductPrice(
+  tx: Tx,
+  productId: string,
+  priceType: LivePriceType | { guid: string; name: string; code?: string | null } | null,
+  price: number | null | undefined,
+  currency: string | null | undefined,
+  sourceUpdatedAt: Date,
+  minQty = 1
+) {
+  if (!priceType || price === null || price === undefined) return;
+  const materializedPriceType = await upsertLivePriceType(tx, priceType, sourceUpdatedAt);
+  if (!materializedPriceType) return;
+
+  const startDate = new Date(0);
+  await tx.productPrice.upsert({
+    where: {
+      productId_priceTypeId_startDate: {
+        productId,
+        priceTypeId: materializedPriceType.id,
+        startDate,
+      },
+    },
+    create: {
+      productId,
+      priceTypeId: materializedPriceType.id,
+      price: toDecimal(price)!,
+      currency: currency ?? DEFAULT_ORDER_CURRENCY,
+      startDate,
+      minQty: toDecimal(minQty),
+      isActive: true,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+    update: {
+      price: toDecimal(price)!,
+      currency: currency ?? DEFAULT_ORDER_CURRENCY,
+      minQty: toDecimal(minQty),
+      isActive: true,
+      sourceUpdatedAt,
+      lastSyncedAt: sourceUpdatedAt,
+    },
+  });
+}
+
 async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: string | null, sourceUpdatedAt: Date) {
   if (!item) return null;
   const baseUnit = await upsertLiveUnit(tx, item.baseUnit, `default-unit-${item.guid}`, sourceUpdatedAt);
@@ -1238,43 +1414,15 @@ async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: 
     });
   }
 
-  if (item.receiptPrice !== null && item.receiptPrice !== undefined) {
-    const priceType = await upsertLivePriceType(
-      tx,
-      item.priceType ?? { guid: 'receipt-price-type', name: 'ЦенаПоступления', code: 'ЦенаПоступления' },
-      sourceUpdatedAt
-    );
-    if (priceType) {
-      const startDate = new Date(0);
-      await tx.productPrice.upsert({
-        where: {
-          productId_priceTypeId_startDate: {
-            productId: product.id,
-            priceTypeId: priceType.id,
-            startDate,
-          },
-        },
-        create: {
-          productId: product.id,
-          priceTypeId: priceType.id,
-          price: toDecimal(item.receiptPrice)!,
-          currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
-          startDate,
-          minQty: toDecimal(1),
-          isActive: true,
-          sourceUpdatedAt,
-          lastSyncedAt: sourceUpdatedAt,
-        },
-        update: {
-          price: toDecimal(item.receiptPrice)!,
-          currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
-          isActive: true,
-          sourceUpdatedAt,
-          lastSyncedAt: sourceUpdatedAt,
-        },
-      });
-    }
-  }
+  await upsertLiveProductPrice(tx, product.id, item.priceType, item.basePrice, item.currency, sourceUpdatedAt);
+  await upsertLiveProductPrice(
+    tx,
+    product.id,
+    { guid: 'receipt-price-type', name: 'ЦенаПоступления', code: 'ЦенаПоступления' },
+    item.receiptPrice,
+    item.currency,
+    sourceUpdatedAt
+  );
 
   if (warehouseId && item.stock) {
     await tx.stockBalance.upsert({
@@ -1313,6 +1461,7 @@ type LiveOrderMaterialization = {
   deliveryAddress: LiveDeliveryAddress | null;
   explicitPriceTypes: LivePriceType[];
   products: LiveProduct[];
+  productsSource: 'live' | 'local-fallback';
 };
 
 async function loadLiveReferenceWithCache<T>(
@@ -1324,6 +1473,9 @@ async function loadLiveReferenceWithCache<T>(
     const liveValue = await operation();
     if (liveValue) return liveValue;
   } catch (error) {
+    if (error instanceof ClientOrdersOnecCircuitOpenError) {
+      return fallback();
+    }
     if (!isOnecLpAppError(error)) throw error;
     const cachedValue = await fallback();
     if (cachedValue) return cachedValue;
@@ -1494,10 +1646,49 @@ async function findCachedDeliveryAddress(guid: string): Promise<LiveDeliveryAddr
     : null;
 }
 
+async function loadLiveProductsForOrderMaterialization(
+  body: ClientOrderCreateBody,
+  productGuids: string[]
+): Promise<{ products: LiveProduct[]; source: LiveOrderMaterialization['productsSource'] }> {
+  try {
+    const products = await readThroughClientOrdersCache(
+      'products:batch',
+      {
+        productGuids: productGuids.slice().sort(),
+        organizationGuid: body.organizationGuid,
+        counterpartyGuid: body.counterpartyGuid,
+        agreementGuid: body.agreementGuid ?? undefined,
+        warehouseGuid: body.warehouseGuid ?? undefined,
+        priceTypeGuid: body.priceTypeGuid ?? undefined,
+      },
+      CLIENT_ORDERS_CACHE_TTL.productsBatch,
+      () => getLiveProductsByGuids({
+        productGuids,
+        organizationGuid: body.organizationGuid,
+        counterpartyGuid: body.counterpartyGuid,
+        agreementGuid: body.agreementGuid ?? undefined,
+        warehouseGuid: body.warehouseGuid ?? undefined,
+        priceTypeGuid: body.priceTypeGuid ?? undefined,
+      })
+    );
+
+    return { products: products.filter(Boolean), source: 'live' };
+  } catch (error) {
+    if (error instanceof ClientOrdersOnecCircuitOpenError || isOnecLpAppError(error)) {
+      return { products: [], source: 'local-fallback' };
+    }
+    throw error;
+  }
+}
+
 async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promise<LiveOrderMaterialization> {
-  const explicitPriceTypeGuids = [...new Set(body.items.map((item) => item.priceTypeGuid).filter(Boolean) as string[])];
+  const explicitPriceTypeGuids = [
+    ...new Set(
+      [body.priceTypeGuid, ...body.items.map((item) => item.priceTypeGuid)].filter(Boolean) as string[]
+    ),
+  ];
   const productGuids = [...new Set(body.items.map((item) => item.productGuid))];
-  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceTypes, products] =
+  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceTypes, productsResult] =
     await Promise.all([
       loadLiveReferenceWithCache(
         () => readThroughClientOrdersCache(
@@ -1581,26 +1772,7 @@ async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promis
           )
         )
       ),
-      onecLive(
-        () => readThroughClientOrdersCache(
-          'products:batch',
-          {
-            productGuids: productGuids.slice().sort(),
-            counterpartyGuid: body.counterpartyGuid,
-            agreementGuid: body.agreementGuid ?? undefined,
-            warehouseGuid: body.warehouseGuid ?? undefined,
-          },
-          CLIENT_ORDERS_CACHE_TTL.productsBatch,
-          () => getLiveProductsByGuids({
-            productGuids,
-            counterpartyGuid: body.counterpartyGuid,
-            agreementGuid: body.agreementGuid ?? undefined,
-            warehouseGuid: body.warehouseGuid ?? undefined,
-          })
-        ),
-        'Ошибка получения номенклатуры из 1С',
-        { allowCachedWhenCircuitOpen: true }
-      ),
+      loadLiveProductsForOrderMaterialization(body, productGuids),
     ]);
 
   return {
@@ -1611,7 +1783,8 @@ async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promis
     warehouse,
     deliveryAddress,
     explicitPriceTypes: explicitPriceTypes.filter(Boolean) as LivePriceType[],
-    products: products.filter(Boolean) as LiveProduct[],
+    products: productsResult.products,
+    productsSource: productsResult.source,
   };
 }
 
@@ -1620,7 +1793,13 @@ async function materializeLiveOrderReferences(tx: Tx, data: LiveOrderMaterializa
   const counterparty = await upsertLiveCounterparty(tx, data.counterparty, sourceUpdatedAt);
   const warehouse = await upsertLiveWarehouse(tx, data.warehouse, sourceUpdatedAt);
 
-  for (const priceType of data.explicitPriceTypes) {
+  const materializedPriceTypeGuids = new Set<string>();
+  for (const priceType of [
+    ...data.explicitPriceTypes,
+    ...data.products.map((product) => product.priceType).filter(Boolean) as LivePriceType[],
+  ]) {
+    if (materializedPriceTypeGuids.has(priceType.guid)) continue;
+    materializedPriceTypeGuids.add(priceType.guid);
     await upsertLivePriceType(tx, priceType, sourceUpdatedAt);
   }
 
@@ -1667,9 +1846,11 @@ async function materializeLiveOrderReferences(tx: Tx, data: LiveOrderMaterializa
     await upsertLiveProduct(tx, product, effectiveWarehouse?.id ?? null, sourceUpdatedAt);
   }
 
-  const missingProduct = body.items.find((item) => !data.products.some((product) => product.guid === item.productGuid));
-  if (missingProduct) {
-    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Товар ${missingProduct.productGuid} не найден в 1С`);
+  if (data.productsSource === 'live') {
+    const missingProduct = body.items.find((item) => !data.products.some((product) => product.guid === item.productGuid));
+    if (missingProduct) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Товар ${missingProduct.productGuid} не найден в 1С`);
+    }
   }
 }
 
@@ -1702,13 +1883,14 @@ async function materializeLiveDefaultsReferences(defaults: LiveClientOrderDefaul
 }
 
 async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): Promise<ManagerOrderContext> {
-  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress] = await Promise.all([
+  const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceType] = await Promise.all([
     loadOrganizationByGuid(tx, body.organizationGuid),
     loadCounterpartyByGuid(tx, body.counterpartyGuid),
     body.agreementGuid ? loadAgreementByGuid(tx, body.agreementGuid) : Promise.resolve(null),
     body.contractGuid ? loadContractByGuid(tx, body.contractGuid) : Promise.resolve(null),
     body.warehouseGuid ? loadWarehouseByGuid(tx, body.warehouseGuid) : Promise.resolve(null),
     body.deliveryAddressGuid ? loadDeliveryAddressByGuid(tx, body.deliveryAddressGuid) : Promise.resolve(null),
+    body.priceTypeGuid ? loadPriceTypeByGuid(tx, body.priceTypeGuid) : Promise.resolve(null),
   ]);
 
   if (agreement?.counterpartyId && agreement.counterpartyId !== counterparty.id) {
@@ -1730,8 +1912,9 @@ async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): 
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Адрес доставки не принадлежит выбранному контрагенту');
   }
 
-  const priceTypeId = agreement?.priceTypeId ?? null;
-  const priceType = priceTypeId ? await loadPriceTypeById(tx, priceTypeId) : null;
+  const agreementPriceTypeId = agreement?.priceTypeId ?? null;
+  const agreementPriceType = agreementPriceTypeId ? await loadPriceTypeById(tx, agreementPriceTypeId) : null;
+  const priceType = explicitPriceType ?? agreementPriceType;
 
   return {
     organization: {
@@ -1784,6 +1967,7 @@ async function prepareOrderItems(
   let totalAmount = new Prisma.Decimal(0);
   let generalDiscountAmount = new Prisma.Decimal(0);
   const generalDiscountPercent = body.generalDiscountPercent ?? null;
+  const usedLineGuids = new Set<string>();
   const productGuids = [...new Set(body.items.map((item) => item.productGuid))];
   const products = await tx.product.findMany({
     where: { guid: { in: productGuids } },
@@ -1827,9 +2011,18 @@ async function prepareOrderItems(
       })
     : [];
   const priceTypeByGuid = new Map(explicitPriceTypes.map((priceType) => [priceType.guid, priceType]));
-  const receiptPriceByProductId = await loadReceiptPriceInfoByProductId(
+  const productPricePairs = body.items.flatMap((item) => {
+    if (item.manualPrice !== null && item.manualPrice !== undefined) return [];
+    const product = productByGuid.get(item.productGuid);
+    if (!product) return [];
+    const linePriceType = item.priceTypeGuid
+      ? priceTypeByGuid.get(item.priceTypeGuid) ?? null
+      : context.priceType;
+    return linePriceType ? [{ productId: product.id, priceTypeId: linePriceType.id }] : [];
+  });
+  const productPriceByProductAndPriceTypeId = await loadProductPriceInfoByProductAndPriceTypeId(
     tx,
-    products.map((product) => product.id),
+    productPricePairs,
     sourceUpdatedAt
   );
 
@@ -1862,6 +2055,7 @@ async function prepareOrderItems(
     const quantityBase = quantity.mul(multiplier);
     const isManualPrice = item.manualPrice !== null && item.manualPrice !== undefined;
     const manualPrice = isManualPrice ? toDecimal(item.manualPrice)! : null;
+    const isCancelled = item.isCancelled ?? false;
 
     let linePriceType = item.priceTypeGuid
       ? priceTypeByGuid.get(item.priceTypeGuid) ?? null
@@ -1875,24 +2069,33 @@ async function prepareOrderItems(
       throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Тип цены ${linePriceType.guid} неактивен`);
     }
 
-    let receiptPrice: ReceiptPriceInfo | null = null;
+    let productPrice: ReceiptPriceInfo | null = null;
     if (!isManualPrice) {
-      receiptPrice = receiptPriceByProductId.get(product.id) ?? null;
-      linePriceType = receiptPrice?.priceType ?? null;
+      if (!linePriceType && !isCancelled) {
+        throw new ClientOrdersError(
+          400,
+          ErrorCodes.VALIDATION_ERROR,
+          `Не выбран вид цены для товара ${formatProductLabel(product)}`
+        );
+      }
+      productPrice = linePriceType
+        ? productPriceByProductAndPriceTypeId.get(`${product.id}|${linePriceType.id}`) ?? null
+        : null;
     }
 
-    const basePriceValue = isManualPrice ? item.manualPrice : receiptPrice?.value;
+    const fixedBasePrice = item.basePrice !== null && item.basePrice !== undefined ? item.basePrice : null;
+    const basePriceValue = isManualPrice ? item.manualPrice : fixedBasePrice ?? productPrice?.value ?? (isCancelled ? 0 : undefined);
     if (basePriceValue === null || basePriceValue === undefined) {
       throw new ClientOrdersError(
         400,
         ErrorCodes.VALIDATION_ERROR,
-        `Не найдена начальная цена ЦенаПоступления для товара ${formatProductLabel(product)}`
+        `Не найдена цена ${linePriceType?.name ?? ''} для товара ${formatProductLabel(product)}`.trim()
       );
     }
 
     const quantityBaseValue = decimalToNumber(quantityBase) ?? item.quantity;
-    const minQty = product.isWeight ? 0.001 : (receiptPrice?.minQty ?? null);
-    if (quantityBaseValue > 0 && minQty !== null && quantityBaseValue < minQty) {
+    const minQty = product.isWeight ? 0.001 : (productPrice?.minQty ?? null);
+    if (!isCancelled && quantityBaseValue > 0 && minQty !== null && quantityBaseValue < minQty) {
       throw new ClientOrdersError(
         400,
         ErrorCodes.VALIDATION_ERROR,
@@ -1902,6 +2105,10 @@ async function prepareOrderItems(
 
     const basePrice = toDecimal(basePriceValue)!;
     const lineDiscountPercent = item.discountPercent ?? null;
+    const cancelledAmount =
+      item.cancelledAmount !== null && item.cancelledAmount !== undefined
+        ? toDecimal(item.cancelledAmount)!
+        : null;
     const canApplyGeneralDiscount = !isManualPrice && (lineDiscountPercent === null || lineDiscountPercent === undefined);
     const appliedDiscountPercent = lineDiscountPercent ?? (canApplyGeneralDiscount ? generalDiscountPercent : null);
 
@@ -1916,10 +2123,19 @@ async function prepareOrderItems(
     }
 
     const lineAmount = quantityBase.mul(finalPrice);
-    totalAmount = totalAmount.add(lineAmount);
+    if (!isCancelled) {
+      totalAmount = totalAmount.add(lineAmount);
+    }
+    const lineGuid = ensureLineGuid(item.lineGuid);
+    const lineGuidKey = lineGuid.toLowerCase();
+    if (usedLineGuids.has(lineGuidKey)) {
+      throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Дублируется идентификатор строки заказа ${lineGuid}`);
+    }
+    usedLineGuids.add(lineGuidKey);
 
     preparedItems.push({
       create: {
+        lineGuid,
         productId: product.id,
         packageId: packageRecord?.id ?? null,
         unitId: packageRecord?.unitId ?? product.baseUnit?.id ?? null,
@@ -1930,7 +2146,16 @@ async function prepareOrderItems(
         price: finalPrice,
         isManualPrice,
         manualPrice,
-        priceSource: receiptPrice ? 'product-prices:ЦенаПоступления' : 'manual',
+        priceSource: isManualPrice
+          ? 'manual'
+          : productPrice
+            ? `product-prices:${linePriceType?.name ?? linePriceType?.guid ?? 'price-type'}`
+            : `client-fixed:${linePriceType?.name ?? linePriceType?.guid ?? 'price-type'}`,
+        isCancelled,
+        cancelReasonGuid: item.cancelReasonGuid ?? null,
+        cancelReasonName: item.cancelReasonName ?? null,
+        cancelReason: item.cancelReason ?? null,
+        cancelledAmount: cancelledAmount ?? (isCancelled ? lineAmount : null),
         discountPercent: lineDiscountPercent !== null && lineDiscountPercent !== undefined ? toDecimal(lineDiscountPercent)! : null,
         appliedDiscountPercent:
           appliedDiscountPercent !== null && appliedDiscountPercent !== undefined
@@ -1941,6 +2166,8 @@ async function prepareOrderItems(
         sourceUpdatedAt,
       },
       snapshot: {
+        lineGuid,
+        appLineGuid: lineGuid,
         product: {
           guid: product.guid,
           name: product.name,
@@ -1971,7 +2198,16 @@ async function prepareOrderItems(
         manualPrice: decimalToNumber(manualPrice),
         isManualPrice,
         price: decimalToNumber(finalPrice),
-        priceSource: receiptPrice ? 'product-prices:ЦенаПоступления' : 'manual',
+        priceSource: isManualPrice
+          ? 'manual'
+          : productPrice
+            ? `product-prices:${linePriceType?.name ?? linePriceType?.guid ?? 'price-type'}`
+            : `client-fixed:${linePriceType?.name ?? linePriceType?.guid ?? 'price-type'}`,
+        isCancelled,
+        cancelReasonGuid: item.cancelReasonGuid ?? null,
+        cancelReasonName: item.cancelReasonName ?? null,
+        cancelReason: item.cancelReason ?? null,
+        cancelledAmount: decimalToNumber(cancelledAmount ?? (isCancelled ? lineAmount : null)),
         discountPercent: lineDiscountPercent,
         appliedDiscountPercent,
         lineAmount: decimalToNumber(lineAmount),
@@ -2197,7 +2433,14 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<Loca
     ...(query.counterpartyGuid ? { counterparty: { guid: query.counterpartyGuid } } : {}),
     ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
     ...(query.warehouseGuid ? { warehouse: { guid: query.warehouseGuid } } : {}),
-    ...(query.priceTypeGuid ? { items: { some: { priceType: { guid: query.priceTypeGuid } } } } : {}),
+    ...(query.priceTypeGuid
+      ? {
+          OR: [
+            { priceType: { guid: query.priceTypeGuid } },
+            { items: { some: { priceType: { guid: query.priceTypeGuid } } } },
+          ],
+        }
+      : {}),
     ...(query.amountMin !== undefined || query.amountMax !== undefined
       ? {
           totalAmount: {
@@ -2254,7 +2497,14 @@ function liveOrderKey(order: Pick<LiveClientOrder, 'appGuid' | 'number1c'>) {
 }
 
 function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRecord | null, queuePositions?: Map<string, number>) {
-  if (!local) return { ...order, readOnly: true };
+  if (!local) {
+    return {
+      ...order,
+      readOnly: true,
+      readOnlyReason: order.readOnlyReason || 'Документ 1С открыт только для просмотра в приложении.',
+    };
+  }
+  const hasRealization = order.hasRealization || local.hasRealization;
   return {
     ...order,
     guid: local.guid,
@@ -2270,7 +2520,12 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
     lastExportError: local.lastExportError,
     last1cError: local.last1cError,
     cancelRequestedAt: local.cancelRequestedAt,
-    readOnly: true,
+    hasRealization,
+    realizationDetectedAt: local.realizationDetectedAt ?? null,
+    readOnly: hasRealization || local.status === OrderStatus.CANCELLED,
+    readOnlyReason: hasRealization
+      ? (order.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
+      : order.readOnlyReason,
   };
 }
 
@@ -2451,6 +2706,9 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     return enrichOrderItemsWithImages({ ...live, readOnly: true });
   }
 
+  const mapped = mapOrderDetail(order);
+  const exportValidation = latestExportValidationFromEvents(mapped.events);
+
   if (userId && order.number1c && !isPinnedLocalOrder(order)) {
     const managerGuid = await getManagerGuidForUser(userId);
     if (managerGuid) {
@@ -2486,7 +2744,13 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             queuePosition: null,
             lastExportError: order.lastExportError,
             last1cError: order.last1cError,
-            readOnly: true,
+            exportValidation,
+            hasRealization: liveDetail.hasRealization || order.hasRealization,
+            realizationDetectedAt: order.realizationDetectedAt,
+            readOnly: liveDetail.hasRealization || order.hasRealization || order.status === OrderStatus.CANCELLED,
+            readOnlyReason: liveDetail.hasRealization || order.hasRealization
+              ? (liveDetail.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
+              : liveDetail.readOnlyReason,
           });
         }
       } catch (error) {
@@ -2499,7 +2763,6 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     }
   }
 
-  const mapped = mapOrderDetail(order);
   const queuePositions = isOrderQueued(order) ? await loadQueuedOrderPositions() : undefined;
   const stockByProductId = await loadStockByProductIdForWarehouse(
     prisma as unknown as Tx,
@@ -2513,12 +2776,100 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     documentGuid: mapped.guid,
     origin: 'local',
     queuePosition: resolveQueuePosition(order, queuePositions),
-    readOnly: mapped.isPostedIn1c || mapped.status === OrderStatus.CANCELLED,
+    exportValidation,
+    readOnly: mapped.hasRealization || mapped.status === OrderStatus.CANCELLED,
+    readOnlyReason: mapped.hasRealization
+      ? (mapped.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
+      : mapped.readOnlyReason,
     items: mapped.items.map((item, index) => ({
       ...item,
       stock: stockByProductId.get(order.items[index]?.productId) ?? null,
     })),
   });
+}
+
+export async function getClientOrderExportDebug(guid: string) {
+  const order = await prisma.order.findFirst({
+    where: { guid, source: OrderSource.MANAGER_APP },
+    select: {
+      id: true,
+      guid: true,
+      revision: true,
+      status: true,
+      syncState: true,
+      number1c: true,
+      date1c: true,
+      queuedAt: true,
+      sentTo1cAt: true,
+      exportAttempts: true,
+      lastExportError: true,
+      last1cError: true,
+      last1cSnapshot: true,
+      sourceUpdatedAt: true,
+      updatedAt: true,
+      items: {
+        orderBy: [{ createdAt: 'asc' }],
+        select: {
+          lineGuid: true,
+          quantity: true,
+          basePrice: true,
+          isManualPrice: true,
+          manualPrice: true,
+          isCancelled: true,
+          cancelReasonGuid: true,
+          cancelReasonName: true,
+          cancelReason: true,
+          product: { select: { guid: true, name: true } },
+        },
+      },
+      events: {
+        orderBy: [{ createdAt: 'desc' }],
+        take: 20,
+        select: {
+          revision: true,
+          source: true,
+          eventType: true,
+          note: true,
+          payload: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+
+  if (!order) {
+    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+  }
+
+  return {
+    guid: order.guid,
+    revision: order.revision,
+    status: order.status,
+    syncState: order.syncState,
+    number1c: order.number1c,
+    date1c: order.date1c,
+    queuedAt: order.queuedAt,
+    sentTo1cAt: order.sentTo1cAt,
+    exportAttempts: order.exportAttempts,
+    lastExportError: order.lastExportError,
+    last1cError: order.last1cError,
+    sourceUpdatedAt: order.sourceUpdatedAt,
+    updatedAt: order.updatedAt,
+    last1cSnapshot: order.last1cSnapshot,
+    items: order.items.map((item) => ({
+      lineGuid: item.lineGuid,
+      product: item.product,
+      quantity: decimalToNumber(item.quantity),
+      basePrice: decimalToNumber(item.basePrice),
+      isManualPrice: item.isManualPrice,
+      manualPrice: decimalToNumber(item.manualPrice),
+      isCancelled: item.isCancelled,
+      cancelReasonGuid: item.cancelReasonGuid,
+      cancelReasonName: item.cancelReasonName,
+      cancelReason: item.cancelReason,
+    })),
+    events: order.events,
+  };
 }
 
 export async function getClientOrderSettings(userId: number) {
@@ -3801,6 +4152,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         contractId: context.contract?.id ?? context.agreement?.contractId ?? null,
         warehouseId: context.warehouse?.id ?? context.agreement?.warehouseId ?? null,
         deliveryAddressId: context.deliveryAddress?.id ?? null,
+        priceTypeId: context.priceType?.id ?? null,
         createdByUserId: userId,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? null,
@@ -3827,6 +4179,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
       actorUserId: userId,
       payload: {
         organizationGuid: context.organization.guid,
+        priceTypeGuid: context.priceType?.guid ?? null,
         saveReason: body.saveReason,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
@@ -3866,6 +4219,7 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
     contractGuid: source.contract?.guid ?? null,
     warehouseGuid: source.warehouse?.guid ?? null,
     deliveryAddressGuid: source.deliveryAddress?.guid ?? null,
+    priceTypeGuid: source.priceType?.guid ?? source.agreement?.priceType?.guid ?? null,
     deliveryDate: dateForCreatePayload(source.deliveryDate),
     comment: source.comment ?? undefined,
     currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
@@ -3890,6 +4244,16 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
   };
 }
 
+export function resolveUpdatedOrderQueueState(currentStatus: OrderStatus) {
+  const shouldQueueForExport = currentStatus === OrderStatus.SENT_TO_1C || currentStatus === OrderStatus.QUEUED;
+
+  return {
+    shouldQueueForExport,
+    status: shouldQueueForExport ? OrderStatus.QUEUED : OrderStatus.DRAFT,
+    syncState: shouldQueueForExport ? OrderSyncState.QUEUED : OrderSyncState.DRAFT,
+  };
+}
+
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
   const sourceUpdatedAt = now();
   const liveReferences = await loadLiveOrderMaterialization(body);
@@ -3904,6 +4268,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         status: true,
         source: true,
         isPostedIn1c: true,
+        hasRealization: true,
       },
     });
 
@@ -3919,6 +4284,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const nextRevision = order.revision + 1;
     const isAutosave = body.saveReason === 'autosave';
+    const queueState = resolveUpdatedOrderQueueState(order.status);
 
     await tx.orderItem.deleteMany({ where: { orderId: order.id } });
 
@@ -3926,16 +4292,17 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
       where: { id: order.id },
       data: {
         revision: nextRevision,
-        syncState:
-          order.status === OrderStatus.SENT_TO_1C || order.status === OrderStatus.QUEUED
-            ? OrderSyncState.QUEUED
-            : OrderSyncState.DRAFT,
+        status: queueState.status,
+        syncState: queueState.syncState,
+        queuedAt: queueState.shouldQueueForExport ? sourceUpdatedAt : null,
+        exportAttempts: queueState.shouldQueueForExport ? 0 : undefined,
         organizationId: context.organization.id,
         counterpartyId: context.counterparty.id,
         agreementId: context.agreement?.id ?? null,
         contractId: context.contract?.id ?? context.agreement?.contractId ?? null,
         warehouseId: context.warehouse?.id ?? context.agreement?.warehouseId ?? null,
         deliveryAddressId: context.deliveryAddress?.id ?? null,
+        priceTypeId: context.priceType?.id ?? null,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? null,
         currency: DEFAULT_ORDER_CURRENCY,
@@ -3945,6 +4312,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
             ? toDecimal(body.generalDiscountPercent)
             : null,
         generalDiscountAmount: prepared.generalDiscountAmount,
+        lastExportError: null,
         last1cError: null,
         sourceUpdatedAt,
         items: {
@@ -3962,6 +4330,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         actorUserId: userId,
         payload: {
           organizationGuid: context.organization.guid,
+          priceTypeGuid: context.priceType?.guid ?? null,
           saveReason: body.saveReason,
           comment: body.comment ?? null,
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
@@ -3986,10 +4355,18 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         status: true,
         source: true,
         isPostedIn1c: true,
+        hasRealization: true,
+        organizationId: true,
+        agreementId: true,
+        contractId: true,
+        warehouseId: true,
+        deliveryAddressId: true,
+        deliveryDate: true,
         items: {
           select: {
             quantity: true,
             basePrice: true,
+            isCancelled: true,
           },
         },
       },
@@ -4005,7 +4382,22 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
     if (order.status === OrderStatus.CANCELLED) {
       throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя отправить');
     }
-    if (order.items.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
+    const missingFields: string[] = [];
+    if (!order.organizationId) missingFields.push('организацию');
+    if (!order.agreementId) missingFields.push('соглашение');
+    if (!order.contractId) missingFields.push('договор');
+    if (!order.warehouseId) missingFields.push('склад');
+    if (!order.deliveryAddressId) missingFields.push('адрес доставки');
+    if (!order.deliveryDate) missingFields.push('дату отгрузки');
+    if (missingFields.length) {
+      throw new ClientOrdersError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        `Заполните ${missingFields.join(', ')} перед отправкой в 1С`
+      );
+    }
+    const activeItems = order.items.filter((item) => !item.isCancelled);
+    if (!activeItems.length || activeItems.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
       throw new ClientOrdersError(
         400,
         ErrorCodes.VALIDATION_ERROR,
@@ -4025,6 +4417,8 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         queuedAt,
         cancelRequestedAt: null,
         cancelReason: null,
+        exportAttempts: 0,
+        lastExportError: null,
         last1cError: null,
         sourceUpdatedAt: queuedAt,
       },
@@ -4095,14 +4489,15 @@ export async function unqueueClientOrder(guid: string, userId: number, body: Cli
         syncState: true,
         source: true,
         isPostedIn1c: true,
+        hasRealization: true,
       },
     });
 
     if (!order) {
       throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
     }
-    if (order.isPostedIn1c) {
-      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Проведенный заказ в 1С доступен только для чтения');
+    if (order.hasRealization) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'По заказу создана реализация товаров и услуг. Документ доступен только для чтения');
     }
     if (!isOrderQueued(order)) {
       throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Снять с очереди можно только заказ в очереди');
@@ -4112,6 +4507,71 @@ export async function unqueueClientOrder(guid: string, userId: number, body: Cli
     await unqueueClientOrderInTransaction(tx, order, userId, 'Снят с очереди менеджером из приложения');
   });
 
+  requestClientOrdersExportWakeup();
+  return getClientOrderByGuid(guid);
+}
+
+export async function retryClientOrderExport(guid: string, userId: number, body: ClientOrderUnqueueBody) {
+  await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findFirst({
+      where: { guid, source: OrderSource.MANAGER_APP },
+      select: {
+        id: true,
+        guid: true,
+        revision: true,
+        status: true,
+        syncState: true,
+        source: true,
+        hasRealization: true,
+        items: { select: { id: true, isCancelled: true, quantity: true, basePrice: true } },
+      },
+    });
+
+    if (!order) {
+      throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+    }
+
+    ensureEditable(order);
+    assertRevision(order.revision, body.revision);
+
+    const activeItems = order.items.filter((item) => !item.isCancelled);
+    if (!activeItems.length || activeItems.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
+      throw new ClientOrdersError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'Исправьте строки с нулевым количеством или ценой перед повторной отправкой'
+      );
+    }
+
+    const queuedAt = now();
+    const nextRevision = order.revision + 1;
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        revision: nextRevision,
+        status: OrderStatus.QUEUED,
+        syncState: OrderSyncState.QUEUED,
+        queuedAt,
+        sentTo1cAt: null,
+        lastExportError: null,
+        last1cError: null,
+        exportAttempts: 0,
+        sourceUpdatedAt: queuedAt,
+      },
+    });
+
+    await appendOrderEvent(tx, {
+      orderId: order.id,
+      revision: nextRevision,
+      source: OrderEventSource.APP_MANAGER,
+      eventType: 'CLIENT_ORDER_EXPORT_RETRY_QUEUED',
+      actorUserId: userId,
+      note: 'Заказ повторно поставлен в очередь отправки в 1С',
+      payload: { queuedAt: queuedAt.toISOString() },
+    });
+  });
+
+  requestClientOrdersExportWakeup();
   return getClientOrderByGuid(guid);
 }
 
@@ -4211,6 +4671,7 @@ export async function restoreClientOrder(guid: string, userId: number, body: Cli
     });
   });
 
+  requestClientOrdersExportWakeup();
   return getClientOrderByGuid(guid);
 }
 
@@ -4226,6 +4687,7 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
         syncState: true,
         source: true,
         isPostedIn1c: true,
+        hasRealization: true,
       },
     });
 

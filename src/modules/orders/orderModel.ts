@@ -40,6 +40,8 @@ export const orderDetailSelect = {
   lastExportError: true,
   isPostedIn1c: true,
   postedAt1c: true,
+  hasRealization: true,
+  realizationDetectedAt: true,
   cancelRequestedAt: true,
   cancelReason: true,
   last1cError: true,
@@ -110,6 +112,12 @@ export const orderDetailSelect = {
       isActive: true,
     },
   },
+  priceType: {
+    select: {
+      guid: true,
+      name: true,
+    },
+  },
   createdByUser: {
     select: {
       id: true,
@@ -124,6 +132,7 @@ export const orderDetailSelect = {
     orderBy: [{ createdAt: 'asc' }],
     select: {
       id: true,
+      lineGuid: true,
       productId: true,
       quantity: true,
       quantityBase: true,
@@ -132,6 +141,11 @@ export const orderDetailSelect = {
       isManualPrice: true,
       manualPrice: true,
       priceSource: true,
+      isCancelled: true,
+      cancelReasonGuid: true,
+      cancelReasonName: true,
+      cancelReason: true,
+      cancelledAmount: true,
       priceType: {
         select: {
           guid: true,
@@ -217,6 +231,9 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     lastExportError: order.lastExportError,
     isPostedIn1c: order.isPostedIn1c,
     postedAt1c: order.postedAt1c,
+    hasRealization: order.hasRealization,
+    realizationDetectedAt: order.realizationDetectedAt,
+    readOnlyReason: order.hasRealization ? 'По заказу создана проведенная реализация товаров и услуг.' : null,
     cancelRequestedAt: order.cancelRequestedAt,
     cancelReason: order.cancelReason,
     last1cError: order.last1cError,
@@ -232,6 +249,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     warehouse: order.warehouse,
     deliveryAddress: order.deliveryAddress,
     organization: order.organization,
+    priceType: order.priceType,
     createdByUser: order.createdByUser
       ? {
           id: order.createdByUser.id,
@@ -244,6 +262,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
       : null,
     items: order.items.map((item) => ({
       id: item.id,
+      lineGuid: item.lineGuid,
       quantity: decimalToNumber(item.quantity),
       quantityBase: decimalToNumber(item.quantityBase),
       basePrice: decimalToNumber(item.basePrice),
@@ -251,6 +270,11 @@ export function mapOrderDetail(order: OrderDetailRecord) {
       isManualPrice: item.isManualPrice,
       manualPrice: decimalToNumber(item.manualPrice),
       priceSource: item.priceSource,
+      isCancelled: item.isCancelled,
+      cancelReasonGuid: item.cancelReasonGuid,
+      cancelReasonName: item.cancelReasonName,
+      cancelReason: item.cancelReason,
+      cancelledAmount: decimalToNumber(item.cancelledAmount),
       priceType: item.priceType,
       discountPercent: decimalToNumber(item.discountPercent),
       appliedDiscountPercent: decimalToNumber(item.appliedDiscountPercent),

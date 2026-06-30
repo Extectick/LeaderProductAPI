@@ -1,0 +1,12 @@
+ALTER TABLE "Order"
+  ADD COLUMN IF NOT EXISTS "hasRealization" BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS "realizationDetectedAt" TIMESTAMP(3);
+
+ALTER TABLE "OrderItem"
+  ADD COLUMN IF NOT EXISTS "isCancelled" BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS "cancelReasonGuid" TEXT,
+  ADD COLUMN IF NOT EXISTS "cancelReasonName" TEXT,
+  ADD COLUMN IF NOT EXISTS "cancelReason" TEXT,
+  ADD COLUMN IF NOT EXISTS "cancelledAmount" DECIMAL(18, 2);
+
+CREATE INDEX IF NOT EXISTS "Order_hasRealization_idx" ON "Order"("hasRealization");

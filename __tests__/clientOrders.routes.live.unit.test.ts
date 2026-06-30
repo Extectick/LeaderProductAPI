@@ -35,6 +35,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     createClientOrder: jest.fn(),
     deleteDraftClientOrder: jest.fn(),
     getClientOrderByGuid: jest.fn(),
+    getClientOrderExportDebug: jest.fn(),
     getClientOrderDefaults: jest.fn(),
     getClientOrderReferenceDetails: jest.fn(),
     getClientOrderSettings: jest.fn(),
@@ -48,6 +49,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     getClientOrdersReferenceData: jest.fn(),
     getClientOrdersWarehouses: jest.fn(),
     listClientOrders: jest.fn(),
+    retryClientOrderExport: jest.fn(),
     restoreClientOrder: jest.fn(),
     submitClientOrder: jest.fn(),
     unqueueClientOrder: jest.fn(),
@@ -288,6 +290,47 @@ describe('/api/client-orders live reference routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.ok).toBe(false);
     expect(service.unqueueClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('routes queued retry-export requests to the service', async () => {
+    jest.mocked(service.retryClientOrderExport).mockResolvedValueOnce({
+      guid: 'order-guid',
+      status: 'QUEUED',
+      syncState: 'QUEUED',
+      revision: 9,
+      items: [],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .post('/api/client-orders/order-guid/retry-export')
+      .send({ revision: 8 });
+
+    expect(response.status).toBe(200);
+    expect(service.retryClientOrderExport).toHaveBeenCalledWith('order-guid', 1, { revision: 8 });
+    expect(response.body.data).toMatchObject({ guid: 'order-guid', status: 'QUEUED', syncState: 'QUEUED' });
+  });
+
+  it('routes order export debug requests to the service', async () => {
+    jest.mocked(service.getClientOrderExportDebug).mockResolvedValueOnce({
+      guid: 'order-guid',
+      status: 'ERROR',
+      syncState: 'ERROR',
+      revision: 4,
+      items: [{ lineGuid: 'line-guid-1', product: { guid: 'product-guid', name: 'Товар' } }],
+      events: [],
+    } as any);
+
+    const response = await request(app)
+      .get('/api/client-orders/order-guid/export-debug');
+
+    expect(response.status).toBe(200);
+    expect(service.getClientOrderExportDebug).toHaveBeenCalledWith('order-guid');
+    expect(response.body.data).toMatchObject({
+      guid: 'order-guid',
+      status: 'ERROR',
+      items: [{ lineGuid: 'line-guid-1' }],
+    });
   });
 
   it('routes order copy requests to the service', async () => {

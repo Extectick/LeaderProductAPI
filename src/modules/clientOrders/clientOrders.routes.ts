@@ -37,6 +37,7 @@ import {
   createClientOrder,
   deleteDraftClientOrder,
   getClientOrderByGuid,
+  getClientOrderExportDebug,
   getClientOrderDefaults,
   getClientOrderProductImagesStatus,
   getClientOrderReferenceDetails,
@@ -51,6 +52,7 @@ import {
   getClientOrdersReferenceData,
   getClientOrdersWarehouses,
   listClientOrders,
+  retryClientOrderExport,
   restoreClientOrder,
   syncClientOrderProductImages,
   submitClientOrder,
@@ -397,6 +399,20 @@ router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: A
   }
 });
 
+router.get('/:guid/export-debug', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = orderGuidParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await getClientOrderExportDebug(parsed.data.guid);
+    return res.json(successResponse(result, 'Отладочная информация отправки заказа клиента'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения отладочной информации заказа клиента');
+  }
+});
+
 router.post('/', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
   const parsed = clientOrderCreateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -476,6 +492,24 @@ router.post('/:guid/unqueue', authorizePermissions(['manage_client_orders']), as
     return res.json(successResponse(result, 'Заказ клиента снят с очереди'));
   } catch (err) {
     return handleError(res, err, 'Ошибка снятия заказа клиента с очереди');
+  }
+});
+
+router.post('/:guid/retry-export', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  const body = clientOrderUnqueueSchema.safeParse(req.body);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await retryClientOrderExport(params.data.guid, req.user!.userId, body.data);
+    return res.json(successResponse(result, 'Заказ клиента повторно поставлен в очередь'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка повторной постановки заказа клиента в очередь');
   }
 });
 

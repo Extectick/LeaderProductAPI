@@ -1,6 +1,7 @@
 import {
   findLiveCounterparty,
   getLiveAgreements,
+  getLiveClientOrder,
   getLiveClientOrderDefaults,
   getLiveContracts,
   getLiveCounterparties,
@@ -16,6 +17,7 @@ import {
 import {
   getOnecLpAppAgreements,
   getOnecLpAppClientOrderDefaults,
+  getOnecLpAppClientOrder,
   getOnecLpAppClientOrders,
   getOnecLpAppContracts,
   getOnecLpAppCounterparties,
@@ -30,6 +32,7 @@ import {
 jest.mock('../src/modules/onec/onec.lpApp.client', () => ({
   getOnecLpAppAgreements: jest.fn(),
   getOnecLpAppClientOrderDefaults: jest.fn(),
+  getOnecLpAppClientOrder: jest.fn(),
   getOnecLpAppClientOrders: jest.fn(),
   getOnecLpAppContracts: jest.fn(),
   getOnecLpAppCounterparties: jest.fn(),
@@ -47,6 +50,7 @@ const counterpartiesMock = jest.mocked(getOnecLpAppCounterparties);
 const contractsMock = jest.mocked(getOnecLpAppContracts);
 const agreementsMock = jest.mocked(getOnecLpAppAgreements);
 const clientOrderDefaultsMock = jest.mocked(getOnecLpAppClientOrderDefaults);
+const clientOrderMock = jest.mocked(getOnecLpAppClientOrder);
 const clientOrdersMock = jest.mocked(getOnecLpAppClientOrders);
 const deliveryAddressesMock = jest.mocked(getOnecLpAppDeliveryAddresses);
 const priceTypesMock = jest.mocked(getOnecLpAppPriceTypes);
@@ -373,6 +377,35 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12 });
   });
 
+  it('finds products by unordered search tokens when 1C phrase search misses', async () => {
+    nomenclatureMock
+      .mockResolvedValueOnce(paged([]))
+      .mockResolvedValueOnce(
+        paged([
+          { guid: 'product-1', name: 'Филе кеты свежемороженое', code: 'UT-1', isActive: true },
+          { guid: 'product-2', name: 'Филе трески', code: 'UT-2', isActive: true },
+        ])
+      )
+      .mockResolvedValueOnce(
+        paged([
+          { guid: 'product-1', name: 'Филе кеты свежемороженое', code: 'UT-1', isActive: true },
+          { guid: 'product-3', name: 'Кета стейк', code: 'UT-3', isActive: true },
+        ])
+      );
+
+    const result = await getLiveProducts({
+      limit: 25,
+      offset: 0,
+      search: 'кеты филе',
+      includeInactive: false,
+    });
+
+    expect(nomenclatureMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ search: 'кеты филе' }));
+    expect(nomenclatureMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ search: 'кеты' }));
+    expect(nomenclatureMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ search: 'филе' }));
+    expect(result.items.map((item) => item.guid)).toEqual(['product-1']);
+  });
+
   it('loads missing product details by guid and keeps requested order', async () => {
     nomenclatureMock.mockResolvedValueOnce(
       paged([
@@ -470,6 +503,65 @@ describe('clientOrders 1C live adapter', () => {
       readOnly: true,
       counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
       itemsCount: 2,
+    });
+  });
+
+  it('normalizes live client order detail line guids for stable row matching', async () => {
+    clientOrderMock.mockResolvedValueOnce({
+      item: {
+        guid: 'onec-document-guid',
+        documentGuid: 'onec-document-guid',
+        appGuid: 'local-app-guid',
+        documentNumber: '00-000123',
+        documentDate: '2026-06-25T09:00:00.000Z',
+        counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
+        totalAmount: 100,
+        items: [
+          {
+            lineGuid: 'line-guid-1',
+            product: { guid: 'product-guid', name: 'Товар' },
+            quantity: 2,
+            quantityBase: 20,
+            price: 100,
+            basePrice: 100,
+            isManualPrice: true,
+            manualPrice: 100,
+            priceSource: 'manual',
+            priceType: null,
+            lineAmount: 2000,
+            package: { guid: 'box-10', name: 'кор (10 кг)', multiplier: 10 },
+            unit: { guid: 'kg', name: 'Килограмм', symbol: 'кг' },
+          },
+        ],
+      },
+    });
+
+    const result = await getLiveClientOrder('onec-document-guid', {
+      managerGuid: 'manager-guid',
+      appGuid: 'local-app-guid',
+    });
+
+    expect(clientOrderMock).toHaveBeenCalledWith(
+      'onec-document-guid',
+      expect.objectContaining({
+        managerGuid: 'manager-guid',
+        appGuid: 'local-app-guid',
+        includeItems: true,
+      })
+    );
+    expect(result.items[0]).toMatchObject({
+      lineGuid: 'line-guid-1',
+      quantity: 2,
+      quantityBase: 20,
+      basePrice: 100,
+      isManualPrice: true,
+      manualPrice: 100,
+      priceSource: 'manual',
+      priceType: null,
+      lineAmount: 2000,
+      product: { guid: 'product-guid', name: 'Товар' },
+      package: { guid: 'box-10', name: 'кор (10 кг)', multiplier: 10 },
+      unit: { guid: 'kg', name: 'Килограмм', symbol: 'кг' },
     });
   });
 
