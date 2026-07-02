@@ -106,6 +106,7 @@ describe('/api/client-orders live reference routes', () => {
       total: 3,
       limit: 20,
       offset: 0,
+      hasMore: true,
       statusCounts: { DRAFT: 1, SENT_TO_1C: 2 },
       liveSource: { status: 'ok' },
     } as any);
@@ -122,9 +123,31 @@ describe('/api/client-orders live reference routes', () => {
       count: 1,
       limit: 20,
       offset: 0,
+      hasMore: true,
       statusCounts: { DRAFT: 1, SENT_TO_1C: 2 },
       liveSource: { status: 'ok' },
     });
+  });
+
+  it('accepts multi-status order filters with legacy status compatibility', async () => {
+    jest.mocked(service.listClientOrders).mockResolvedValueOnce({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      statusCounts: {},
+      liveSource: { status: 'ok' },
+    } as any);
+
+    const response = await request(app)
+      .get('/api/client-orders')
+      .query({ status: 'QUEUED', statuses: 'TO_SHIP,SHIPPING_IN_PROGRESS' });
+
+    expect(response.status).toBe(200);
+    expect(service.listClientOrders).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'QUEUED',
+      statuses: ['TO_SHIP', 'SHIPPING_IN_PROGRESS'],
+    }), 1);
   });
 
   it('returns validated counterparties with pagination metadata', async () => {

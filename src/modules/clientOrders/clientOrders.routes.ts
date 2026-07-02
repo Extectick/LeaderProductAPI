@@ -83,15 +83,20 @@ const handleError = (res: express.Response, err: unknown, fallbackMessage: strin
   return res.status(500).json(errorResponse(fallbackMessage, ErrorCodes.INTERNAL_ERROR));
 };
 
-const pagedMeta = (total: number, count: number, limit: number, offset: number) => ({
+const pagedMeta = (total: number, count: number, limit: number, offset: number, hasMore?: boolean) => ({
   total,
   count,
   limit,
   offset,
+  ...(typeof hasMore === 'boolean' ? { hasMore } : {}),
 });
 
 router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
-  const parsed = clientOrdersListQuerySchema.safeParse(req.query);
+  const rawQuery = req.query as Record<string, unknown>;
+  const parsed = clientOrdersListQuerySchema.safeParse({
+    ...rawQuery,
+    statuses: rawQuery.statuses ?? rawQuery['statuses[]'],
+  });
   if (!parsed.success) {
     return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
@@ -103,7 +108,7 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
         { items: result.items },
         'Список заказов клиентов',
         {
-          ...pagedMeta(result.total, result.items.length, result.limit, result.offset),
+          ...pagedMeta(result.total, result.items.length, result.limit, result.offset, result.hasMore),
           statusCounts: result.statusCounts,
           liveSource: result.liveSource,
         }

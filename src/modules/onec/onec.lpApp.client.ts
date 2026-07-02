@@ -33,6 +33,7 @@ type RouteOrderBody = {
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_WRITE_TIMEOUT_MS = 60_000;
 
 function getRequiredEnv(name: string) {
   const value = process.env[name]?.trim();
@@ -49,6 +50,11 @@ function getApiKey() {
 function getTimeoutMs() {
   const raw = Number(process.env.ONEC_LP_APP_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_TIMEOUT_MS;
+}
+
+function getWriteTimeoutMs() {
+  const raw = Number(process.env.ONEC_LP_APP_WRITE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_WRITE_TIMEOUT_MS;
 }
 
 function buildUrl(path: string, query?: OnecLpAppQuery) {
@@ -105,10 +111,13 @@ async function readResponsePayload(response: Response) {
   }
 }
 
-async function callOnecLpApp(path: string, options: { method?: string; query?: OnecLpAppQuery; body?: unknown } = {}) {
+async function callOnecLpApp(path: string, options: { method?: string; query?: OnecLpAppQuery; body?: unknown; timeoutMs?: number } = {}) {
   const method = options.method ?? 'GET';
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
+    ? Math.trunc(Number(options.timeoutMs))
+    : getTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(buildUrl(path, options.query), {
@@ -290,6 +299,7 @@ export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
   return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, {
     method: 'PUT',
     body,
+    timeoutMs: getWriteTimeoutMs(),
   });
 }
 
@@ -297,6 +307,7 @@ export function postOnecLpAppClientOrder(body: unknown) {
   return callOnecLpApp('/client-orders', {
     method: 'POST',
     body,
+    timeoutMs: getWriteTimeoutMs(),
   });
 }
 

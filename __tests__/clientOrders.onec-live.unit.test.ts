@@ -205,6 +205,9 @@ describe('clientOrders 1C live adapter', () => {
           name: 'Основной адрес',
           fullAddress: 'Новосибирск, ул. Ленина, 1',
           address: 'Новосибирск, ул. Ленина, 1',
+          deliveryComment: 'с 9:00 - 18:00 79681015385',
+          kindName: 'Адрес доставки 1',
+          deliveryNumber: '1',
           counterpartyGuid: 'counterparty-guid',
           isDefault: true,
           isActive: true,
@@ -249,6 +252,9 @@ describe('clientOrders 1C live adapter', () => {
     expect(addressPage.items[0]).toMatchObject({
       guid: 'address-guid',
       fullAddress: 'Новосибирск, ул. Ленина, 1',
+      deliveryComment: 'с 9:00 - 18:00 79681015385',
+      kindName: 'Адрес доставки 1',
+      deliveryNumber: '1',
       counterpartyGuid: 'counterparty-guid',
       isDefault: true,
       isActive: true,
@@ -258,6 +264,42 @@ describe('clientOrders 1C live adapter', () => {
     expect(contractPage.items[0].organization).toMatchObject({ guid: 'org-guid', name: 'Организация' });
     expect(agreementPage.items[0].organization).toMatchObject({ guid: 'org-guid', name: 'Организация' });
     expect(contractsMock).toHaveBeenCalledWith(expect.objectContaining({ counterpartyGuid: 'counterparty-guid' }));
+  });
+
+  it('passes numeric delivery-address searches as exact delivery address number filters', async () => {
+    deliveryAddressesMock.mockResolvedValueOnce(
+      paged([
+        {
+          guid: 'address-33',
+          name: 'Адрес',
+          fullAddress: 'Омск, ул. Бархатовой, 2',
+          kindName: 'Адрес доставки 33',
+          counterpartyGuid: 'counterparty-guid',
+          isActive: true,
+        },
+      ])
+    );
+
+    const result = await getLiveDeliveryAddresses({
+      limit: 25,
+      offset: 0,
+      counterpartyGuid: 'counterparty-guid',
+      search: '33',
+      includeInactive: false,
+    });
+
+    expect(deliveryAddressesMock).toHaveBeenCalledWith(expect.objectContaining({
+      counterpartyGuid: 'counterparty-guid',
+      search: '33',
+      deliveryAddressNumber: '33',
+    }));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      guid: 'address-33',
+      deliveryNumber: '33',
+      number: '33',
+      kindName: 'Адрес доставки 33',
+    });
   });
 
   it('returns empty scoped lists without calling 1C when required context is missing', async () => {
@@ -503,6 +545,42 @@ describe('clientOrders 1C live adapter', () => {
       readOnly: true,
       counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
       itemsCount: 2,
+    });
+  });
+
+  it('normalizes live client order warehouse from flat summary fields', async () => {
+    clientOrdersMock.mockResolvedValueOnce(
+      paged(
+        [
+          {
+            guid: 'onec-document-guid',
+            documentGuid: 'onec-document-guid',
+            appGuid: 'local-app-guid',
+            documentNumber: '00-000124',
+            documentDate: '2026-06-25T09:00:00.000Z',
+            counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
+            organization: { guid: 'org-guid', name: 'Организация' },
+            warehouseGuid: 'warehouse-flat-guid',
+            warehouseName: 'Склад из строки списка',
+            totalAmount: 1250,
+            itemsCount: 2,
+          },
+        ],
+        { limit: 20, offset: 0, total: 1 }
+      )
+    );
+
+    const result = await getLiveClientOrders({
+      limit: 20,
+      offset: 0,
+      managerGuid: 'manager-guid',
+      onlyProblems: false,
+    });
+
+    expect(result.items[0].warehouse).toEqual({
+      guid: 'warehouse-flat-guid',
+      name: 'Склад из строки списка',
+      code: null,
     });
   });
 

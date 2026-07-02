@@ -94,10 +94,20 @@ const clientOrderStatusSchema = z.enum([
   'CLOSED',
 ]);
 
+const clientOrderStatusesQuerySchema = z.preprocess((value) => {
+  const raw = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  const values = raw
+    .flatMap((item) => String(item ?? '').split(','))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length ? Array.from(new Set(values)) : undefined;
+}, z.array(clientOrderStatusSchema).optional());
+
 export const clientOrdersListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
   status: clientOrderStatusSchema.optional(),
+  statuses: clientOrderStatusesQuerySchema,
   syncState: z.nativeEnum(OrderSyncState).optional(),
   search: z.string().trim().min(1).optional(),
   counterpartyGuid: z.string().trim().min(1).optional(),
@@ -153,6 +163,7 @@ export const clientOrdersPriceTypesQuerySchema = pagedSearchQuerySchema;
 export const clientOrdersDeliveryAddressesQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
   organizationGuid: z.string().trim().min(1).optional(),
+  deliveryAddressNumber: z.string().trim().min(1).optional(),
 });
 
 export const clientOrdersProductsQuerySchema = pagedSearchQuerySchema.extend({

@@ -3,10 +3,27 @@ name: Build & Deploy API
 on:
   push:
     branches: [dev, production]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to publish/deploy'
+        required: false
+        default: latest
+      git_ref:
+        description: 'Git branch/tag/commit to checkout on the production server'
+        required: false
+        default: main
+      deploy:
+        description: 'Deploy to production after image push'
+        required: false
+        type: boolean
+        default: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: extectick/leaderproductapi
 
 jobs:
   build-and-push:
@@ -15,25 +32,59 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image_tag: ${{ steps.vars.outputs.tag }}
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      git_ref: ${{ steps.vars.outputs.git_ref }}
+      deploy: ${{ steps.vars.outputs.deploy }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set image tag
+      - name: Set deploy vars
         id: vars
+        shell: bash
         run: |
-          if [ "${{ github.ref_name }}" = "production" ]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
-          else
-            echo "tag=dev" >> $GITHUB_OUTPUT
+          deploy=false
+          git_ref="${GITHUB_REF_NAME}"
+          image_tag=dev
+          publish_latest=false
+
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            image_tag="${{ github.event.release.tag_name }}"
+            git_ref="${{ github.event.release.tag_name }}"
+            deploy=true
+            publish_latest=true
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            image_tag="${{ inputs.image_tag }}"
+            git_ref="${{ inputs.git_ref }}"
+            deploy="${{ inputs.deploy }}"
+            [ -n "$image_tag" ] || image_tag=latest
+            [ -n "$git_ref" ] || git_ref=main
+            [ "$image_tag" = "latest" ] && publish_latest=true
+          elif [ "${GITHUB_REF_NAME}" = "production" ]; then
+            image_tag=latest
+            git_ref=production
+            deploy=true
+            publish_latest=true
           fi
+
+          {
+            echo "tags<<EOF"
+            echo "${REGISTRY}/${IMAGE_NAME}:${image_tag}"
+            echo "${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}"
+            if [ "$publish_latest" = "true" ] && [ "$image_tag" != "latest" ]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+            echo "image_tag=$image_tag"
+            echo "git_ref=$git_ref"
+            echo "deploy=$deploy"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -45,42 +96,31 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ steps.vars.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
+  deploy-production:
     needs: build-and-push
+    if: needs.build-and-push.outputs.deploy == 'true'
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'production' && 'production' || 'development' }}
+    permissions:
+      contents: read
+      packages: read
+    environment: production
 
     steps:
-      - name: Deploy to server via SSH
+      - name: Deploy production API
         uses: appleboy/ssh-action@v1
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          GHCR_USER: ${{ secrets.GHCR_USER }}
-          PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
-          ENV_FILE: ${{ secrets.ENV_FILE }}
+          GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,PROJECT_PATH,IMAGE_TAG,ENV_FILE
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
           script: |
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            cd "$PROJECT_PATH"
-
-            # Обновить .env.production из секретов (если задан)
-            if [ -n "$ENV_FILE" ]; then
-              echo "$ENV_FILE" > .env.production
-            fi
-
-            export IMAGE_TAG="$IMAGE_TAG"
-            docker compose pull api
-            docker compose up -d api
-            docker compose restart studio
-            docker image prune -f
+            /opt/leader-deploy/deploy.sh api "$IMAGE_TAG" "$GIT_REF"

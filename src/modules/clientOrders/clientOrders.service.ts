@@ -101,6 +101,7 @@ type PagedResult<T> = {
   total: number;
   limit: number;
   offset: number;
+  hasMore?: boolean;
 };
 
 type ReferenceDetailsRow = { label: string; value: unknown };
@@ -441,6 +442,13 @@ function normalizeSearch(search?: string) {
   return trimmed ? trimmed : undefined;
 }
 
+function searchTokens(search?: string) {
+  return normalizeSearch(search)
+    ?.split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean) ?? [];
+}
+
 function buildReferenceWhere(includeInactive: boolean) {
   return includeInactive ? {} : { isActive: true };
 }
@@ -636,6 +644,12 @@ function mapDeliveryAddressSummary(
         guid: string | null;
         name?: string | null;
         fullAddress: string;
+        deliveryNumber?: string | null;
+        number?: string | null;
+        comment?: string | null;
+        deliveryComment?: string | null;
+        kindName?: string | null;
+        contactInfoKind?: string | null;
         isDefault?: boolean;
         isActive?: boolean;
       }
@@ -647,6 +661,12 @@ function mapDeliveryAddressSummary(
     guid: address.guid,
     name: address.name ?? null,
     fullAddress: address.fullAddress,
+    deliveryNumber: address.deliveryNumber ?? address.number ?? null,
+    number: address.number ?? address.deliveryNumber ?? null,
+    comment: address.comment ?? address.deliveryComment ?? null,
+    deliveryComment: address.deliveryComment ?? address.comment ?? null,
+    kindName: address.kindName ?? address.contactInfoKind ?? null,
+    contactInfoKind: address.contactInfoKind ?? address.kindName ?? null,
     isDefault: address.isDefault ?? false,
     isActive: address.isActive ?? true,
   };
@@ -2357,6 +2377,162 @@ const PINNED_LOCAL_SYNC_STATES: OrderSyncState[] = [
 ];
 
 const LOCAL_ORDER_STATUS_VALUES = new Set<string>(Object.values(OrderStatus));
+const LIVE_STATUS_FILTER_SCAN_LIMIT = 300;
+
+function getOrderStatusFilters(query: Pick<ClientOrdersListQuery, 'status' | 'statuses'>) {
+  return Array.from(new Set([
+    ...(Array.isArray(query.statuses) ? query.statuses : []),
+    ...(query.status ? [query.status] : []),
+  ].filter(Boolean)));
+}
+
+function mapOnecOrderStatusForFilter(value?: string | null) {
+  const normalized = (value || '').trim().toLocaleLowerCase('ru').replace(/\s+/g, '');
+  if (!normalized) return null;
+  if (normalized.includes('ожидаетсясоглас')) return 'AWAITING_APPROVAL';
+  if (normalized.includes('ожидаетсяавансдообеспеч')) return 'AWAITING_ADVANCE_BEFORE_SUPPLY';
+  if (normalized.includes('готовкобеспеч')) return 'READY_FOR_SUPPLY';
+  if (normalized.includes('ожидаетсяпредоплатадоотгруз')) return 'AWAITING_PREPAYMENT_BEFORE_SHIPMENT';
+  if (normalized.includes('ожидаетсяобеспеч')) return 'AWAITING_SUPPLY';
+  if (normalized.includes('готовкотгруз')) return 'READY_FOR_SHIPMENT';
+  if (normalized.includes('впроцессеотгруз')) return 'SHIPPING_IN_PROGRESS';
+  if (normalized.includes('ожидаетсяоплатапослеотгруз')) return 'AWAITING_PAYMENT_AFTER_SHIPMENT';
+  if (normalized.includes('готовкзакры')) return 'READY_TO_CLOSE';
+  if (normalized.includes('котгруз')) return 'TO_SHIP';
+  if (normalized.includes('кобеспеч')) return 'TO_SUPPLY';
+  if (normalized.includes('резерв')) return 'IN_RESERVE';
+  if (normalized.includes('квыполн')) return 'TO_FULFILLMENT';
+  if (normalized.includes('отмен')) return 'CANCELLED';
+  if (normalized.includes('отклон')) return 'REJECTED';
+  if (normalized.includes('несоглас') || normalized.includes('неподтверж')) return 'NOT_CONFIRMED';
+  if (normalized.includes('частич')) return 'PARTIAL';
+  if (normalized.includes('выполн')) return 'COMPLETED';
+  if (normalized.includes('закры')) return 'CLOSED';
+  if (normalized.includes('подтверж')) return 'CONFIRMED';
+  return null;
+}
+
+function getOrderDisplayStatusForFilter(order: {
+  status?: string | null;
+  number1c?: string | null;
+  origin?: string | null;
+  status1c?: string | null;
+  currentState1c?: string | null;
+}) {
+  const onecText = order.currentState1c || order.status1c;
+  const isOnecBacked = Boolean(order.number1c || order.origin === 'onec' || order.origin === 'merged');
+  if (isOnecBacked && onecText) return mapOnecOrderStatusForFilter(onecText) || order.status || onecText;
+  return order.status || mapOnecOrderStatusForFilter(onecText) || OrderStatus.DRAFT;
+}
+
+function normalizedGuid(value?: string | null) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function sameGuid(left?: string | null, right?: string | null) {
+  const leftGuid = normalizedGuid(left);
+  const rightGuid = normalizedGuid(right);
+  return !!leftGuid && !!rightGuid && leftGuid === rightGuid;
+}
+
+function orderDateTime(value?: Date | string | null) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function endOfDateTime(value: Date) {
+  const next = new Date(value);
+  next.setHours(23, 59, 59, 999);
+  return next.getTime();
+}
+
+function liveOrderHasProblem(order: {
+  lastExportError?: unknown;
+  last1cError?: unknown;
+  cancelRequestedAt?: Date | string | null;
+  syncState?: string | null;
+}) {
+  return !!(
+    order.lastExportError ||
+    order.last1cError ||
+    order.cancelRequestedAt ||
+    ['ERROR', 'FAILED', 'CONFLICT', 'CANCEL_REQUESTED'].includes(String(order.syncState || ''))
+  );
+}
+
+function liveOrderHasPriceType(order: {
+  priceType?: { guid?: string | null } | null;
+  items?: Array<{ priceType?: { guid?: string | null } | null }>;
+}, priceTypeGuid?: string | null) {
+  if (!priceTypeGuid) return true;
+  if (sameGuid(order.priceType?.guid, priceTypeGuid)) return true;
+  return (order.items || []).some((item) => sameGuid(item.priceType?.guid, priceTypeGuid));
+}
+
+function orderMatchesListQuery(
+  order: LiveClientOrder & {
+    origin?: string | null;
+    syncState?: string | null;
+    lastExportError?: unknown;
+    last1cError?: unknown;
+    cancelRequestedAt?: Date | string | null;
+  },
+  query: ClientOrdersListQuery,
+  statusFilters: string[]
+) {
+  if (statusFilters.length) {
+    const status = String(getOrderDisplayStatusForFilter(order));
+    if (!statusFilters.includes(status)) return false;
+  }
+  if (query.counterpartyGuid && !sameGuid(order.counterparty?.guid, query.counterpartyGuid)) return false;
+  if (query.organizationGuid && !sameGuid(order.organization?.guid, query.organizationGuid)) return false;
+  if (query.warehouseGuid && !sameGuid(order.warehouse?.guid, query.warehouseGuid)) return false;
+  if (query.priceTypeGuid && !liveOrderHasPriceType(order, query.priceTypeGuid)) return false;
+  if (query.syncState && order.syncState !== query.syncState) return false;
+  if (query.onlyProblems && !liveOrderHasProblem(order)) return false;
+  if (query.hasNumber1c === 'yes' && !order.number1c) return false;
+  if (query.hasNumber1c === 'no' && order.number1c) return false;
+
+  const amount = Number(order.totalAmount || 0);
+  if (query.amountMin !== undefined && amount < query.amountMin) return false;
+  if (query.amountMax !== undefined && amount > query.amountMax) return false;
+
+  const itemsCount = Number(order.itemsCount ?? order.items?.length ?? 0);
+  if (query.itemsMin !== undefined && itemsCount < query.itemsMin) return false;
+  if (query.itemsMax !== undefined && itemsCount > query.itemsMax) return false;
+
+  const deliveryDate = orderDateTime(order.deliveryDate);
+  if (query.deliveryDateFrom && (deliveryDate === null || deliveryDate < query.deliveryDateFrom.getTime())) return false;
+  if (query.deliveryDateTo && (deliveryDate === null || deliveryDate > endOfDateTime(query.deliveryDateTo))) return false;
+
+  const updatedDate = orderDateTime(order.updatedAt || order.sentTo1cAt || order.createdAt);
+  if (query.updatedFrom && (updatedDate === null || updatedDate < query.updatedFrom.getTime())) return false;
+  if (query.updatedTo && (updatedDate === null || updatedDate > endOfDateTime(query.updatedTo))) return false;
+
+  const tokens = searchTokens(query.search || '').map((token) => token.toLocaleLowerCase('ru'));
+  if (tokens.length) {
+    const values = [
+      order.guid,
+      order.appGuid,
+      order.number1c,
+      order.comment,
+      order.organization?.name,
+      order.counterparty?.name,
+      order.warehouse?.name,
+      order.status,
+      order.status1c,
+      order.currentState1c,
+      order.documentStatus1c,
+    ];
+    if (!tokens.every((token) => values.some((value) => String(value || '').toLocaleLowerCase('ru').includes(token)))) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 type LocalOrderWhereBuildResult = {
   where: Prisma.OrderWhereInput;
@@ -2373,10 +2549,9 @@ async function getManagerGuidForUser(userId: number) {
 
 async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<LocalOrderWhereBuildResult> {
   const search = normalizeSearch(query.search);
-  const localStatus = query.status && LOCAL_ORDER_STATUS_VALUES.has(query.status)
-    ? query.status as OrderStatus
-    : null;
-  const hasLiveOnlyStatus = !!query.status && !localStatus;
+  const statusFilters = getOrderStatusFilters(query);
+  const localStatuses = statusFilters.filter((status): status is OrderStatus => LOCAL_ORDER_STATUS_VALUES.has(status));
+  const hasOnlyLiveStatuses = statusFilters.length > 0 && localStatuses.length === 0;
   const itemCountFilters = query.itemsMin !== undefined || query.itemsMax !== undefined;
   const itemCountOrderIds = itemCountFilters
     ? await prisma.orderItem.groupBy({
@@ -2402,7 +2577,7 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<Loca
     return next;
   };
   const and: Prisma.OrderWhereInput[] = [];
-  if (hasLiveOnlyStatus) {
+  if (hasOnlyLiveStatuses) {
     and.push({ guid: { equals: '__unsupported_live_status__' } });
   }
   if (query.onlyProblems) {
@@ -2415,20 +2590,22 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<Loca
       ],
     });
   }
-  if (search) {
+  const tokens = searchTokens(search);
+  for (const token of tokens) {
     and.push({
       OR: [
-        { guid: { contains: search, mode: 'insensitive' } },
-        { number1c: { contains: search, mode: 'insensitive' } },
-        { comment: { contains: search, mode: 'insensitive' } },
-        { counterparty: { name: { contains: search, mode: 'insensitive' } } },
+        { guid: { contains: token, mode: 'insensitive' } },
+        { number1c: { contains: token, mode: 'insensitive' } },
+        { comment: { contains: token, mode: 'insensitive' } },
+        { organization: { name: { contains: token, mode: 'insensitive' } } },
+        { counterparty: { name: { contains: token, mode: 'insensitive' } } },
       ],
     });
   }
   const where: Prisma.OrderWhereInput = {
     source: OrderSource.MANAGER_APP,
     ...(and.length ? { AND: and } : {}),
-    ...(localStatus ? { status: localStatus } : {}),
+    ...(localStatuses.length ? { status: { in: localStatuses } } : {}),
     ...(query.syncState ? { syncState: query.syncState } : {}),
     ...(query.counterpartyGuid ? { counterparty: { guid: query.counterpartyGuid } } : {}),
     ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
@@ -2545,8 +2722,53 @@ function liveUnavailableMeta(error: unknown) {
   return { status: 'error', message: 'Не удалось загрузить документы из 1С.' };
 }
 
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function enrichLiveOrdersForWarehouseFilter(
+  items: LiveClientOrder[],
+  query: ClientOrdersListQuery,
+  managerGuid: string
+) {
+  if (!query.warehouseGuid || !items.some((item) => !item.warehouse?.guid)) return items;
+
+  const enriched = await mapWithConcurrency(items, 4, async (item) => {
+    if (item.warehouse?.guid) return item;
+    const detailGuid = item.documentGuid || item.guid;
+    if (!detailGuid) return item;
+
+    try {
+      return await onecLive(
+        () => readThroughClientOrdersCache(
+          'orders:detail',
+          { guid: detailGuid, managerGuid, appGuid: item.appGuid ?? undefined },
+          CLIENT_ORDERS_CACHE_TTL.orderDetail,
+          () => getLiveClientOrder(detailGuid, { managerGuid, appGuid: item.appGuid ?? undefined })
+        ),
+        'Ошибка получения detail заказа клиента из 1С для фильтра склада',
+        { allowCachedWhenCircuitOpen: true }
+      );
+    } catch {
+      return item;
+    }
+  });
+
+  return enriched;
+}
+
 export async function listClientOrders(query: ClientOrdersListQuery, userId: number) {
   const { where, statusCountsWhere } = await buildLocalOrdersWhere(query);
+  const statusFilters = getOrderStatusFilters(query);
   const pinnedWhere: Prisma.OrderWhereInput = {
     AND: [
       where,
@@ -2598,15 +2820,38 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     : { status: 'not_configured', message: 'В профиле сотрудника не заполнен GUID пользователя 1С.' };
   let liveItems: LiveClientOrder[] = [];
   let liveTotal = 0;
+  let liveHasMore = false;
   const liveOffset = Math.max(0, query.offset - pinnedTotal);
+  const liveStatusForOnec = statusFilters.length === 1 ? statusFilters[0] : undefined;
+  const livePostFilterActive = statusFilters.length > 1 ||
+    Boolean(
+      query.priceTypeGuid ||
+      query.syncState ||
+      query.amountMin !== undefined ||
+      query.amountMax !== undefined ||
+      query.deliveryDateFrom ||
+      query.deliveryDateTo ||
+      query.updatedFrom ||
+      query.updatedTo ||
+      query.itemsMin !== undefined ||
+      query.itemsMax !== undefined ||
+      query.hasNumber1c ||
+      query.onlyProblems
+    );
+  const liveQueryOffset = livePostFilterActive ? 0 : liveOffset;
+  const liveQueryLimit = livePostFilterActive
+    ? Math.min(LIVE_STATUS_FILTER_SCAN_LIMIT, Math.max(liveOffset + query.limit, query.limit * 5))
+    : query.limit;
 
   if (managerGuid) {
     try {
       const liveQuery = {
         ...query,
+        status: liveStatusForOnec,
+        statuses: undefined,
         managerGuid,
-        offset: liveOffset,
-        limit: query.limit,
+        offset: liveQueryOffset,
+        limit: liveQueryLimit,
       };
       const livePage = await onecLive(
         () => readThroughClientOrdersCache(
@@ -2618,12 +2863,14 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
         'Ошибка получения live-списка заказов из 1С',
         { allowCachedWhenCircuitOpen: true }
       );
-      liveItems = livePage.items;
+      liveItems = await enrichLiveOrdersForWarehouseFilter(livePage.items, query, managerGuid);
       liveTotal = livePage.total;
+      liveHasMore = Boolean(livePage.hasMore ?? (liveQueryOffset + livePage.items.length < livePage.total));
     } catch (error) {
       liveMeta = liveUnavailableMeta(error);
       liveItems = [];
       liveTotal = 0;
+      liveHasMore = false;
     }
   }
 
@@ -2668,13 +2915,34 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     const local = (key.appGuid ? localByAppGuid.get(key.appGuid) : undefined) ?? (key.number1c ? localByNumber.get(key.number1c) : undefined) ?? null;
     return [mapMergedLiveOrder(item, local, queuePositions)];
   });
+  const filteredLive = mappedLive.filter((item) => orderMatchesListQuery(item as LiveClientOrder & {
+    origin?: string | null;
+    syncState?: string | null;
+    lastExportError?: unknown;
+    last1cError?: unknown;
+    cancelRequestedAt?: Date | string | null;
+  }, query, statusFilters));
+  const visibleLive = livePostFilterActive
+    ? filteredLive.slice(liveOffset, liveOffset + query.limit)
+    : filteredLive;
+  const postFilterScanMayHaveMore = livePostFilterActive
+    ? liveHasMore || liveItems.length >= liveQueryLimit
+    : false;
+  const hasMore = livePostFilterActive
+    ? visibleLive.length > 0 && (liveOffset + visibleLive.length < filteredLive.length || postFilterScanMayHaveMore)
+    : liveHasMore;
 
   return {
-    items: [...mappedPinned, ...mappedLive],
-    total: pinnedTotal + liveTotal,
+    items: [...mappedPinned, ...visibleLive],
+    total: pinnedTotal + (
+      livePostFilterActive
+        ? liveOffset + visibleLive.length + (hasMore ? 1 : 0)
+        : liveTotal
+    ),
     statusCounts: liveMeta.status === 'ok' ? {} : localStatusCounts,
     limit: query.limit,
     offset: query.offset,
+    hasMore,
     liveSource: liveMeta,
   };
 }

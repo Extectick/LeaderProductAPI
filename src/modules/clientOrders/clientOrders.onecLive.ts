@@ -33,6 +33,7 @@ export type LivePagedResult<T> = {
   total: number;
   limit: number;
   offset: number;
+  hasMore?: boolean;
 };
 
 export type LiveOrganization = {
@@ -113,6 +114,12 @@ export type LiveDeliveryAddress = {
   guid: string | null;
   name: string | null;
   fullAddress: string;
+  deliveryNumber?: string | null;
+  number?: string | null;
+  comment?: string | null;
+  deliveryComment?: string | null;
+  kindName?: string | null;
+  contactInfoKind?: string | null;
   counterpartyGuid?: string | null;
   isDefault: boolean;
   isActive: boolean;
@@ -314,6 +321,7 @@ function normalizeQuery(query: {
   inStockOnly?: boolean;
   managerGuid?: string;
   status?: string;
+  statuses?: string[];
   syncState?: string;
   amountMin?: number;
   amountMax?: number;
@@ -328,6 +336,7 @@ function normalizeQuery(query: {
   appGuid?: string;
   number1c?: string;
   includeItems?: boolean;
+  deliveryAddressNumber?: string;
 }): OnecLpAppQuery {
   return {
     limit: query.limit ?? DEFAULT_LIMIT,
@@ -343,6 +352,7 @@ function normalizeQuery(query: {
     inStockOnly: query.inStockOnly,
     managerGuid: query.managerGuid,
     status: query.status,
+    statuses: Array.isArray(query.statuses) && query.statuses.length ? query.statuses.join(',') : undefined,
     syncState: query.syncState,
     amountMin: query.amountMin,
     amountMax: query.amountMax,
@@ -359,6 +369,7 @@ function normalizeQuery(query: {
     appGuid: query.appGuid,
     number1c: query.number1c,
     includeItems: query.includeItems,
+    deliveryAddressNumber: query.deliveryAddressNumber,
   };
 }
 
@@ -430,6 +441,13 @@ function smartSearchTokens(search?: string | null) {
   return Array.from(new Set(normalized.split(' ').filter((token) => token.length >= 2)));
 }
 
+function extractDeliveryAddressNumber(value?: string | null) {
+  const source = String(value ?? '').trim();
+  if (!source) return undefined;
+  if (/^\d+$/.test(source)) return source;
+  return source.match(/адрес\s+доставки\D*(\d+)/i)?.[1];
+}
+
 function flattenSearchText(value: unknown, depth = 0): string {
   if (value === null || value === undefined || depth > 4) return '';
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -474,7 +492,7 @@ function smartDedupeKey(item: unknown, index: number) {
 }
 
 async function liveSmartPaged<T extends { isActive?: boolean }>(
-  query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean },
+  query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean; deliveryAddressNumber?: string },
   loader: (query: OnecLpAppQuery) => Promise<unknown>,
   keys: string[],
   mapper: (item: AnyRecord) => T | null
@@ -567,6 +585,28 @@ function mapWarehouse(record: AnyRecord): LiveWarehouse | null {
     isDefault: bool(record, ['isDefault', 'default'], false),
     isPickup: bool(record, ['isPickup', 'pickup'], false),
     isActive: isEntityActive(record),
+  };
+}
+
+function mapOrderWarehouse(record: AnyRecord): LiveClientOrder['warehouse'] {
+  const warehouseRecord = readObject(record, ['warehouse', 'Склад']);
+  const nested = mapWarehouse(warehouseRecord ?? {});
+  if (nested) return nested;
+
+  const guid =
+    text(record, ['warehouseGuid', 'warehouseId', 'warehouseGUID', 'warehouseRef', 'СкладGuid', 'СкладGUID'], null) ??
+    entityGuid(warehouseRecord);
+  if (!guid) return null;
+
+  const name =
+    text(warehouseRecord, ['name', 'Наименование'], null) ??
+    text(record, ['warehouseName', 'warehousePresentation', 'warehouseTitle', 'СкладНаименование', 'СкладПредставление'], null) ??
+    guid;
+
+  return {
+    guid,
+    name,
+    code: text(warehouseRecord, ['code', 'Код'], null) ?? text(record, ['warehouseCode', 'СкладКод'], null),
   };
 }
 
@@ -725,11 +765,20 @@ function mapDeliveryAddress(record: AnyRecord): LiveDeliveryAddress | null {
   const guid = entityGuid(record, ['guid', 'id']);
   const fullAddress = text(record, ['fullAddress', 'address', 'Адрес'], null);
   const name = text(record, ['name', 'Наименование'], null);
+  const comment = text(record, ['deliveryComment', 'comment', 'Комментарий', 'ДополнительнаяИнформацияПоДоставке'], null);
+  const kindName = text(record, ['kindName', 'contactInfoKind', 'ВидАдреса', 'Вид'], null);
+  const deliveryNumber = text(record, ['deliveryNumber', 'number', 'НомерАдресаДоставки'], null) ?? extractDeliveryAddressNumber(kindName);
   if (!guid && !fullAddress) return null;
   return {
     guid,
     name,
     fullAddress: fullAddress ?? name ?? guid ?? '',
+    deliveryNumber,
+    number: deliveryNumber,
+    comment,
+    deliveryComment: comment,
+    kindName,
+    contactInfoKind: kindName,
     counterpartyGuid: text(record, ['counterpartyGuid'], null),
     isDefault: bool(record, ['isDefault', 'default'], false),
     isActive: isEntityActive(record),
@@ -1033,7 +1082,7 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     cancelRequestedAt: null,
     counterparty: mapOrderCounterparty(readObject(record, ['counterparty', 'Контрагент'])),
     organization: mapOrganization(readObject(record, ['organization', 'Организация']) ?? {}) as LiveClientOrder['organization'],
-    warehouse: mapWarehouse(readObject(record, ['warehouse', 'Склад']) ?? {}) as LiveClientOrder['warehouse'],
+    warehouse: mapOrderWarehouse(record),
     agreement: mapAgreement(readObject(record, ['agreement', 'Соглашение']) ?? {}),
     contract: mapContract(readObject(record, ['contract', 'Договор']) ?? {}),
     deliveryAddress: mapDeliveryAddress(readObject(record, ['deliveryAddress', 'АдресДоставки']) ?? {}),
@@ -1130,7 +1179,12 @@ export async function findLivePriceType(guid: string) {
 
 export async function getLiveDeliveryAddresses(query: ClientOrdersDeliveryAddressesQuery) {
   if (!query.counterpartyGuid) return { items: [], total: 0, limit: query.limit, offset: query.offset };
-  return liveSmartPaged(query, getOnecLpAppDeliveryAddresses, ['deliveryAddresses', 'delivery-addresses'], mapDeliveryAddress);
+  return liveSmartPaged(
+    { ...query, deliveryAddressNumber: query.deliveryAddressNumber ?? extractDeliveryAddressNumber(query.search) },
+    getOnecLpAppDeliveryAddresses,
+    ['deliveryAddresses', 'delivery-addresses'],
+    mapDeliveryAddress
+  );
 }
 
 export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: string) {

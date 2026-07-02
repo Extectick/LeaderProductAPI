@@ -16,7 +16,6 @@ services:
     depends_on:
       - postgres
       - redis
-      - minio
 
   postgres:
     image: postgres:16-alpine
@@ -50,75 +49,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  minio:
-    image: minio/minio:latest
-    container_name: leader_minio
-    restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio-minio-minio
-    command: server /data --console-address ":9001"
-    ports:
-      - "9010:9000"
-      - "9011:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  minio-https:
-    image: caddy:2-alpine
-    container_name: leader_minio_https
-    restart: unless-stopped
-    depends_on:
-      - minio
-    ports:
-      - "9012:80"
-      - "9013:443"
-    volumes:
-      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-  minio-init:
-    image: minio/mc:latest
-    profiles: ["init"]
-    restart: "no"
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mc alias set local http://minio:9000 minio minio-minio-minio
-        mc mb -p local/leader-product-prod || true
-        mc mb -p local/leader-product-dev || true
-        cat >/tmp/cors.xml <<'EOF'
-        <CORSConfiguration>
-          <CORSRule>
-            <AllowedOrigin>*</AllowedOrigin>
-            <AllowedMethod>GET</AllowedMethod>
-            <AllowedMethod>PUT</AllowedMethod>
-            <AllowedMethod>POST</AllowedMethod>
-            <AllowedMethod>DELETE</AllowedMethod>
-            <AllowedMethod>HEAD</AllowedMethod>
-            <AllowedHeader>*</AllowedHeader>
-            <ExposeHeader>ETag</ExposeHeader>
-            <ExposeHeader>x-amz-request-id</ExposeHeader>
-            <ExposeHeader>x-amz-id-2</ExposeHeader>
-            <ExposeHeader>x-amz-version-id</ExposeHeader>
-            <MaxAgeSeconds>3600</MaxAgeSeconds>
-          </CORSRule>
-        </CORSConfiguration>
-        EOF
-        mc cors set local/leader-product-prod /tmp/cors.xml 2>/dev/null || echo "[minio-init] bucket CORS is not supported by this MinIO image; skipped for leader-product-prod"
-        mc cors set local/leader-product-dev /tmp/cors.xml 2>/dev/null || echo "[minio-init] bucket CORS is not supported by this MinIO image; skipped for leader-product-dev"
 
   kafka:
     image: apache/kafka:3.7.0
@@ -217,7 +147,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
   kafka_data:
-  caddy_data:
-  caddy_config:
