@@ -179,6 +179,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'manage_appeal_watchers',
     'view_stock_balances',
     'view_client_orders',
+    'manage_client_orders',
     'view_transport_tasks',
     'update_transport_route_order',
   ],
