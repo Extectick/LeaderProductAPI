@@ -89,6 +89,7 @@ export type LiveContract = {
   organizationGuid?: string | null;
   organization?: { guid: string; name: string; code?: string | null } | null;
   status?: string | null;
+  purpose?: string | null;
   currency?: string | null;
   isActive: boolean;
 };
@@ -711,6 +712,7 @@ function mapContract(record: AnyRecord): LiveContract | null {
         }
       : null,
     status: text(record, ['status'], null),
+    purpose: text(record, ['purpose', 'ТипДоговора', 'contractType', 'ЦельДоговора'], null),
     currency: text(record, ['currency'], null),
     isActive: isEntityActive(record),
   };
@@ -831,6 +833,25 @@ function mapUnit(record: AnyRecord | null | undefined, productGuid: string) {
   };
 }
 
+function unitIdentity(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
+  if (guid) return `guid:${guid}`;
+  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+    .trim()
+    .toLocaleLowerCase('ru')
+    .replace(/\s+/g, '');
+  return label ? `label:${label}` : '';
+}
+
+function isBaseUnitPackage(pack: LiveProductPackage, baseUnit: LiveProduct['baseUnit']) {
+  if (!baseUnit) return false;
+  const multiplier = Number(pack.multiplier ?? 1);
+  const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
+  const packUnit = unitIdentity(pack.unit);
+  const base = unitIdentity(baseUnit);
+  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
+}
+
 function mapPackage(record: AnyRecord, fallbackUnit: LiveProduct['baseUnit']): LiveProductPackage | null {
   const guid = entityGuid(record);
   const name = text(record, ['name', 'Наименование'], guid);
@@ -864,7 +885,8 @@ function mapProduct(record: AnyRecord): LiveProduct | null {
     return mapped ? [mapPackage(mapped, baseUnit)].filter(Boolean) as LiveProductPackage[] : [];
   });
   const defaultPackage = mapPackage(readObject(record, ['defaultPackage']) ?? {}, baseUnit);
-  const packages = packageRows.length ? packageRows : defaultPackage ? [defaultPackage] : [];
+  const rawPackages = packageRows.length ? packageRows : defaultPackage ? [defaultPackage] : [];
+  const packages = rawPackages.filter((pack) => !isBaseUnitPackage(pack, baseUnit));
   const basePrice = numberValue(record, ['basePrice', 'price'], null);
   const priceType = mapNamedRef(readObject(record, ['priceType']), ['guid', 'priceTypeGuid'], ['name', 'priceTypeName']);
   return {

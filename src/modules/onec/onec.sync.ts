@@ -70,7 +70,8 @@ type SessionOutcome = {
 type TxClient = Prisma.TransactionClient;
 
 const CLOSED_AGREEMENT_STATUS = 'Закрыто';
-const CLOSED_CONTRACT_STATUS = 'Закрыт';
+const ACTIVE_CONTRACT_STATUS = 'Действует';
+const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const ZERO_GUID = '00000000-0000-0000-0000-000000000000';
 
 function nonEmptyString(value?: string | null) {
@@ -83,12 +84,80 @@ function optionalGuid(value?: string | null) {
   return guid && guid !== ZERO_GUID ? guid : undefined;
 }
 
+type NomenclatureUnitLike = { guid?: string | null; name?: string | null; symbol?: string | null };
+type NomenclaturePackageLike = { multiplier?: number | null; unit?: NomenclatureUnitLike | null };
+
+function unitIdentity(unit?: NomenclatureUnitLike | null) {
+  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
+  if (guid) return `guid:${guid}`;
+  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+    .trim()
+    .toLocaleLowerCase('ru')
+    .replace(/\s+/g, '');
+  return label ? `label:${label}` : '';
+}
+
+function isBaseUnitPackage(pack: NomenclaturePackageLike, baseUnit?: NomenclatureUnitLike | null) {
+  if (!baseUnit) return false;
+  const multiplier = Number(pack.multiplier ?? 1);
+  const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
+  const packUnit = unitIdentity(pack.unit);
+  const base = unitIdentity(baseUnit);
+  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
+}
+
 function isClosedAgreementStatus(status?: string | null) {
   return status?.trim().toLocaleLowerCase('ru') === CLOSED_AGREEMENT_STATUS.toLocaleLowerCase('ru');
 }
 
-function isClosedContractStatus(status?: string | null) {
-  return status?.trim().toLocaleLowerCase('ru') === CLOSED_CONTRACT_STATUS.toLocaleLowerCase('ru');
+function normalizedRu(value?: string | null) {
+  return value?.trim().toLocaleLowerCase('ru') ?? '';
+}
+
+function isActiveContractStatus(status?: string | null) {
+  return normalizedRu(status) === normalizedRu(ACTIVE_CONTRACT_STATUS);
+}
+
+function isRealizationContractPurpose(purpose?: string | null) {
+  const normalized = normalizedRu(purpose);
+  return normalized === normalizedRu(REALIZATION_CONTRACT_PURPOSE) || normalized === 'спокупателем';
+}
+
+function parseContractDate(value?: Date | string | null) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isContractDateRangeActive(validFrom?: Date | string | null, validTo?: Date | string | null) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const endOfToday = new Date(today);
+  endOfToday.setHours(23, 59, 59, 999);
+
+  const from = parseContractDate(validFrom);
+  if (from && from > endOfToday) return false;
+
+  const to = parseContractDate(validTo);
+  if (to && to < today) return false;
+
+  return true;
+}
+
+function isSelectableContract(contract?: {
+  isActive?: boolean | null;
+  status?: string | null;
+  purpose?: string | null;
+  validFrom?: Date | string | null;
+  validTo?: Date | string | null;
+} | null) {
+  if (!contract) return false;
+  return (
+    contract.isActive !== false &&
+    isActiveContractStatus(contract.status) &&
+    isRealizationContractPurpose(contract.purpose) &&
+    isContractDateRangeActive(contract.validFrom, contract.validTo)
+  );
 }
 
 const ENTITY_SYNC_TYPE: Record<BatchEntityCode, SyncEntityType> = {
@@ -927,6 +996,13 @@ async function applyStagedNomenclature(
 
       if (item.packages?.length) {
         for (const pack of item.packages) {
+          if (isBaseUnitPackage(pack, item.baseUnit)) {
+            if (pack.guid) {
+              await tx.productPackage.deleteMany({ where: { productId: product.id, guid: pack.guid } });
+            }
+            continue;
+          }
+
           const unit = await tx.unit.upsert({
             where: { guid: pack.unit.guid },
             create: {
@@ -1249,7 +1325,7 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
           deliveryAddress: item.contract.deliveryAddress ?? null,
           deliveryAddressFields: item.contract.deliveryAddressFields ?? null,
           additionalDeliveryInfo: item.contract.additionalDeliveryInfo ?? null,
-          isActive: (item.contract.isActive ?? true) && !isClosedContractStatus(item.contract.status),
+          isActive: isSelectableContract(item.contract),
           comment: item.contract.comment ?? null,
           sourceUpdatedAt: item.contract.sourceUpdatedAt ?? syncedAt,
           lastSyncedAt: syncedAt,
@@ -1429,7 +1505,7 @@ async function applyStagedContracts(tx: TxClient, sessionId: string, syncedAt: D
         deliveryAddress: item.deliveryAddress ?? null,
         deliveryAddressFields: item.deliveryAddressFields ?? null,
         additionalDeliveryInfo: item.additionalDeliveryInfo ?? null,
-        isActive: (item.isActive ?? true) && !isClosedContractStatus(item.status),
+        isActive: isSelectableContract(item),
         comment: item.comment ?? null,
         sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
         lastSyncedAt: syncedAt,

@@ -26,6 +26,7 @@ const appeals_1 = __importDefault(require("./routes/appeals"));
 const departments_1 = __importDefault(require("./routes/departments"));
 const tracking_1 = __importDefault(require("./routes/tracking"));
 const updates_1 = __importDefault(require("./routes/updates"));
+const ota_1 = __importDefault(require("./routes/ota"));
 const files_1 = __importDefault(require("./routes/files"));
 const services_1 = __importDefault(require("./routes/services"));
 const stockBalances_1 = __importDefault(require("./routes/stockBalances"));
@@ -36,6 +37,7 @@ const onec_lpApp_routes_1 = __importDefault(require("./modules/onec/onec.lpApp.r
 const marketplace_routes_1 = __importDefault(require("./modules/marketplace/marketplace.routes"));
 const clientOrders_routes_1 = __importDefault(require("./modules/clientOrders/clientOrders.routes"));
 const scheduledJobsService_1 = require("./services/scheduledJobsService");
+const clientOrdersExportWorker_1 = require("./services/clientOrdersExportWorker");
 const redis_1 = require("./lib/redis");
 const cache_1 = require("./middleware/cache");
 const presenceService_1 = require("./services/presenceService");
@@ -69,6 +71,39 @@ const server = http_1.default.createServer(app);
 // Отключаем ETag, чтобы исключить 304 без тела на API-ответах
 app.set('etag', false);
 const port = Number(process.env.PORT) || 3000;
+const SENSITIVE_QUERY_KEYS = new Set([
+    'secret',
+    'token',
+    'access_token',
+    'accessToken',
+    'refresh_token',
+    'refreshToken',
+    'api_key',
+    'apiKey',
+    'key',
+    'password',
+]);
+function redactSensitiveUrl(originalUrl) {
+    try {
+        const url = new URL(originalUrl, 'http://leaderproduct.local');
+        let changed = false;
+        url.searchParams.forEach((_value, key) => {
+            const normalized = key.toLowerCase();
+            if (SENSITIVE_QUERY_KEYS.has(key) ||
+                SENSITIVE_QUERY_KEYS.has(normalized) ||
+                normalized.includes('secret') ||
+                normalized.includes('token') ||
+                normalized.includes('password')) {
+                url.searchParams.set(key, '***');
+                changed = true;
+            }
+        });
+        return changed ? `${url.pathname}${url.search}${url.hash}` : originalUrl;
+    }
+    catch {
+        return originalUrl.replace(/([?&][^=\s&]*(?:secret|token|password|api[_-]?key|key)[^=\s&]*=)[^&\s]+/gi, '$1***');
+    }
+}
 // ---- CORS ----
 // Разрешаем все origin, чтобы веб и мобильные клиенты работали из любой сети.
 // Если понадобится ограничение по доменам, верните проверку и список разрешённых.
@@ -91,7 +126,8 @@ app.use((0, cors_1.default)({
     credentials: true,
 }));
 // ---- Common middlewares ----
-app.use((0, morgan_1.default)('dev'));
+morgan_1.default.token('safe-url', (req) => redactSensitiveUrl(req.originalUrl || req.url || ''));
+app.use((0, morgan_1.default)(':method :safe-url :status :response-time ms - :res[content-length]'));
 app.use(express_1.default.json({ limit: '1mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express_1.default.static(path_1.default.resolve(process.cwd(), 'uploads')));
@@ -116,6 +152,7 @@ app.use('/services', services_1.default);
 app.use('/stock-balances', stockBalances_1.default);
 app.use('/home', home_1.default);
 app.use('/updates', updates_1.default);
+app.use('/ota', ota_1.default);
 app.use('/update-files', files_1.default);
 app.use('/files', files_1.default);
 app.use('/notifications', notifications_1.default);
@@ -384,8 +421,9 @@ if (ENV !== 'test') {
             console.log(`Server is running on http://localhost:${port}`);
             console.log(`Docs:   http://localhost:${port}/docs`);
         });
-        // 4) Запускаем планировщик фоновых задач (напоминания о непрочитанных, закрытии)
+        // 4) Запускаем фоновые задачи приложения
         (0, scheduledJobsService_1.startScheduledJobs)();
+        (0, clientOrdersExportWorker_1.startClientOrdersExportWorker)();
         // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
         if ((0, telegramBotService_1.isTelegramBotConfigured)()) {
             void (async () => {
@@ -440,6 +478,7 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
     console.log('SIGINT received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
+    (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });
     await client_1.default.$disconnect().catch(() => { });
@@ -450,6 +489,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
     console.log('SIGTERM received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
+    (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });
     await client_1.default.$disconnect().catch(() => { });

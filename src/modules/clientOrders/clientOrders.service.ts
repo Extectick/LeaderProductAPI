@@ -62,6 +62,7 @@ import {
   type LiveOrganization,
   type LivePriceType,
   type LiveProduct,
+  type LiveProductPackage,
   type LiveWarehouse,
 } from './clientOrders.onecLive';
 import type {
@@ -125,6 +126,9 @@ type ManagerOrderContext = {
   deliveryAddress: { id: string; guid: string | null; fullAddress: string; counterpartyId: string } | null;
   priceType: { id: string; guid: string; name: string } | null;
 };
+
+const DEFAULT_DELIVERY_DATE_MODE = ClientOrderDeliveryDateMode.NEXT_DAY;
+const DEFAULT_DELIVERY_DATE_OFFSET_DAYS = 1;
 
 type PreparedOrderLine = {
   create: Prisma.OrderItemUncheckedCreateWithoutOrderInput;
@@ -391,8 +395,10 @@ async function onecLive<T>(
 
 const DEFAULT_ORDER_CURRENCY = 'RUB';
 const SMART_SEARCH_TRIGRAM_THRESHOLD = 0.18;
+const ACTIVE_CONTRACT_STATUS = 'Действует';
 const CLOSED_AGREEMENT_STATUS = 'Закрыто';
 const CLOSED_CONTRACT_STATUS = 'Закрыт';
+const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const RECEIPT_PRICE_TYPE_TOKEN = '\u0446\u0435\u043d\u0430\u043f\u043e\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044f';
 const now = () => new Date();
 
@@ -400,19 +406,93 @@ const agreementNotClosedWhere = (): Prisma.ClientAgreementWhereInput => ({
   OR: [{ status: null }, { status: { not: CLOSED_AGREEMENT_STATUS } }],
 });
 
-const contractNotClosedWhere = (): Prisma.ClientContractWhereInput => ({
-  OR: [{ status: null }, { status: { not: CLOSED_CONTRACT_STATUS } }],
-});
+const contractSelectableWhere = (): Prisma.ClientContractWhereInput => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const endOfToday = new Date(today);
+  endOfToday.setHours(23, 59, 59, 999);
+
+  return {
+    status: ACTIVE_CONTRACT_STATUS,
+    purpose: REALIZATION_CONTRACT_PURPOSE,
+    OR: [{ validFrom: null }, { validFrom: { lte: endOfToday } }],
+    AND: [{ OR: [{ validTo: null }, { validTo: { gte: today } }] }],
+  };
+};
 
 const activeAgreementWhere = (): Prisma.ClientAgreementWhereInput => ({ isActive: true, AND: [agreementNotClosedWhere()] });
-const activeContractWhere = (): Prisma.ClientContractWhereInput => ({ isActive: true, AND: [contractNotClosedWhere()] });
+const activeContractWhere = (): Prisma.ClientContractWhereInput => ({ isActive: true, AND: [contractSelectableWhere()] });
+
+function normalizedRu(value?: string | null) {
+  return value?.trim().toLocaleLowerCase('ru') ?? '';
+}
 
 function isClosedAgreementStatus(status?: string | null) {
-  return status?.trim().toLocaleLowerCase('ru') === CLOSED_AGREEMENT_STATUS.toLocaleLowerCase('ru');
+  return normalizedRu(status) === normalizedRu(CLOSED_AGREEMENT_STATUS);
 }
 
 function isClosedContractStatus(status?: string | null) {
-  return status?.trim().toLocaleLowerCase('ru') === CLOSED_CONTRACT_STATUS.toLocaleLowerCase('ru');
+  return normalizedRu(status) === normalizedRu(CLOSED_CONTRACT_STATUS);
+}
+
+function isActiveContractStatus(status?: string | null) {
+  return normalizedRu(status) === normalizedRu(ACTIVE_CONTRACT_STATUS);
+}
+
+function isRealizationContractPurpose(purpose?: string | null) {
+  const normalized = normalizedRu(purpose);
+  return normalized === normalizedRu(REALIZATION_CONTRACT_PURPOSE) || normalized === 'спокупателем';
+}
+
+function parseDateOnly(value?: string | Date | null) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isContractDateRangeActive(validFrom?: string | Date | null, validTo?: string | Date | null, at: Date = now()) {
+  const today = new Date(at);
+  today.setHours(0, 0, 0, 0);
+  const endOfToday = new Date(today);
+  endOfToday.setHours(23, 59, 59, 999);
+
+  const from = parseDateOnly(validFrom);
+  if (from && from > endOfToday) return false;
+
+  const to = parseDateOnly(validTo);
+  if (to && to < today) return false;
+
+  return true;
+}
+
+function isSelectableContract(contract?: {
+  isActive?: boolean | null;
+  status?: string | null;
+  purpose?: string | null;
+  validFrom?: string | Date | null;
+  validTo?: string | Date | null;
+} | null) {
+  if (!contract) return false;
+  return (
+    contract.isActive !== false &&
+    isActiveContractStatus(contract.status) &&
+    isRealizationContractPurpose(contract.purpose) &&
+    isContractDateRangeActive(contract.validFrom, contract.validTo)
+  );
+}
+
+function filterSelectableContracts<T extends {
+  items: Array<{
+    isActive?: boolean | null;
+    status?: string | null;
+    purpose?: string | null;
+    validFrom?: string | Date | null;
+    validTo?: string | Date | null;
+  }>;
+  total: number;
+}>(result: T): T {
+  const items = result.items.filter((item) => isSelectableContract(item));
+  return { ...result, items, total: items.length };
 }
 
 function ensureEditable(order: { status: OrderStatus; hasRealization?: boolean | null; source: OrderSource }) {
@@ -488,6 +568,10 @@ function addDays(base: Date, days: number) {
   return next;
 }
 
+function defaultDeliveryDate() {
+  return startOfDay(addDays(startOfDay(now()), DEFAULT_DELIVERY_DATE_OFFSET_DAYS));
+}
+
 function ensureValidDeliveryDateSettings(
   deliveryDateMode: ClientOrderDeliveryDateMode,
   deliveryDateOffsetDays: number,
@@ -506,25 +590,9 @@ function resolveDeliveryDateSettings(settings?: {
   deliveryDateOffsetDays: number;
   fixedDeliveryDate: Date | null;
 } | null): DeliveryDateResolution {
-  const mode = settings?.deliveryDateMode ?? ClientOrderDeliveryDateMode.NEXT_DAY;
-  const offset = settings?.deliveryDateOffsetDays ?? 1;
-  const fixedDate = settings?.fixedDeliveryDate ?? null;
-  const today = startOfDay(now());
-
-  if (mode === ClientOrderDeliveryDateMode.FIXED_DATE) {
-    if (!fixedDate) {
-      return { resolvedDate: null, issue: 'FIXED_DATE_REQUIRED' };
-    }
-    const normalizedFixed = startOfDay(fixedDate);
-    if (normalizedFixed.getTime() < today.getTime()) {
-      return { resolvedDate: normalizedFixed, issue: 'FIXED_DATE_IN_PAST' };
-    }
-    return { resolvedDate: normalizedFixed, issue: null };
-  }
-
-  const safeOffset = mode === ClientOrderDeliveryDateMode.NEXT_DAY ? 1 : Math.max(0, offset);
+  void settings;
   return {
-    resolvedDate: startOfDay(addDays(today, safeOffset)),
+    resolvedDate: defaultDeliveryDate(),
     issue: null,
   };
 }
@@ -589,6 +657,8 @@ function mapContractSummary(
         validTo?: Date | string | null;
         organizationGuid?: string | null;
         organization?: { guid: string; name: string; code?: string | null } | null;
+        status?: string | null;
+        purpose?: string | null;
         isActive?: boolean;
       }
     | null
@@ -603,6 +673,8 @@ function mapContractSummary(
     validTo: contract.validTo ?? null,
     organizationGuid: contract.organizationGuid ?? contract.organization?.guid ?? null,
     organization: contract.organization ?? null,
+    status: contract.status ?? null,
+    purpose: contract.purpose ?? null,
     isActive: contract.isActive ?? true,
   };
 }
@@ -959,6 +1031,9 @@ async function loadContractByGuid(tx: Tx, guid: string) {
       counterpartyId: true,
       isActive: true,
       status: true,
+      purpose: true,
+      validFrom: true,
+      validTo: true,
     },
   });
 
@@ -971,6 +1046,9 @@ async function loadContractByGuid(tx: Tx, guid: string) {
 
   if (isClosedContractStatus(contract.status)) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Договор ${guid} закрыт и не может использоваться в заказе`);
+  }
+  if (!isActiveContractStatus(contract.status) || !isRealizationContractPurpose(contract.purpose) || !isContractDateRangeActive(contract.validFrom, contract.validTo)) {
+    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Договор ${guid} не подходит для реализации или не действует`);
   }
 
   return contract;
@@ -1056,6 +1134,25 @@ function parseLiveDate(value?: string | Date | null, fallback: Date | null = nul
 function safeLiveName(value: string | null | undefined, fallback: string) {
   const prepared = value?.trim();
   return prepared || fallback;
+}
+
+function liveUnitIdentity(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
+  if (guid) return `guid:${guid}`;
+  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+    .trim()
+    .toLocaleLowerCase('ru')
+    .replace(/\s+/g, '');
+  return label ? `label:${label}` : '';
+}
+
+function isLiveBaseUnitPackage(pack: LiveProductPackage, baseUnit: LiveProduct['baseUnit']) {
+  if (!baseUnit) return false;
+  const multiplier = Number(pack.multiplier ?? 1);
+  const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
+  const packUnit = liveUnitIdentity(pack.unit);
+  const base = liveUnitIdentity(baseUnit);
+  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
 }
 
 async function upsertLiveOrganization(tx: Tx, item: LiveOrganization | null, sourceUpdatedAt: Date) {
@@ -1177,6 +1274,7 @@ async function upsertLiveContract(
 ) {
   if (!item || !counterpartyId) return null;
   const date = parseLiveDate(item.date, sourceUpdatedAt) ?? sourceUpdatedAt;
+  const isActive = isSelectableContract(item);
   return tx.clientContract.upsert({
     where: { guid: item.guid },
     create: {
@@ -1190,7 +1288,8 @@ async function upsertLiveContract(
       validTo: parseLiveDate(item.validTo),
       currency: item.currency ?? null,
       status: item.status ?? null,
-      isActive: item.isActive,
+      purpose: item.purpose ?? null,
+      isActive,
       sourceUpdatedAt,
       lastSyncedAt: sourceUpdatedAt,
     },
@@ -1204,11 +1303,12 @@ async function upsertLiveContract(
       validTo: parseLiveDate(item.validTo),
       currency: item.currency ?? null,
       status: item.status ?? null,
-      isActive: item.isActive,
+      purpose: item.purpose ?? null,
+      isActive,
       sourceUpdatedAt,
       lastSyncedAt: sourceUpdatedAt,
     },
-    select: { id: true, guid: true, number: true, counterpartyId: true, isActive: true },
+    select: { id: true, guid: true, number: true, counterpartyId: true, isActive: true, status: true, purpose: true, validFrom: true, validTo: true },
   });
 }
 
@@ -1409,6 +1509,10 @@ async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: 
 
   for (const pack of item.packages) {
     if (!pack.guid) continue;
+    if (isLiveBaseUnitPackage(pack, item.baseUnit)) {
+      await tx.productPackage.deleteMany({ where: { productId: product.id, guid: pack.guid } });
+      continue;
+    }
     const unit = await upsertLiveUnit(tx, pack.unit ?? item.baseUnit, `default-unit-${item.guid}`, sourceUpdatedAt);
     await tx.productPackage.upsert({
       where: { guid: pack.guid },
@@ -1578,6 +1682,7 @@ async function findCachedContract(guid: string): Promise<LiveContract | null> {
       validFrom: true,
       validTo: true,
       status: true,
+      purpose: true,
       currency: true,
       isActive: true,
       counterparty: { select: { guid: true } },
@@ -1596,6 +1701,7 @@ async function findCachedContract(guid: string): Promise<LiveContract | null> {
         organizationGuid: item.organization?.guid ?? null,
         organization: item.organization,
         status: item.status,
+        purpose: item.purpose,
         currency: item.currency,
         isActive: item.isActive,
       }
@@ -2294,9 +2400,9 @@ function buildSettingsResponse(args: {
     | null;
 }) {
   const settings = {
-    deliveryDateMode: args.settings?.deliveryDateMode ?? ClientOrderDeliveryDateMode.NEXT_DAY,
-    deliveryDateOffsetDays: args.settings?.deliveryDateOffsetDays ?? 1,
-    fixedDeliveryDate: args.settings?.fixedDeliveryDate ?? null,
+    deliveryDateMode: DEFAULT_DELIVERY_DATE_MODE,
+    deliveryDateOffsetDays: DEFAULT_DELIVERY_DATE_OFFSET_DAYS,
+    fixedDeliveryDate: null,
   };
   const deliveryDate = resolveDeliveryDateSettings(settings);
   return {
@@ -2319,7 +2425,7 @@ function buildSettingsResponse(args: {
 
 async function saveUserCounterpartyDefaults(tx: Tx, userId: number, guid: string) {
   const order = await tx.order.findFirst({
-    where: { guid, source: OrderSource.MANAGER_APP },
+    where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
     select: {
       organizationId: true,
       counterpartyId: true,
@@ -2547,7 +2653,7 @@ async function getManagerGuidForUser(userId: number) {
   return profile?.onecUserGuid?.trim() || null;
 }
 
-async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<LocalOrderWhereBuildResult> {
+async function buildLocalOrdersWhere(query: ClientOrdersListQuery, userId: number): Promise<LocalOrderWhereBuildResult> {
   const search = normalizeSearch(query.search);
   const statusFilters = getOrderStatusFilters(query);
   const localStatuses = statusFilters.filter((status): status is OrderStatus => LOCAL_ORDER_STATUS_VALUES.has(status));
@@ -2556,7 +2662,7 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<Loca
   const itemCountOrderIds = itemCountFilters
     ? await prisma.orderItem.groupBy({
         by: ['orderId'],
-        where: { order: { source: OrderSource.MANAGER_APP } },
+        where: { order: { source: OrderSource.MANAGER_APP, createdByUserId: userId } },
         ...(query.itemsMin !== undefined || query.itemsMax !== undefined
           ? {
               having: {
@@ -2604,6 +2710,7 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery): Promise<Loca
   }
   const where: Prisma.OrderWhereInput = {
     source: OrderSource.MANAGER_APP,
+    createdByUserId: userId,
     ...(and.length ? { AND: and } : {}),
     ...(localStatuses.length ? { status: { in: localStatuses } } : {}),
     ...(query.syncState ? { syncState: query.syncState } : {}),
@@ -2767,7 +2874,7 @@ async function enrichLiveOrdersForWarehouseFilter(
 }
 
 export async function listClientOrders(query: ClientOrdersListQuery, userId: number) {
-  const { where, statusCountsWhere } = await buildLocalOrdersWhere(query);
+  const { where, statusCountsWhere } = await buildLocalOrdersWhere(query, userId);
   const statusFilters = getOrderStatusFilters(query);
   const pinnedWhere: Prisma.OrderWhereInput = {
     AND: [
@@ -2949,11 +3056,25 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
 
 export async function getClientOrderByGuid(guid: string, userId?: number) {
   const order = await prisma.order.findFirst({
-    where: { guid, source: OrderSource.MANAGER_APP },
+    where: {
+      guid,
+      source: OrderSource.MANAGER_APP,
+      ...(userId ? { createdByUserId: userId } : {}),
+    },
     select: orderDetailSelect,
   });
 
   if (!order) {
+    if (userId) {
+      const foreignLocalOrder = await prisma.order.findFirst({
+        where: { guid, source: OrderSource.MANAGER_APP },
+        select: { id: true },
+      });
+      if (foreignLocalOrder) {
+        throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+      }
+    }
+
     if (!userId) {
       throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
     }
@@ -3056,9 +3177,9 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
   });
 }
 
-export async function getClientOrderExportDebug(guid: string) {
+export async function getClientOrderExportDebug(guid: string, userId: number) {
   const order = await prisma.order.findFirst({
-    where: { guid, source: OrderSource.MANAGER_APP },
+    where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
     select: {
       id: true,
       guid: true,
@@ -3452,24 +3573,9 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
     }
   }
 
-  const deliveryDateMode = body.deliveryDateMode ?? existing?.deliveryDateMode ?? ClientOrderDeliveryDateMode.NEXT_DAY;
-  const deliveryDateOffsetDays = body.deliveryDateOffsetDays ?? existing?.deliveryDateOffsetDays ?? 1;
-  const fixedDeliveryDate =
-    body.fixedDeliveryDate !== undefined ? body.fixedDeliveryDate ?? null : existing?.fixedDeliveryDate ?? null;
-
-  ensureValidDeliveryDateSettings(deliveryDateMode, deliveryDateOffsetDays, fixedDeliveryDate);
-
-  if (
-    deliveryDateMode === ClientOrderDeliveryDateMode.FIXED_DATE &&
-    fixedDeliveryDate &&
-    startOfDay(fixedDeliveryDate).getTime() < startOfDay(now()).getTime()
-  ) {
-    throw new ClientOrdersError(
-      400,
-      ErrorCodes.VALIDATION_ERROR,
-      'Фиксированная дата отгрузки уже в прошлом. Укажите актуальную дату.'
-    );
-  }
+  const deliveryDateMode = DEFAULT_DELIVERY_DATE_MODE;
+  const deliveryDateOffsetDays = DEFAULT_DELIVERY_DATE_OFFSET_DAYS;
+  const fixedDeliveryDate: Date | null = null;
 
   await prisma.clientOrderUserSettings.upsert({
     where: { userId },
@@ -3513,14 +3619,14 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
             name: true,
             currency: true,
             isActive: true,
-            contract: { where: activeContractWhere(), select: { guid: true, number: true, isActive: true } },
+            contract: { where: activeContractWhere(), select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true } },
             warehouse: { select: { guid: true, name: true, code: true, isDefault: true, isPickup: true, isActive: true } },
             priceType: { select: { guid: true, name: true } },
           },
         },
         defaultContract: {
           where: activeContractWhere(),
-          select: { guid: true, number: true, date: true, validFrom: true, validTo: true, isActive: true },
+          select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true },
         },
         defaultWarehouse: {
           where: { isActive: true },
@@ -3551,14 +3657,14 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
             name: true,
             currency: true,
             isActive: true,
-            contract: { where: activeContractWhere(), select: { guid: true, number: true, isActive: true } },
+            contract: { where: activeContractWhere(), select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true } },
             warehouse: { select: { guid: true, name: true, code: true, isDefault: true, isPickup: true, isActive: true } },
             priceType: { select: { guid: true, name: true } },
           },
         },
         contract: {
           where: activeContractWhere(),
-          select: { guid: true, number: true, date: true, validFrom: true, validTo: true, isActive: true },
+          select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true },
         },
         warehouse: {
           where: { isActive: true },
@@ -3597,7 +3703,7 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
         name: true,
         currency: true,
         isActive: true,
-        contract: { where: activeContractWhere(), select: { guid: true, number: true, isActive: true } },
+        contract: { where: activeContractWhere(), select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true } },
         warehouse: { select: { guid: true, name: true, code: true, isDefault: true, isPickup: true, isActive: true } },
         priceType: { select: { guid: true, name: true } },
       },
@@ -3609,7 +3715,7 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
         organizationId: organization.id,
       },
       orderBy: [{ isAgreed: 'desc' }, { date: 'desc' }, { number: 'asc' }],
-      select: { guid: true, number: true, date: true, validFrom: true, validTo: true, isActive: true },
+      select: { guid: true, number: true, date: true, validFrom: true, validTo: true, status: true, purpose: true, isActive: true },
     }),
   ]);
 
@@ -3864,7 +3970,7 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
 
 export async function getClientOrdersContracts(query: ClientOrdersContractsQuery) {
   try {
-    const result = await onecLive(
+    const result = filterSelectableContracts(await onecLive(
       () => readThroughClientOrdersCache(
         'contracts',
         query,
@@ -3873,7 +3979,7 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
       ),
       'Ошибка получения договоров из 1С',
       { allowCachedWhenCircuitOpen: true }
-    );
+    ));
     if (result.items.length || !query.organizationGuid || !query.counterpartyGuid) return result;
   } catch (error) {
     if (!(isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502))) throw error;
@@ -3895,9 +4001,10 @@ export async function getClientOrdersContracts(query: ClientOrdersContractsQuery
     { allowCachedWhenCircuitOpen: true }
   );
   const contract = mapContractSummary(defaults.contract);
+  const selectableContract = isSelectableContract(contract) ? contract : null;
   return {
-    items: contract ? [contract] : [],
-    total: contract ? 1 : 0,
+    items: selectableContract ? [selectableContract] : [],
+    total: selectableContract ? 1 : 0,
     limit: query.limit,
     offset: query.offset,
   };
@@ -4423,7 +4530,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         priceTypeId: context.priceType?.id ?? null,
         createdByUserId: userId,
         comment: body.comment ?? null,
-        deliveryDate: body.deliveryDate ?? null,
+        deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4459,7 +4566,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
     return order.guid!;
   });
 
-  return getClientOrderByGuid(created);
+  return getClientOrderByGuid(created, userId);
 }
 
 function dateForCreatePayload(value: unknown) {
@@ -4528,7 +4635,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
 
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4572,7 +4679,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         deliveryAddressId: context.deliveryAddress?.id ?? null,
         priceTypeId: context.priceType?.id ?? null,
         comment: body.comment ?? null,
-        deliveryDate: body.deliveryDate ?? null,
+        deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4609,13 +4716,13 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     }
   });
 
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
 export async function submitClientOrder(guid: string, userId: number, body: ClientOrderSubmitBody) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4704,7 +4811,7 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
     await saveUserCounterpartyDefaults(tx, userId, guid);
   });
 
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
 async function unqueueClientOrderInTransaction(
@@ -4748,7 +4855,7 @@ async function unqueueClientOrderInTransaction(
 export async function unqueueClientOrder(guid: string, userId: number, body: ClientOrderUnqueueBody) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4776,13 +4883,13 @@ export async function unqueueClientOrder(guid: string, userId: number, body: Cli
   });
 
   requestClientOrdersExportWakeup();
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
 export async function retryClientOrderExport(guid: string, userId: number, body: ClientOrderUnqueueBody) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4840,13 +4947,13 @@ export async function retryClientOrderExport(guid: string, userId: number, body:
   });
 
   requestClientOrdersExportWakeup();
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
-export async function deleteDraftClientOrder(guid: string) {
+export async function deleteDraftClientOrder(guid: string, userId: number) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4884,7 +4991,7 @@ export async function deleteDraftClientOrder(guid: string) {
 export async function restoreClientOrder(guid: string, userId: number, body: ClientOrderRestoreBody) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -4940,13 +5047,13 @@ export async function restoreClientOrder(guid: string, userId: number, body: Cli
   });
 
   requestClientOrdersExportWakeup();
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
 export async function cancelClientOrder(guid: string, userId: number, body: ClientOrderCancelBody) {
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
         id: true,
         guid: true,
@@ -5006,13 +5113,13 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
     });
   });
 
-  return getClientOrderByGuid(guid);
+  return getClientOrderByGuid(guid, userId);
 }
 
 export async function copyClientOrder(guid: string, userId: number, body: ClientOrderCopyBody = {}) {
   if (body.revision !== undefined) {
     const local = await prisma.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP },
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: { revision: true },
     });
     if (local) assertRevision(local.revision, body.revision);

@@ -16,6 +16,7 @@ const tx = {
   productPackage: {
     upsert: jest.fn(),
     create: jest.fn(),
+    deleteMany: jest.fn(),
   },
 } as any;
 
@@ -57,6 +58,7 @@ describe('POST /api/1c/nomenclature/batch (unit)', () => {
     tx.product.upsert.mockResolvedValue({ id: 'product1', guid: 'product-guid' });
     tx.productPackage.upsert.mockResolvedValue({});
     tx.productPackage.create.mockResolvedValue({});
+    tx.productPackage.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx));
     prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
     prismaMock.syncRun.update.mockResolvedValue({});

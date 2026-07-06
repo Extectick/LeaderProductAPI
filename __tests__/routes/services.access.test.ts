@@ -445,6 +445,167 @@ describe('Services access rules and diagnostics', () => {
     expect(previewRes.body?.data?.explanation?.evaluation?.finalEnabled?.source).toBe('department_role');
   });
 
+  test('department role rule matches effective department with global role hierarchy', async () => {
+    const unique = Date.now() + 8;
+    const serviceKey = `svc_department_global_role_${unique}`;
+
+    const createRes = await request(app)
+      .post('/services/admin')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        key: serviceKey,
+        name: `Department Global Role Service ${unique}`,
+        defaultVisible: false,
+        defaultEnabled: false,
+        generatePermissionTemplate: false,
+      });
+
+    expect(createRes.status).toBe(200);
+    const serviceId = createRes.body?.data?.service?.id;
+    expect(serviceId).toBeTruthy();
+
+    const employeeRole = await prisma.role.findUnique({ where: { name: 'employee' } });
+    const managerRole = await prisma.role.findUnique({ where: { name: 'department_manager' } });
+    expect(employeeRole).toBeTruthy();
+    expect(managerRole).toBeTruthy();
+
+    const employeeUser = await createUserWithRole(
+      'services-access-department-global-employee@example.com',
+      'employee',
+      'EMPLOYEE'
+    );
+    const employeeToken = signToken(employeeUser.id, 'employee');
+    const employeeProfile = await prisma.employeeProfile.findUnique({
+      where: { userId: employeeUser.id },
+      select: { departmentId: true },
+    });
+    expect(employeeProfile?.departmentId).toBeTruthy();
+
+    const rulesRes = await request(app)
+      .put(`/services/${serviceId}/access-rules`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        departmentRoleAccess: [
+          {
+            departmentId: employeeProfile!.departmentId!,
+            roleId: employeeRole!.id,
+            visible: true,
+            enabled: true,
+          },
+        ],
+      });
+
+    expect(rulesRes.status).toBe(200);
+
+    const employeeListRes = await request(app)
+      .get('/services')
+      .set('Authorization', `Bearer ${employeeToken}`);
+
+    expect(employeeListRes.status).toBe(200);
+    const employeeService = (employeeListRes.body?.data?.services || []).find(
+      (item: any) => item.key === serviceKey
+    );
+    expect(employeeService).toBeTruthy();
+    expect(employeeService.visible).toBe(true);
+    expect(employeeService.enabled).toBe(true);
+
+    const employeePreviewRes = await request(app)
+      .get(`/services/${serviceId}/access-preview`)
+      .query({ userId: employeeUser.id })
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(employeePreviewRes.status).toBe(200);
+    expect(employeePreviewRes.body?.data?.explanation?.evaluation?.finalVisible?.source).toBe('department_role');
+    expect(employeePreviewRes.body?.data?.explanation?.evaluation?.finalEnabled?.source).toBe('department_role');
+    expect(
+      employeePreviewRes.body?.data?.explanation?.evaluation?.departmentRoleVisible?.matchedRules?.some(
+        (rule: any) =>
+          rule.departmentId === employeeProfile!.departmentId &&
+          rule.roleId === employeeRole!.id &&
+          rule.distance === 0
+      )
+    ).toBe(true);
+
+    const managerUser = await createUserWithRole(
+      'services-access-department-global-manager@example.com',
+      'department_manager',
+      'EMPLOYEE'
+    );
+    const managerToken = signToken(managerUser.id, 'department_manager');
+    await prisma.employeeProfile.update({
+      where: { userId: managerUser.id },
+      data: {
+        departmentId: employeeProfile!.departmentId!,
+        activeDepartmentId: employeeProfile!.departmentId!,
+      },
+    });
+
+    const managerListRes = await request(app)
+      .get('/services')
+      .set('Authorization', `Bearer ${managerToken}`);
+
+    expect(managerListRes.status).toBe(200);
+    const managerService = (managerListRes.body?.data?.services || []).find(
+      (item: any) => item.key === serviceKey
+    );
+    expect(managerService).toBeTruthy();
+    expect(managerService.visible).toBe(true);
+    expect(managerService.enabled).toBe(true);
+
+    const managerPreviewRes = await request(app)
+      .get(`/services/${serviceId}/access-preview`)
+      .query({ userId: managerUser.id })
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(managerPreviewRes.status).toBe(200);
+    expect(
+      managerPreviewRes.body?.data?.explanation?.evaluation?.departmentRoleVisible?.matchedRules?.some(
+        (rule: any) =>
+          rule.departmentId === employeeProfile!.departmentId &&
+          rule.roleId === employeeRole!.id &&
+          rule.distance === 1
+      )
+    ).toBe(true);
+
+    const crossDepartmentUser = await createUserWithRole(
+      'services-access-department-global-cross@example.com',
+      'user',
+      'EMPLOYEE'
+    );
+    const crossDepartmentToken = signToken(crossDepartmentUser.id, 'user');
+    const crossDepartmentProfile = await prisma.employeeProfile.findUnique({
+      where: { userId: crossDepartmentUser.id },
+      select: { departmentId: true },
+    });
+    const secondaryDepartment = await prisma.department.create({
+      data: { name: `SvcDeptGlobalSecondary_${unique}` },
+    });
+    await prisma.departmentRole.create({
+      data: {
+        userId: crossDepartmentUser.id,
+        roleId: managerRole!.id,
+        departmentId: secondaryDepartment.id,
+      },
+    });
+    await prisma.employeeProfile.update({
+      where: { userId: crossDepartmentUser.id },
+      data: { activeDepartmentId: null },
+    });
+
+    const crossListRes = await request(app)
+      .get('/services')
+      .set('Authorization', `Bearer ${crossDepartmentToken}`);
+
+    expect(crossListRes.status).toBe(200);
+    const crossService = (crossListRes.body?.data?.services || []).find(
+      (item: any) => item.key === serviceKey
+    );
+    expect(crossDepartmentProfile?.departmentId).toBeTruthy();
+    expect(crossDepartmentProfile!.departmentId).not.toBe(secondaryDepartment.id);
+    expect(crossService?.visible).toBe(false);
+    expect(crossService?.enabled).toBe(false);
+  });
+
   test('department reverse catalog endpoints save and return department role rules', async () => {
     const unique = Date.now() + 7;
     const serviceKey = `svc_department_catalog_${unique}`;

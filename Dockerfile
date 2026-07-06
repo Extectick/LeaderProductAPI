@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # ---- build stage ----
   FROM node:24-alpine AS builder
   WORKDIR /app
@@ -16,11 +17,11 @@
   COPY prisma.config.js ./
   COPY scripts ./scripts
   COPY prisma ./prisma
-  RUN for attempt in 1 2 3; do \
-        npm ci && break; \
-        if [ "$attempt" = "3" ]; then exit 1; fi; \
-        npm cache clean --force; \
-        sleep 5; \
+  RUN --mount=type=cache,target=/root/.npm \
+      for attempt in 1 2 3 4 5; do \
+        npm ci --prefer-offline && break; \
+        if [ "$attempt" = "5" ]; then exit 1; fi; \
+        sleep 10; \
       done
   
   COPY tsconfig.json ./

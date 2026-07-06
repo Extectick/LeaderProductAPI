@@ -411,7 +411,7 @@ router.get('/:guid/export-debug', authorizePermissions(['manage_client_orders'])
   }
 
   try {
-    const result = await getClientOrderExportDebug(parsed.data.guid);
+    const result = await getClientOrderExportDebug(parsed.data.guid, req.user!.userId);
     return res.json(successResponse(result, 'Отладочная информация отправки заказа клиента'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения отладочной информации заказа клиента');
@@ -457,7 +457,7 @@ router.delete('/:guid', authorizePermissions(['manage_client_orders']), async (r
   }
 
   try {
-    const result = await deleteDraftClientOrder(params.data.guid);
+    const result = await deleteDraftClientOrder(params.data.guid, req.user!.userId);
     return res.json(successResponse(result, 'Черновик заказа клиента удален'));
   } catch (err) {
     return handleError(res, err, 'Ошибка удаления черновика заказа клиента');

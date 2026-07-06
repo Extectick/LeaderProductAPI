@@ -560,12 +560,15 @@ function mapMatchedDepartmentRoleRules(
 ): DepartmentRoleRuleMatch[] {
   return rules
     .map((rule) => {
-      const matchingAssignments = ctx.roleAssignments.filter(
-        (assignment) =>
-          assignment.source === 'department_role' &&
-          assignment.sourceDepartmentId === rule.departmentId &&
-          assignment.roleId === rule.roleId
-      );
+      const matchingAssignments = ctx.roleAssignments.filter((assignment) => {
+        if (assignment.roleId !== rule.roleId) return false;
+
+        if (assignment.source === 'primary_role') {
+          return ctx.departmentIds.has(rule.departmentId);
+        }
+
+        return assignment.sourceDepartmentId === rule.departmentId;
+      });
       if (!matchingAssignments.length) return null;
       const distance = matchingAssignments.reduce(
         (value, assignment) => Math.min(value, assignment.distance),
