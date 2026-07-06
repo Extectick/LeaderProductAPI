@@ -123,4 +123,5 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
           script: |
+            git -C /opt/leader-api/LeaderProductAPI reset --hard
             /opt/leader-deploy/deploy.sh api "$IMAGE_TAG" "$GIT_REF"
