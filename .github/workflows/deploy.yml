@@ -2,7 +2,7 @@ name: Build & Deploy API
 
 on:
   push:
-    branches: [dev, production]
+    branches: [dev, main, production]
   release:
     types: [published]
   workflow_dispatch:
@@ -61,9 +61,9 @@ jobs:
             [ -n "$image_tag" ] || image_tag=latest
             [ -n "$git_ref" ] || git_ref=main
             [ "$image_tag" = "latest" ] && publish_latest=true
-          elif [ "${GITHUB_REF_NAME}" = "production" ]; then
+          elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "production" ]; then
             image_tag=latest
-            git_ref=production
+            git_ref="${GITHUB_REF_NAME}"
             deploy=true
             publish_latest=true
           fi
