@@ -12,6 +12,8 @@ export const queuedOrderSelect = {
   queuedAt: true,
   sentTo1cAt: true,
   deliveryDate: true,
+  paymentForm: true,
+  deliveryMethod: true,
   comment: true,
   currency: true,
   totalAmount: true,
@@ -93,6 +95,11 @@ export type QueuedOrderForExport = Prisma.OrderGetPayload<{ select: typeof queue
 
 export const clientOrderDirectPushLockKey = (guid: string) => `client-orders:direct-push:order:${guid}`;
 
+const CASH_PAYMENT_FORM = 'Наличная';
+const PICKUP_DELIVERY_METHOD = 'Самовывоз';
+const CASH_COMMENT_MARKER = 'НАЛИЧКА';
+const PICKUP_COMMENT_MARKER = 'САМОВЫВОЗ';
+
 const decimalToNumber = (value: Prisma.Decimal | number | string | null | undefined): number | null => {
   if (value === null || value === undefined) return null;
   if (typeof value === 'number') return value;
@@ -108,6 +115,38 @@ const compactFullName = (parts: Array<string | null | undefined>): string | null
     .trim();
   return value || null;
 };
+
+const normalizeEnumValue = (value: string | null | undefined) =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+
+const isCashPaymentForm = (value: string | null | undefined) => {
+  const normalized = normalizeEnumValue(value);
+  return normalized === normalizeEnumValue(CASH_PAYMENT_FORM) || normalized === 'наличка' || normalized === 'наличные';
+};
+
+const isPickupDeliveryMethod = (value: string | null | undefined) => {
+  const normalized = normalizeEnumValue(value);
+  return normalized === normalizeEnumValue(PICKUP_DELIVERY_METHOD) || normalized === 'самовывозснашегосклада';
+};
+
+const appendCommentMarker = (comment: string, marker: string) => {
+  if (comment.toUpperCase().includes(marker)) return comment;
+  return comment ? `${comment}\n${marker}` : marker;
+};
+
+function buildOrderCommentForOnec(order: Pick<QueuedOrderForExport, 'comment' | 'paymentForm' | 'deliveryMethod'>) {
+  let comment = String(order.comment ?? '').trim();
+  if (isCashPaymentForm(order.paymentForm)) {
+    comment = appendCommentMarker(comment, CASH_COMMENT_MARKER);
+  }
+  if (isPickupDeliveryMethod(order.deliveryMethod)) {
+    comment = appendCommentMarker(comment, PICKUP_COMMENT_MARKER);
+  }
+  return comment || null;
+}
 
 export function buildQueuedOrderPayload(order: QueuedOrderForExport) {
   const managerName = compactFullName([
@@ -126,7 +165,9 @@ export function buildQueuedOrderPayload(order: QueuedOrderForExport) {
     queuedAt: order.queuedAt,
     sentTo1cAt: order.sentTo1cAt,
     deliveryDate: order.deliveryDate,
-    comment: order.comment,
+    paymentForm: order.paymentForm,
+    deliveryMethod: order.deliveryMethod,
+    comment: buildOrderCommentForOnec(order),
     currency: order.currency,
     totalAmount: decimalToNumber(order.totalAmount),
     generalDiscountPercent: decimalToNumber(order.generalDiscountPercent),

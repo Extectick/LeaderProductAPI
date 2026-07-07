@@ -105,6 +105,8 @@ type PagedResult<T> = {
   hasMore?: boolean;
 };
 
+type ManagerAwareProductsQuery = ClientOrdersProductsQuery & { managerGuid?: string | null };
+type ManagerAwareBatchProductsBody = ClientOrdersBatchProductsBody & { managerGuid?: string | null };
 type ReferenceDetailsRow = { label: string; value: unknown };
 type ReferenceDetailsSection = { title: string; rows: ReferenceDetailsRow[] };
 
@@ -129,6 +131,24 @@ type ManagerOrderContext = {
 
 const DEFAULT_DELIVERY_DATE_MODE = ClientOrderDeliveryDateMode.NEXT_DAY;
 const DEFAULT_DELIVERY_DATE_OFFSET_DAYS = 1;
+const CLIENT_ORDER_PAYMENT_FORM_OPTIONS = [
+  { code: null, name: 'Любая', label: 'Любая' },
+  { code: 'Наличная', name: 'Наличная', label: 'Наличная' },
+];
+const CLIENT_ORDER_DELIVERY_METHOD_TO_CLIENT = 'ДоКлиента';
+const CLIENT_ORDER_DELIVERY_METHOD_PICKUP = 'Самовывоз';
+const CLIENT_ORDER_DELIVERY_METHOD_OPTIONS = [
+  { code: CLIENT_ORDER_DELIVERY_METHOD_TO_CLIENT, name: CLIENT_ORDER_DELIVERY_METHOD_TO_CLIENT, label: 'Наша доставка' },
+  { code: CLIENT_ORDER_DELIVERY_METHOD_PICKUP, name: CLIENT_ORDER_DELIVERY_METHOD_PICKUP, label: 'Самовывоз' },
+];
+
+function clientOrderPaymentFormOptions() {
+  return CLIENT_ORDER_PAYMENT_FORM_OPTIONS.map((item) => ({ ...item }));
+}
+
+function clientOrderDeliveryMethodOptions() {
+  return CLIENT_ORDER_DELIVERY_METHOD_OPTIONS.map((item) => ({ ...item }));
+}
 
 type PreparedOrderLine = {
   create: Prisma.OrderItemUncheckedCreateWithoutOrderInput;
@@ -168,6 +188,8 @@ const clientOrderSummarySelect = {
   status: true,
   comment: true,
   deliveryDate: true,
+  paymentForm: true,
+  deliveryMethod: true,
   totalAmount: true,
   currency: true,
   queuedAt: true,
@@ -297,7 +319,7 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     date1c: order.date1c,
     source: order.source,
     origin: 'local',
-    readOnly: order.hasRealization || order.status === OrderStatus.CANCELLED,
+    readOnly: order.hasRealization,
     readOnlyReason: order.hasRealization ? 'По заказу создана проведенная реализация товаров и услуг.' : null,
     revision: order.revision,
     syncState: order.syncState,
@@ -305,6 +327,8 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     queuePosition: resolveQueuePosition(order, queuePositions),
     comment: order.comment,
     deliveryDate: order.deliveryDate,
+    paymentForm: order.paymentForm,
+    deliveryMethod: order.deliveryMethod,
     totalAmount: decimalToNumber(order.totalAmount),
     currency: order.currency,
     queuedAt: order.queuedAt,
@@ -502,9 +526,6 @@ function ensureEditable(order: { status: OrderStatus; hasRealization?: boolean |
   if (order.hasRealization) {
     throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'По заказу создана реализация товаров и услуг. Документ доступен только для чтения');
   }
-  if (order.status === OrderStatus.CANCELLED) {
-    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя редактировать');
-  }
 }
 
 function assertRevision(currentRevision: number, expectedRevision: number) {
@@ -625,6 +646,9 @@ function mapAgreementSummary(
         currency: string | null;
         organizationGuid?: string | null;
         organization?: { guid: string; name: string; code?: string | null } | null;
+        managerGuid?: string | null;
+        managerName?: string | null;
+        manager?: { guid?: string | null; name?: string | null } | null;
         isActive?: boolean;
         contract?: { guid: string; number: string } | null;
         warehouse?: { guid: string; name: string } | null;
@@ -640,6 +664,9 @@ function mapAgreementSummary(
     currency: agreement.currency,
     organizationGuid: agreement.organizationGuid ?? agreement.organization?.guid ?? null,
     organization: agreement.organization ?? null,
+    managerGuid: agreement.managerGuid ?? agreement.manager?.guid ?? null,
+    managerName: agreement.managerName ?? agreement.manager?.name ?? null,
+    manager: agreement.manager ?? (agreement.managerGuid || agreement.managerName ? { guid: agreement.managerGuid ?? null, name: agreement.managerName ?? null } : null),
     isActive: agreement.isActive ?? true,
     contract: agreement.contract ?? null,
     warehouse: agreement.warehouse ?? null,
@@ -657,6 +684,9 @@ function mapContractSummary(
         validTo?: Date | string | null;
         organizationGuid?: string | null;
         organization?: { guid: string; name: string; code?: string | null } | null;
+        managerGuid?: string | null;
+        managerName?: string | null;
+        manager?: { guid?: string | null; name?: string | null } | null;
         status?: string | null;
         purpose?: string | null;
         isActive?: boolean;
@@ -673,6 +703,9 @@ function mapContractSummary(
     validTo: contract.validTo ?? null,
     organizationGuid: contract.organizationGuid ?? contract.organization?.guid ?? null,
     organization: contract.organization ?? null,
+    managerGuid: contract.managerGuid ?? contract.manager?.guid ?? null,
+    managerName: contract.managerName ?? contract.manager?.name ?? null,
+    manager: contract.manager ?? (contract.managerGuid || contract.managerName ? { guid: contract.managerGuid ?? null, name: contract.managerName ?? null } : null),
     status: contract.status ?? null,
     purpose: contract.purpose ?? null,
     isActive: contract.isActive ?? true,
@@ -1549,23 +1582,25 @@ async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: 
   );
 
   if (warehouseId && item.stock) {
+    const sharedAvailable = item.stock.freeAvailable ?? item.stock.available ?? null;
+    const sharedQuantity = item.stock.quantity ?? sharedAvailable ?? 0;
     await tx.stockBalance.upsert({
       where: { syncKey: `${warehouseId}|${product.id}` },
       create: {
         syncKey: `${warehouseId}|${product.id}`,
         productId: product.id,
         warehouseId,
-        quantity: toDecimal(item.stock.quantity ?? item.stock.available ?? 0)!,
+        quantity: toDecimal(sharedQuantity)!,
         reserved: item.stock.reserved !== null && item.stock.reserved !== undefined ? toDecimal(item.stock.reserved) : null,
-        available: item.stock.available !== null && item.stock.available !== undefined ? toDecimal(item.stock.available) : null,
+        available: sharedAvailable !== null && sharedAvailable !== undefined ? toDecimal(sharedAvailable) : null,
         updatedAt: sourceUpdatedAt,
         sourceUpdatedAt,
         lastSyncedAt: sourceUpdatedAt,
       },
       update: {
-        quantity: toDecimal(item.stock.quantity ?? item.stock.available ?? 0)!,
+        quantity: toDecimal(sharedQuantity)!,
         reserved: item.stock.reserved !== null && item.stock.reserved !== undefined ? toDecimal(item.stock.reserved) : null,
-        available: item.stock.available !== null && item.stock.available !== undefined ? toDecimal(item.stock.available) : null,
+        available: sharedAvailable !== null && sharedAvailable !== undefined ? toDecimal(sharedAvailable) : null,
         updatedAt: sourceUpdatedAt,
         sourceUpdatedAt,
         lastSyncedAt: sourceUpdatedAt,
@@ -1684,6 +1719,7 @@ async function findCachedContract(guid: string): Promise<LiveContract | null> {
       status: true,
       purpose: true,
       currency: true,
+      managerGuid: true,
       isActive: true,
       counterparty: { select: { guid: true } },
       organization: { select: { guid: true, name: true, code: true } },
@@ -1700,6 +1736,9 @@ async function findCachedContract(guid: string): Promise<LiveContract | null> {
         counterpartyGuid: item.counterparty?.guid ?? null,
         organizationGuid: item.organization?.guid ?? null,
         organization: item.organization,
+        managerGuid: item.managerGuid,
+        managerName: null,
+        manager: item.managerGuid ? { guid: item.managerGuid, name: null } : null,
         status: item.status,
         purpose: item.purpose,
         currency: item.currency,
@@ -1718,6 +1757,7 @@ async function findCachedAgreement(guid: string): Promise<LiveAgreement | null> 
       date: true,
       currency: true,
       status: true,
+      managerGuid: true,
       isActive: true,
       counterparty: { select: { guid: true } },
       organization: { select: { guid: true, name: true, code: true } },
@@ -1735,6 +1775,9 @@ async function findCachedAgreement(guid: string): Promise<LiveAgreement | null> 
         counterpartyGuid: item.counterparty?.guid ?? null,
         organizationGuid: item.organization?.guid ?? null,
         organization: item.organization,
+        managerGuid: item.managerGuid,
+        managerName: null,
+        manager: item.managerGuid ? { guid: item.managerGuid, name: null } : null,
         contractGuid: item.contract?.guid ?? null,
         warehouseGuid: item.warehouse?.guid ?? null,
         priceTypeGuid: item.priceType?.guid ?? null,
@@ -1774,28 +1817,27 @@ async function findCachedDeliveryAddress(guid: string): Promise<LiveDeliveryAddr
 
 async function loadLiveProductsForOrderMaterialization(
   body: ClientOrderCreateBody,
-  productGuids: string[]
+  productGuids: string[],
+  managerGuid?: string | null
 ): Promise<{ products: LiveProduct[]; source: LiveOrderMaterialization['productsSource'] }> {
+  const batchBody: ManagerAwareBatchProductsBody = {
+    productGuids,
+    organizationGuid: body.organizationGuid,
+    counterpartyGuid: body.counterpartyGuid,
+    agreementGuid: body.agreementGuid ?? undefined,
+    warehouseGuid: body.warehouseGuid ?? undefined,
+    priceTypeGuid: body.priceTypeGuid ?? undefined,
+    managerGuid: managerGuid ?? undefined,
+  };
   try {
     const products = await readThroughClientOrdersCache(
       'products:batch',
       {
+        ...batchBody,
         productGuids: productGuids.slice().sort(),
-        organizationGuid: body.organizationGuid,
-        counterpartyGuid: body.counterpartyGuid,
-        agreementGuid: body.agreementGuid ?? undefined,
-        warehouseGuid: body.warehouseGuid ?? undefined,
-        priceTypeGuid: body.priceTypeGuid ?? undefined,
       },
       CLIENT_ORDERS_CACHE_TTL.productsBatch,
-      () => getLiveProductsByGuids({
-        productGuids,
-        organizationGuid: body.organizationGuid,
-        counterpartyGuid: body.counterpartyGuid,
-        agreementGuid: body.agreementGuid ?? undefined,
-        warehouseGuid: body.warehouseGuid ?? undefined,
-        priceTypeGuid: body.priceTypeGuid ?? undefined,
-      })
+      () => getLiveProductsByGuids(batchBody)
     );
 
     return { products: products.filter(Boolean), source: 'live' };
@@ -1807,7 +1849,10 @@ async function loadLiveProductsForOrderMaterialization(
   }
 }
 
-async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promise<LiveOrderMaterialization> {
+async function loadLiveOrderMaterialization(
+  body: ClientOrderCreateBody,
+  managerGuid?: string | null
+): Promise<LiveOrderMaterialization> {
   const explicitPriceTypeGuids = [
     ...new Set(
       [body.priceTypeGuid, ...body.items.map((item) => item.priceTypeGuid)].filter(Boolean) as string[]
@@ -1898,7 +1943,7 @@ async function loadLiveOrderMaterialization(body: ClientOrderCreateBody): Promis
           )
         )
       ),
-      loadLiveProductsForOrderMaterialization(body, productGuids),
+      loadLiveProductsForOrderMaterialization(body, productGuids, managerGuid),
     ]);
 
   return {
@@ -2803,10 +2848,12 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
     lastStatusSyncAt: local.lastStatusSyncAt ?? order.lastStatusSyncAt,
     lastExportError: local.lastExportError,
     last1cError: local.last1cError,
+    paymentForm: local.paymentForm ?? order.paymentForm,
+    deliveryMethod: local.deliveryMethod ?? order.deliveryMethod,
     cancelRequestedAt: local.cancelRequestedAt,
     hasRealization,
     realizationDetectedAt: local.realizationDetectedAt ?? null,
-    readOnly: hasRealization || local.status === OrderStatus.CANCELLED,
+    readOnly: hasRealization,
     readOnlyReason: hasRealization
       ? (order.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
       : order.readOnlyReason,
@@ -3136,7 +3183,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             exportValidation,
             hasRealization: liveDetail.hasRealization || order.hasRealization,
             realizationDetectedAt: order.realizationDetectedAt,
-            readOnly: liveDetail.hasRealization || order.hasRealization || order.status === OrderStatus.CANCELLED,
+            readOnly: liveDetail.hasRealization || order.hasRealization,
             readOnlyReason: liveDetail.hasRealization || order.hasRealization
               ? (liveDetail.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
               : liveDetail.readOnlyReason,
@@ -3166,7 +3213,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     origin: 'local',
     queuePosition: resolveQueuePosition(order, queuePositions),
     exportValidation,
-    readOnly: mapped.hasRealization || mapped.status === OrderStatus.CANCELLED,
+    readOnly: mapped.hasRealization,
     readOnlyReason: mapped.hasRealization
       ? (mapped.readOnlyReason || 'По заказу создана проведенная реализация товаров и услуг.')
       : mapped.readOnlyReason,
@@ -3757,6 +3804,10 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
     contract,
     warehouse,
     deliveryAddress,
+    paymentForm: null,
+    paymentForms: clientOrderPaymentFormOptions(),
+    deliveryMethod: CLIENT_ORDER_DELIVERY_METHOD_TO_CLIENT,
+    deliveryMethods: clientOrderDeliveryMethodOptions(),
     currency: DEFAULT_ORDER_CURRENCY,
     deliveryDate: deliveryDateResolution.resolvedDate,
     deliveryDateIssue: deliveryDateResolution.issue,
@@ -3787,6 +3838,10 @@ function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResoluti
     warehouse,
     deliveryAddress,
     priceType,
+    paymentForm: null,
+    paymentForms: clientOrderPaymentFormOptions(),
+    deliveryMethod: CLIENT_ORDER_DELIVERY_METHOD_TO_CLIENT,
+    deliveryMethods: clientOrderDeliveryMethodOptions(),
     currency: defaults.currency || DEFAULT_ORDER_CURRENCY,
     deliveryDate: deliveryDateResolution.resolvedDate,
     deliveryDateIssue: deliveryDateResolution.issue,
@@ -3859,16 +3914,51 @@ export async function getClientOrdersReferenceData(query: ClientOrdersReferenceD
   );
 }
 
-async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery, search: string): Promise<PagedResult<any>> {
+type ClientOrdersCounterpartySearchItem = {
+  guid: string;
+  name: string;
+  fullName: string | null;
+  inn: string | null;
+  kpp: string | null;
+  phone?: string | null;
+  email?: string | null;
+  isActive: boolean;
+  managerGuid?: string | null;
+  managerName?: string | null;
+  manager?: { guid?: string | null; name?: string | null } | null;
+};
+
+async function getCounterpartiesFallback(
+  query: ClientOrdersCounterpartiesQuery,
+  search: string,
+  managerGuid?: string | null
+): Promise<PagedResult<ClientOrdersCounterpartySearchItem>> {
+  const and: Prisma.CounterpartyWhereInput[] = [];
+
+  if (search) {
+    and.push({
+      OR: [
+        { guid: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+        { fullName: { contains: search, mode: 'insensitive' } },
+        { inn: { contains: search, mode: 'insensitive' } },
+        { kpp: { contains: search, mode: 'insensitive' } },
+      ],
+    });
+  }
+
+  if (managerGuid) {
+    and.push({
+      OR: [
+        { agreements: { some: { managerGuid } } },
+        { contracts: { some: { managerGuid } } },
+      ],
+    });
+  }
+
   const where: Prisma.CounterpartyWhereInput = {
     ...(query.includeInactive ? {} : { isActive: true }),
-    OR: [
-      { guid: { contains: search, mode: 'insensitive' } },
-      { name: { contains: search, mode: 'insensitive' } },
-      { fullName: { contains: search, mode: 'insensitive' } },
-      { inn: { contains: search, mode: 'insensitive' } },
-      { kpp: { contains: search, mode: 'insensitive' } },
-    ],
+    ...(and.length ? { AND: and } : {}),
   };
   const [items, total] = await prisma.$transaction([
     prisma.counterparty.findMany({
@@ -3882,7 +3972,7 @@ async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery,
   ]);
 
   return {
-    items,
+    items: items.map((item) => (managerGuid ? { ...item, managerGuid } : item)),
     total,
     limit: query.limit,
     offset: query.offset,
@@ -3890,23 +3980,36 @@ async function getCounterpartiesFallback(query: ClientOrdersCounterpartiesQuery,
 }
 
 export async function getClientOrdersCounterparties(
-  query: ClientOrdersCounterpartiesQuery
-): Promise<PagedResult<{ guid: string; name: string; fullName: string | null; inn: string | null; kpp: string | null; isActive: boolean }>> {
+  query: ClientOrdersCounterpartiesQuery,
+  userId?: number
+): Promise<PagedResult<ClientOrdersCounterpartySearchItem>> {
   const search = (query.search || '').trim();
+  const managerGuid = query.managerOnly ? (userId ? await getManagerGuidForUser(userId) : null) : null;
+  if (query.managerOnly && !managerGuid) {
+    return {
+      items: [],
+      total: 0,
+      limit: query.limit,
+      offset: query.offset,
+    };
+  }
+  const liveQuery = managerGuid
+    ? ({ ...query, managerGuid } as ClientOrdersCounterpartiesQuery & { managerGuid: string })
+    : query;
   try {
     return await onecLive(
       () => readThroughClientOrdersCache(
         'counterparties',
-        query,
+        liveQuery,
         CLIENT_ORDERS_CACHE_TTL.counterparties,
-        () => getLiveCounterparties(query)
+        () => getLiveCounterparties(liveQuery)
       ),
       'Ошибка получения контрагентов из 1С',
       { allowCachedWhenCircuitOpen: true }
     );
   } catch (error) {
     if (isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502)) {
-      return getCounterpartiesFallback(query, search);
+      return getCounterpartiesFallback(query, search, managerGuid);
     }
     throw error;
   }
@@ -4197,13 +4300,15 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
   }
 }
 
-export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) {
+export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, userId?: number | null) {
+  const managerGuid = userId ? await getManagerGuidForUser(userId) : null;
+  const liveQuery: ManagerAwareProductsQuery = managerGuid ? { ...query, managerGuid } : query;
   const result = await onecLive(
     () => readThroughClientOrdersCache(
       'products',
-      query,
+      liveQuery,
       CLIENT_ORDERS_CACHE_TTL.products,
-      () => getLiveProducts(query)
+      () => getLiveProducts(liveQuery)
     ),
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
@@ -4423,13 +4528,15 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery) 
   */
 }
 
-export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody) {
+export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody, userId?: number | null) {
+  const managerGuid = userId ? await getManagerGuidForUser(userId) : null;
+  const liveBody: ManagerAwareBatchProductsBody = managerGuid ? { ...body, managerGuid } : body;
   const items = await onecLive(
     () => readThroughClientOrdersCache(
       'products:batch',
-      { ...body, productGuids: [...new Set(body.productGuids)].sort() },
+      { ...liveBody, productGuids: [...new Set(liveBody.productGuids)].sort() },
       CLIENT_ORDERS_CACHE_TTL.productsBatch,
-      () => getLiveProductsByGuids(body)
+      () => getLiveProductsByGuids(liveBody)
     ),
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
@@ -4506,7 +4613,8 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
 
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
   const sourceUpdatedAt = now();
-  const liveReferences = await loadLiveOrderMaterialization(body);
+  const managerGuid = await getManagerGuidForUser(userId);
+  const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
 
   const created = await prisma.$transaction(async (tx) => {
     await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
@@ -4531,6 +4639,8 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         createdByUserId: userId,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
+        paymentForm: body.paymentForm ?? null,
+        deliveryMethod: body.deliveryMethod ?? null,
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4558,6 +4668,8 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         saveReason: body.saveReason,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
+        paymentForm: body.paymentForm ?? null,
+        deliveryMethod: body.deliveryMethod ?? null,
         generalDiscountPercent: body.generalDiscountPercent ?? null,
         items: prepared.items.map((item) => item.snapshot),
       } as Prisma.InputJsonValue,
@@ -4596,6 +4708,8 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
     deliveryAddressGuid: source.deliveryAddress?.guid ?? null,
     priceTypeGuid: source.priceType?.guid ?? source.agreement?.priceType?.guid ?? null,
     deliveryDate: dateForCreatePayload(source.deliveryDate),
+    paymentForm: source.paymentForm ?? null,
+    deliveryMethod: source.deliveryMethod ?? null,
     comment: source.comment ?? undefined,
     currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
     saveReason: 'manual',
@@ -4631,7 +4745,8 @@ export function resolveUpdatedOrderQueueState(currentStatus: OrderStatus) {
 
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
   const sourceUpdatedAt = now();
-  const liveReferences = await loadLiveOrderMaterialization(body);
+  const managerGuid = await getManagerGuidForUser(userId);
+  const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
 
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findFirst({
@@ -4680,6 +4795,8 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         priceTypeId: context.priceType?.id ?? null,
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
+        paymentForm: body.paymentForm ?? null,
+        deliveryMethod: body.deliveryMethod ?? null,
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4709,6 +4826,8 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           saveReason: body.saveReason,
           comment: body.comment ?? null,
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
+          paymentForm: body.paymentForm ?? null,
+          deliveryMethod: body.deliveryMethod ?? null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,
           items: prepared.items.map((item) => item.snapshot),
         } as Prisma.InputJsonValue,

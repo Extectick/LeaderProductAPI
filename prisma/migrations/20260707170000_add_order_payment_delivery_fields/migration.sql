@@ -1,0 +1,3 @@
+ALTER TABLE "Order"
+  ADD COLUMN IF NOT EXISTS "paymentForm" TEXT,
+  ADD COLUMN IF NOT EXISTS "deliveryMethod" TEXT;

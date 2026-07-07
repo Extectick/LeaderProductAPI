@@ -33,11 +33,15 @@ describe('client orders query schemas', () => {
       warehouseGuid: null,
       deliveryAddressGuid: null,
       priceTypeGuid: 'price-type-guid',
+      paymentForm: 'Безналичная',
+      deliveryMethod: 'Самовывоз',
       saveReason: 'manual',
       items: [{ lineGuid: 'line-guid-1', productGuid: 'product-guid', quantity: 1, priceTypeGuid: null }],
     });
 
     expect(result.priceTypeGuid).toBe('price-type-guid');
+    expect(result.paymentForm).toBe('Безналичная');
+    expect(result.deliveryMethod).toBe('Самовывоз');
     expect(result.items[0].lineGuid).toBe('line-guid-1');
   });
 

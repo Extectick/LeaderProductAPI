@@ -373,6 +373,7 @@ async function validateOrderStockBeforeExport(order: QueuedOrderForExport) {
     counterpartyGuid: order.counterparty?.guid ?? undefined,
     agreementGuid: order.agreement?.guid ?? undefined,
     warehouseGuid: order.warehouse.guid,
+    managerGuid: order.createdByUser?.employeeProfile?.onecUserGuid ?? undefined,
   });
   const liveByGuid = new Map(products.map((product) => [product.guid.toLowerCase(), product]));
   const deficits: string[] = [];

@@ -179,7 +179,7 @@ describe('/api/client-orders live reference routes', () => {
       offset: 4,
       search: 'Абдулаева',
       includeInactive: false,
-    });
+    }, 1);
     expectPagedResponse(response.body, 1, { total: 9, limit: 2, offset: 4 });
     expect(response.body.data.items[0]).toMatchObject({
       guid: 'counterparty-guid',
@@ -254,7 +254,7 @@ describe('/api/client-orders live reference routes', () => {
       warehouseGuid: 'warehouse-guid',
       priceTypeGuid: 'price-type-guid',
       inStockOnly: true,
-    });
+    }, 1);
     expectPagedResponse(response.body, 1, { total: 12, limit: 25, offset: 0 });
     expect(response.body.data.items[0]).toMatchObject({
       guid: 'product-guid',
@@ -348,7 +348,7 @@ describe('/api/client-orders live reference routes', () => {
       .get('/api/client-orders/order-guid/export-debug');
 
     expect(response.status).toBe(200);
-    expect(service.getClientOrderExportDebug).toHaveBeenCalledWith('order-guid');
+    expect(service.getClientOrderExportDebug).toHaveBeenCalledWith('order-guid', 1);
     expect(response.body.data).toMatchObject({
       guid: 'order-guid',
       status: 'ERROR',
@@ -401,7 +401,7 @@ describe('/api/client-orders live reference routes', () => {
       .delete('/api/client-orders/queued-guid');
 
     expect(response.status).toBe(200);
-    expect(service.deleteDraftClientOrder).toHaveBeenCalledWith('queued-guid');
+    expect(service.deleteDraftClientOrder).toHaveBeenCalledWith('queued-guid', 1);
     expect(response.body.data).toEqual({ deleted: true, guid: 'queued-guid' });
   });
 

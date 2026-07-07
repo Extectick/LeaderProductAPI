@@ -622,6 +622,8 @@ model Order {
   status            OrderStatus @default(DRAFT)
   comment           String?
   deliveryDate      DateTime?
+  paymentForm       String?
+  deliveryMethod    String?
   totalAmount       Decimal?    @db.Decimal(18, 2)
   currency          String?
   generalDiscountPercent Decimal? @db.Decimal(5, 2)

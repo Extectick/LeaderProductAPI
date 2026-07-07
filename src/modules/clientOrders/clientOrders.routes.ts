@@ -191,7 +191,7 @@ router.get('/counterparties', authorizePermissions(['view_client_orders']), asyn
   }
 
   try {
-    const result = await getClientOrdersCounterparties(parsed.data);
+    const result = await getClientOrdersCounterparties(parsed.data, req.user!.userId);
     return res.json(
       successResponse(
         { items: result.items },
@@ -311,7 +311,7 @@ router.get('/products', authorizePermissions(['view_client_orders']), async (req
   }
 
   try {
-    const result = await getClientOrdersProducts(parsed.data);
+    const result = await getClientOrdersProducts(parsed.data, req.user!.userId);
     return res.json(
       successResponse(
         { items: result.items },
@@ -331,7 +331,7 @@ router.post('/products/batch', authorizePermissions(['view_client_orders']), asy
   }
 
   try {
-    const items = await getClientOrdersProductsByGuids(parsed.data);
+    const items = await getClientOrdersProductsByGuids(parsed.data, req.user!.userId);
     return res.json(successResponse({ items }, 'Данные номенклатуры для заказа клиента'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения данных номенклатуры для заказа клиента');

@@ -32,6 +32,11 @@ const nullableDate = z.preprocess(
   z.coerce.date().optional()
 );
 
+const nullableEnumCode = z.preprocess(
+  (value) => (value === '' ? null : value),
+  z.string().trim().min(1).max(128).nullable().optional()
+);
+
 const parseDateFromQuery = (value: unknown): Date | undefined => {
   if (value === undefined || value === null || value === '') return undefined;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value;
@@ -141,7 +146,9 @@ export const clientOrdersReferenceDataQuerySchema = z.object({
   includeInactive: booleanFromQuery,
 });
 
-export const clientOrdersCounterpartiesQuerySchema = pagedSearchQuerySchema;
+export const clientOrdersCounterpartiesQuerySchema = pagedSearchQuerySchema.extend({
+  managerOnly: optionalBooleanFromQuery,
+});
 
 export const clientOrdersAgreementsQuerySchema = pagedSearchQuerySchema.extend({
   counterpartyGuid: z.string().trim().min(1).optional(),
@@ -246,6 +253,8 @@ export const clientOrderCreateSchema = z.object({
   deliveryAddressGuid: nullableGuid,
   priceTypeGuid: nullableGuid,
   deliveryDate: nullableDate,
+  paymentForm: nullableEnumCode,
+  deliveryMethod: nullableEnumCode,
   comment: z.string().trim().max(2000).optional(),
   currency: z.string().trim().min(1).max(16).optional(),
   saveReason: saveReasonSchema,

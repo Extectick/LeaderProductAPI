@@ -1256,6 +1256,8 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
               organizationId: organizationId ?? undefined,
               comment: item.comment ?? null,
               deliveryDate: item.deliveryDate ?? null,
+              paymentForm: item.paymentForm ?? null,
+              deliveryMethod: item.deliveryMethod ?? null,
               currency: item.currency ?? undefined,
               totalAmount:
                 item.totalAmount !== undefined && item.totalAmount !== null

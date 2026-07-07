@@ -17,6 +17,8 @@ describe('client order 1C queue payload', () => {
       queuedAt: new Date('2026-06-27T10:06:00.000Z'),
       sentTo1cAt: null,
       deliveryDate,
+      paymentForm: 'Безналичная',
+      deliveryMethod: 'Самовывоз',
       comment: 'Комментарий',
       currency: 'RUB',
       totalAmount: new Prisma.Decimal(2000),
@@ -124,6 +126,9 @@ describe('client order 1C queue payload', () => {
       appGuid: 'order-guid',
       revision: 12,
       deliveryDate,
+      paymentForm: 'Безналичная',
+      deliveryMethod: 'Самовывоз',
+      comment: 'Комментарий\nСАМОВЫВОЗ',
       totalAmount: 2000,
       manager: {
         guid: 'manager-guid',
@@ -162,5 +167,48 @@ describe('client order 1C queue payload', () => {
         },
       ],
     });
+  });
+
+  it('adds 1C comment markers for cash payment and pickup without duplicates', () => {
+    const payload = buildQueuedOrderPayload({
+      id: 11,
+      guid: 'order-guid',
+      source: 'MANAGER_APP',
+      revision: 1,
+      syncState: 'QUEUED',
+      status: 'QUEUED',
+      createdAt: new Date('2026-06-27T10:00:00.000Z'),
+      updatedAt: new Date('2026-06-27T10:05:00.000Z'),
+      queuedAt: new Date('2026-06-27T10:06:00.000Z'),
+      sentTo1cAt: null,
+      deliveryDate: null,
+      paymentForm: 'Наличная',
+      deliveryMethod: 'Самовывоз',
+      comment: 'НАЛИЧКА',
+      currency: 'RUB',
+      totalAmount: new Prisma.Decimal(0),
+      generalDiscountPercent: null,
+      generalDiscountAmount: null,
+      exportAttempts: 0,
+      lastExportError: null,
+      isPostedIn1c: false,
+      postedAt1c: null,
+      hasRealization: false,
+      realizationDetectedAt: null,
+      cancelRequestedAt: null,
+      cancelReason: null,
+      last1cError: null,
+      sourceUpdatedAt: new Date('2026-06-27T10:06:00.000Z'),
+      organization: null,
+      counterparty: null,
+      agreement: null,
+      contract: null,
+      warehouse: null,
+      deliveryAddress: null,
+      createdByUser: null,
+      items: [],
+    } as any);
+
+    expect(payload.comment).toBe('НАЛИЧКА\nСАМОВЫВОЗ');
   });
 });

@@ -93,6 +93,8 @@ describe('clientOrders 1C live adapter', () => {
             phone: '+7 913 000-00-01',
             email: 'counterparty@example.test',
             partnerGuid: 'partner-guid',
+            managerGuid: 'manager-guid',
+            managerName: 'Manager',
             partnerName: 'Партнер',
             isActive: true,
           },
@@ -139,6 +141,8 @@ describe('clientOrders 1C live adapter', () => {
       kpp: '540001001',
       phone: '+7 913 000-00-01',
       email: 'counterparty@example.test',
+      managerGuid: 'manager-guid',
+      managerName: 'Manager',
       isActive: true,
     });
   });
@@ -179,7 +183,7 @@ describe('clientOrders 1C live adapter', () => {
     organizationsMock.mockResolvedValueOnce(paged([{ guid: 'org-guid', name: 'Организация', code: 'ORG' }], { limit: 1, offset: 0 }));
     warehousesMock.mockResolvedValueOnce(paged([{ guid: 'warehouse-guid', name: 'Склад', code: 'WH' }], { limit: 1, offset: 1 }));
     contractsMock.mockResolvedValueOnce(
-      paged([{ guid: 'contract-guid', number: 'Д-1', counterpartyGuid: 'counterparty-guid', organizationGuid: 'org-guid', organization: { guid: 'org-guid', name: 'Организация' } }], {
+      paged([{ guid: 'contract-guid', number: 'Д-1', counterpartyGuid: 'counterparty-guid', organizationGuid: 'org-guid', organization: { guid: 'org-guid', name: 'Организация' }, managerGuid: 'manager-guid', managerName: 'Менеджер' }], {
         limit: 1,
         offset: 2,
       })
@@ -192,6 +196,8 @@ describe('clientOrders 1C live adapter', () => {
           counterpartyGuid: 'counterparty-guid',
           organizationGuid: 'org-guid',
           organization: { guid: 'org-guid', name: 'Организация' },
+          managerGuid: 'manager-guid',
+          managerName: 'Менеджер',
           warehouseGuid: 'warehouse-guid',
           priceTypeGuid: 'price-type-guid',
           currency: 'RUB',
@@ -263,6 +269,8 @@ describe('clientOrders 1C live adapter', () => {
     expect(contractPage.offset).toBe(2);
     expect(contractPage.items[0].organization).toMatchObject({ guid: 'org-guid', name: 'Организация' });
     expect(agreementPage.items[0].organization).toMatchObject({ guid: 'org-guid', name: 'Организация' });
+    expect(contractPage.items[0]).toMatchObject({ managerGuid: 'manager-guid', managerName: 'Менеджер' });
+    expect(agreementPage.items[0]).toMatchObject({ managerGuid: 'manager-guid', managerName: 'Менеджер' });
     expect(contractsMock).toHaveBeenCalledWith(expect.objectContaining({ counterpartyGuid: 'counterparty-guid' }));
   });
 
@@ -336,6 +344,16 @@ describe('clientOrders 1C live adapter', () => {
       },
       contract: { guid: 'contract-guid', number: 'Д-1', counterpartyGuid: 'counterparty-guid', organizationGuid: 'org-guid', organization: { guid: 'org-guid', name: 'Организация' } },
       deliveryAddress: { guid: 'address-guid', fullAddress: 'Новосибирск', counterpartyGuid: 'counterparty-guid' },
+      paymentForm: null,
+      paymentForms: [
+        { code: null, name: 'Любая', label: 'Любая' },
+        { code: 'Безналичная', name: 'Безналичная', label: 'Безналичная' },
+      ],
+      deliveryMethod: 'Самовывоз',
+      deliveryMethods: [
+        { code: 'Самовывоз', name: 'Самовывоз', label: 'Самовывоз (с нашего склада)' },
+        { code: 'ДоКлиента', name: 'ДоКлиента', label: 'Наша транспортная служба до клиента' },
+      ],
       currency: 'RUB',
       warnings: ['warning'],
     });
@@ -360,6 +378,16 @@ describe('clientOrders 1C live adapter', () => {
     });
     expect(result.contract).toMatchObject({ guid: 'contract-guid', organization: { guid: 'org-guid', name: 'Организация' } });
     expect(result.deliveryAddress).toMatchObject({ guid: 'address-guid', fullAddress: 'Новосибирск' });
+    expect(result.paymentForm).toBeNull();
+    expect(result.paymentForms).toEqual([
+      { code: null, name: 'Любая', label: 'Любая' },
+      { code: 'Наличная', name: 'Наличная', label: 'Наличная' },
+    ]);
+    expect(result.deliveryMethod).toBe('ДоКлиента');
+    expect(result.deliveryMethods).toEqual([
+      { code: 'ДоКлиента', name: 'ДоКлиента', label: 'Наша доставка' },
+      { code: 'Самовывоз', name: 'Самовывоз', label: 'Самовывоз' },
+    ]);
     expect(result.warnings).toEqual(['warning']);
   });
 
@@ -376,7 +404,7 @@ describe('clientOrders 1C live adapter', () => {
           price: 123.45,
           costPrice: 111.11,
           currency: 'RUB',
-          stock: { quantity: 37, reserved: 2, available: 35 },
+          stock: { quantity: 37, reserved: 2, available: 35, freeAvailable: 15, myReserved: 20 },
           isActive: true,
         },
         {
@@ -393,6 +421,7 @@ describe('clientOrders 1C live adapter', () => {
       search: 'молоко',
       warehouseGuid: 'warehouse-guid',
       priceTypeGuid: 'price-type-guid',
+      managerGuid: 'manager-guid',
       inStockOnly: true,
       includeInactive: false,
     });
@@ -402,6 +431,7 @@ describe('clientOrders 1C live adapter', () => {
         search: 'молоко',
         warehouseGuid: 'warehouse-guid',
         priceTypeGuid: 'price-type-guid',
+        managerGuid: 'manager-guid',
         inStockOnly: true,
       })
     );
@@ -414,7 +444,7 @@ describe('clientOrders 1C live adapter', () => {
       basePrice: 123.45,
       receiptPrice: 111.11,
       currency: 'RUB',
-      stock: { quantity: 37, reserved: 2, available: 35 },
+      stock: { quantity: 37, reserved: 2, available: 35, freeAvailable: 15, myReserved: 20 },
     });
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12 });
   });
@@ -470,6 +500,7 @@ describe('clientOrders 1C live adapter', () => {
       productGuids: ['product-1', 'product-2'],
       warehouseGuid: 'warehouse-guid',
       priceTypeGuid: 'price-type-guid',
+      managerGuid: 'manager-guid',
     });
 
     expect(nomenclatureMock).toHaveBeenCalledWith(
@@ -477,9 +508,13 @@ describe('clientOrders 1C live adapter', () => {
         guids: 'product-1,product-2',
         warehouseGuid: 'warehouse-guid',
         priceTypeGuid: 'price-type-guid',
+        managerGuid: 'manager-guid',
       })
     );
-    expect(nomenclatureItemMock).toHaveBeenCalledWith('product-1', expect.objectContaining({ warehouseGuid: 'warehouse-guid' }));
+    expect(nomenclatureItemMock).toHaveBeenCalledWith(
+      'product-1',
+      expect.objectContaining({ warehouseGuid: 'warehouse-guid', managerGuid: 'manager-guid' })
+    );
     expect(result.map((item) => item.guid)).toEqual(['product-1', 'product-2']);
   });
 
@@ -509,6 +544,8 @@ describe('clientOrders 1C live adapter', () => {
             appGuid: 'local-app-guid',
             documentNumber: '00-000123',
             documentDate: '2026-06-25T09:00:00.000Z',
+            paymentForm: 'Безналичная',
+            deliveryMethod: 'Самовывоз',
             counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
             organization: { guid: 'org-guid', name: 'Организация' },
             warehouse: { guid: 'warehouse-guid', name: 'Склад' },
@@ -540,9 +577,11 @@ describe('clientOrders 1C live adapter', () => {
       documentGuid: 'onec-document-guid',
       appGuid: 'local-app-guid',
       number1c: '00-000123',
+      paymentForm: 'Безналичная',
+      deliveryMethod: 'Самовывоз',
       syncState: 'SYNCED',
       status: 'CONFIRMED',
-      readOnly: true,
+      readOnly: false,
       counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
       itemsCount: 2,
     });

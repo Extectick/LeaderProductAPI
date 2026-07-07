@@ -52,6 +52,9 @@ export type LiveCounterparty = {
   phone?: string | null;
   email?: string | null;
   isActive: boolean;
+  managerGuid?: string | null;
+  managerName?: string | null;
+  manager?: { guid?: string | null; name?: string | null } | null;
   defaultAgreement?: LiveAgreement | null;
   defaultContract?: LiveContract | null;
   defaultWarehouse?: LiveWarehouse | null;
@@ -67,6 +70,9 @@ export type LiveAgreement = {
   counterpartyGuid?: string | null;
   organizationGuid?: string | null;
   organization?: { guid: string; name: string; code?: string | null } | null;
+  managerGuid?: string | null;
+  managerName?: string | null;
+  manager?: { guid?: string | null; name?: string | null } | null;
   contractGuid?: string | null;
   warehouseGuid?: string | null;
   priceTypeGuid?: string | null;
@@ -88,6 +94,9 @@ export type LiveContract = {
   counterpartyGuid?: string | null;
   organizationGuid?: string | null;
   organization?: { guid: string; name: string; code?: string | null } | null;
+  managerGuid?: string | null;
+  managerName?: string | null;
+  manager?: { guid?: string | null; name?: string | null } | null;
   status?: string | null;
   purpose?: string | null;
   currency?: string | null;
@@ -126,12 +135,26 @@ export type LiveDeliveryAddress = {
   isActive: boolean;
 };
 
+export type LiveClientOrderOption = {
+  code: string | null;
+  name: string;
+  label: string;
+};
+
 export type LiveProductPackage = {
   guid: string;
   name: string;
   multiplier: number | null;
   isDefault: boolean;
   unit: { guid: string; name: string; symbol?: string | null } | null;
+};
+
+export type LiveProductStock = {
+  quantity?: number | null;
+  reserved?: number | null;
+  available?: number | null;
+  freeAvailable?: number | null;
+  myReserved?: number | null;
 };
 
 export type LiveProduct = {
@@ -148,7 +171,7 @@ export type LiveProduct = {
   receiptPrice: number | null;
   currency: string | null;
   priceType: { guid: string; name: string } | null;
-  stock: { quantity?: number | null; reserved?: number | null; available?: number | null } | null;
+  stock: LiveProductStock | null;
   priceMatch: unknown;
   priceError: string | null;
 };
@@ -170,6 +193,10 @@ export type LiveClientOrderDefaults = {
   warehouse: LiveWarehouse | null;
   deliveryAddress: LiveDeliveryAddress | null;
   priceType: LivePriceType | null;
+  paymentForm: string | null;
+  paymentForms: LiveClientOrderOption[];
+  deliveryMethod: string | null;
+  deliveryMethods: LiveClientOrderOption[];
   currency: string | null;
   warnings: string[];
 };
@@ -193,6 +220,8 @@ export type LiveClientOrder = {
   documentStatus1c: string | null;
   comment: string | null;
   deliveryDate: string | Date | null;
+  paymentForm: string | null;
+  deliveryMethod: string | null;
   totalAmount: number | null;
   currency: string;
   priceType: { guid: string; name: string } | null;
@@ -244,6 +273,17 @@ type AnyRecord = Record<string, unknown>;
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_CURRENCY = 'RUB';
+const DELIVERY_METHOD_TO_CLIENT = 'ДоКлиента';
+const DELIVERY_METHOD_PICKUP = 'Самовывоз';
+const DEFAULT_DELIVERY_METHOD = DELIVERY_METHOD_TO_CLIENT;
+const DEFAULT_PAYMENT_FORM_OPTIONS: LiveClientOrderOption[] = [
+  { code: null, name: 'Любая', label: 'Любая' },
+  { code: 'Наличная', name: 'Наличная', label: 'Наличная' },
+];
+const DEFAULT_DELIVERY_METHOD_OPTIONS: LiveClientOrderOption[] = [
+  { code: DELIVERY_METHOD_TO_CLIENT, name: DELIVERY_METHOD_TO_CLIENT, label: 'Наша доставка' },
+  { code: DELIVERY_METHOD_PICKUP, name: DELIVERY_METHOD_PICKUP, label: 'Самовывоз' },
+];
 
 function asRecord(value: unknown): AnyRecord | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as AnyRecord) : null;
@@ -671,6 +711,9 @@ function mapCounterparty(record: AnyRecord): LiveCounterparty | null {
     const mapped = asRecord(item);
     return mapped ? [mapDeliveryAddress(mapped)].filter(Boolean) as LiveDeliveryAddress[] : [];
   });
+  const managerRecord = readObject(record, ['manager', 'responsibleManager']);
+  const managerGuid = text(record, ['managerGuid', 'responsibleManagerGuid'], null) ?? entityGuid(managerRecord);
+  const managerName = text(record, ['managerName', 'responsibleManagerName'], null) ?? text(managerRecord, ['name'], null);
   return {
     guid,
     name,
@@ -680,6 +723,9 @@ function mapCounterparty(record: AnyRecord): LiveCounterparty | null {
     phone: text(record, ['phone', 'Телефон'], null),
     email: text(record, ['email', 'Email'], null),
     isActive: isEntityActive(record),
+    managerGuid,
+    managerName,
+    manager: managerGuid || managerName ? { guid: managerGuid, name: managerName } : null,
     defaultAgreement: mapAgreement(readObject(record, ['defaultAgreement', 'agreement']) ?? {}),
     defaultContract: mapContract(readObject(record, ['defaultContract', 'contract']) ?? {}),
     defaultWarehouse: mapWarehouse(readObject(record, ['defaultWarehouse', 'warehouse']) ?? {}),
@@ -693,7 +739,10 @@ function mapContract(record: AnyRecord): LiveContract | null {
   const number = text(record, ['number', 'name', 'Номер', 'Наименование'], guid);
   if (!guid || !number) return null;
   const organizationRecord = readObject(record, ['organization']);
+  const managerRecord = readObject(record, ['manager', 'responsibleManager']);
   const organizationGuid = text(record, ['organizationGuid'], null) ?? entityGuid(organizationRecord);
+  const managerGuid = text(record, ['managerGuid', 'responsibleManagerGuid'], null) ?? entityGuid(managerRecord);
+  const managerName = text(record, ['managerName', 'responsibleManagerName'], null) ?? text(managerRecord, ['name'], null);
   const organizationName = text(organizationRecord, ['name', 'Наименование'], null) ?? text(record, ['organizationName'], null);
   return {
     guid,
@@ -711,6 +760,9 @@ function mapContract(record: AnyRecord): LiveContract | null {
           code: text(organizationRecord, ['code', 'Код'], null) ?? text(record, ['organizationCode'], null),
         }
       : null,
+    managerGuid,
+    managerName,
+    manager: managerGuid || managerName ? { guid: managerGuid, name: managerName } : null,
     status: text(record, ['status'], null),
     purpose: text(record, ['purpose', 'ТипДоговора', 'contractType', 'ЦельДоговора'], null),
     currency: text(record, ['currency'], null),
@@ -726,10 +778,13 @@ function mapAgreement(record: AnyRecord): LiveAgreement | null {
   const warehouseRecord = readObject(record, ['warehouse']);
   const priceTypeRecord = readObject(record, ['priceType']);
   const organizationRecord = readObject(record, ['organization']);
+  const managerRecord = readObject(record, ['manager', 'responsibleManager']);
   const contractGuid = text(record, ['contractGuid'], null) ?? entityGuid(contractRecord);
   const warehouseGuid = text(record, ['warehouseGuid'], null) ?? entityGuid(warehouseRecord);
   const priceTypeGuid = text(record, ['priceTypeGuid'], null) ?? entityGuid(priceTypeRecord);
   const organizationGuid = text(record, ['organizationGuid'], null) ?? entityGuid(organizationRecord);
+  const managerGuid = text(record, ['managerGuid', 'responsibleManagerGuid'], null) ?? entityGuid(managerRecord);
+  const managerName = text(record, ['managerName', 'responsibleManagerName'], null) ?? text(managerRecord, ['name'], null);
   const organizationName = text(organizationRecord, ['name', 'Наименование'], null) ?? text(record, ['organizationName'], null);
   return {
     guid,
@@ -745,6 +800,9 @@ function mapAgreement(record: AnyRecord): LiveAgreement | null {
           code: text(organizationRecord, ['code', 'Код'], null) ?? text(record, ['organizationCode'], null),
         }
       : null,
+    managerGuid,
+    managerName,
+    manager: managerGuid || managerName ? { guid: managerGuid, name: managerName } : null,
     contractGuid,
     warehouseGuid,
     priceTypeGuid,
@@ -817,6 +875,10 @@ function mapClientOrderDefaultsPayload(payload: unknown): LiveClientOrderDefault
     warehouse: mapWarehouse(readObject(record, ['warehouse', 'Склад']) ?? {}),
     deliveryAddress: mapDeliveryAddress(readObject(record, ['deliveryAddress', 'АдресДоставки']) ?? {}),
     priceType: mapPriceType(readObject(record, ['priceType', 'ВидЦены']) ?? {}),
+    paymentForm: null,
+    paymentForms: DEFAULT_PAYMENT_FORM_OPTIONS.map((item) => ({ ...item })),
+    deliveryMethod: DEFAULT_DELIVERY_METHOD,
+    deliveryMethods: DEFAULT_DELIVERY_METHOD_OPTIONS.map((item) => ({ ...item })),
     currency: text(record, ['currency', 'Валюта'], DEFAULT_CURRENCY),
     warnings,
   };
@@ -870,9 +932,19 @@ function mapStock(record: AnyRecord | null | undefined) {
   if (!record) return null;
   const quantity = numberValue(record, ['quantity', 'inStock', 'stock'], null);
   const reserved = numberValue(record, ['reserved'], null);
-  const available = numberValue(record, ['available'], quantity);
-  if (quantity === null && reserved === null && available === null) return null;
-  return { quantity, reserved, available };
+  const freeAvailable = numberValue(record, ['freeAvailable'], null);
+  const myReserved = numberValue(record, ['myReserved'], null);
+  const available = numberValue(record, ['available'], freeAvailable ?? quantity);
+  if (
+    quantity === null &&
+    reserved === null &&
+    available === null &&
+    freeAvailable === null &&
+    myReserved === null
+  ) {
+    return null;
+  }
+  return { quantity, reserved, available, freeAvailable, myReserved };
 }
 
 function mapProduct(record: AnyRecord): LiveProduct | null {
@@ -1067,7 +1139,6 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
   });
   const orderGuid = preferDocumentGuid ? (documentGuid ?? appGuid) : (appGuid ?? documentGuid);
   const isPosted = bool(record, ['isPostedIn1c', 'isPosted', 'posted', 'Проведен'], false);
-  const remoteEditable = bool(record, ['isEditable', 'editable'], false);
   const hasRealization = bool(record, ['hasRealization', 'realizationExists'], false);
   const priceType = mapNamedRef(readObject(record, ['priceType']), ['guid', 'priceTypeGuid'], ['name', 'priceTypeName']);
   const currentState1c = text(record, ['currentState1c', 'currentState', 'state1c', 'stateName', 'Состояние'], null);
@@ -1081,8 +1152,10 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     date1c: text(record, ['date1c', 'documentDate', 'date', 'Дата'], null),
     source: 'ONEC_LIVE',
     origin: 'onec',
-    readOnly: hasRealization || !remoteEditable,
-    readOnlyReason: text(record, ['readOnlyReason'], null) ?? (!remoteEditable ? 'Документ 1С открыт только для просмотра в приложении.' : null),
+    readOnly: hasRealization,
+    readOnlyReason: hasRealization
+      ? text(record, ['readOnlyReason'], null) ?? 'По заказу создана проведенная реализация товаров и услуг.'
+      : null,
     hasRealization,
     revision: numberValue(record, ['revision'], 1) ?? 1,
     syncState: 'SYNCED',
@@ -1092,6 +1165,8 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     documentStatus1c,
     comment: text(record, ['comment', 'Комментарий'], null),
     deliveryDate: text(record, ['deliveryDate', 'shipmentDate', 'ДатаОтгрузки'], null),
+    paymentForm: text(record, ['paymentForm', 'ФормаОплаты'], null),
+    deliveryMethod: text(record, ['deliveryMethod', 'СпособДоставки'], null),
     totalAmount: numberValue(record, ['totalAmount', 'amount', 'СуммаДокумента'], null),
     currency: text(record, ['currency'], DEFAULT_CURRENCY) ?? DEFAULT_CURRENCY,
     priceType,
@@ -1153,7 +1228,7 @@ export async function findLiveOrganization(guid: string) {
   return findOneFromList(guid, {}, getOnecLpAppOrganizations, ['organizations'], mapOrganization);
 }
 
-export async function getLiveCounterparties(query: ClientOrdersCounterpartiesQuery) {
+export async function getLiveCounterparties(query: ClientOrdersCounterpartiesQuery & { managerGuid?: string | null }) {
   return liveSmartPaged(query, getOnecLpAppCounterparties, ['counterparties'], mapCounterparty);
 }
 
@@ -1232,7 +1307,7 @@ export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: s
   return null;
 }
 
-export async function getLiveProducts(query: ClientOrdersProductsQuery) {
+export async function getLiveProducts(query: ClientOrdersProductsQuery & { managerGuid?: string | null }) {
   return liveSmartPaged(query, getOnecLpAppNomenclature, ['nomenclature', 'products'], mapProduct);
 }
 
@@ -1284,7 +1359,7 @@ export async function getLiveClientOrder(documentGuid: string, query: { managerG
   return mapped;
 }
 
-export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody) {
+export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody & { managerGuid?: string | null }) {
   const uniqueGuids = [...new Set(body.productGuids)];
   const query = normalizeQuery({
     limit: Math.min(Math.max(uniqueGuids.length, 1), 200),
@@ -1294,6 +1369,7 @@ export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody
     agreementGuid: body.agreementGuid,
     warehouseGuid: body.warehouseGuid,
     priceTypeGuid: body.priceTypeGuid,
+    managerGuid: body.managerGuid ?? undefined,
   });
   const listPayload = await getOnecLpAppNomenclature({ ...query, guids: uniqueGuids.join(',') });
   const list = visiblePage(paged(listPayload, ['nomenclature', 'products'], mapProduct, {
