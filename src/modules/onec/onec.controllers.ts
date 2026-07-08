@@ -1159,7 +1159,16 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
           continue;
         }
 
-        if (item.baseRevision !== order.revision) {
+        const isAckAlignedSnapshot =
+          order.source === OrderSource.MANAGER_APP &&
+          order.syncState === OrderSyncState.SYNCED &&
+          (order.status === OrderStatus.SENT_TO_1C ||
+            order.status === OrderStatus.CONFIRMED ||
+            order.status === OrderStatus.CANCELLED) &&
+          item.revision === order.revision &&
+          item.baseRevision + 1 === order.revision;
+
+        if (item.baseRevision !== order.revision && !isAckAlignedSnapshot) {
           await tx.order.update({
             where: { id: order.id },
             data: {
@@ -1233,6 +1242,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
             continue;
           }
 
+          const snapshotLast1cError = item.isPostedIn1c ? null : item.last1cError?.trim() || null;
           const organizationId = await upsertSnapshotOrganization(tx, item.organization);
           const computedTotal = await replaceOrderItemsFromSnapshot(tx, order.id, item.items);
           const nextRevision = item.revision ?? order.revision + 1;
@@ -1272,7 +1282,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
                   ? new Prisma.Decimal(item.generalDiscountAmount)
                   : null,
               cancelReason: item.cancelReason ?? null,
-              last1cError: item.last1cError ?? null,
+              last1cError: snapshotLast1cError,
               last1cSnapshot: item as unknown as Prisma.InputJsonValue,
               lastStatusSyncAt: syncedAt,
               lastSyncedAt: syncedAt,

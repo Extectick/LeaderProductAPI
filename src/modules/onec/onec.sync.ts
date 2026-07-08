@@ -87,23 +87,44 @@ function optionalGuid(value?: string | null) {
 type NomenclatureUnitLike = { guid?: string | null; name?: string | null; symbol?: string | null };
 type NomenclaturePackageLike = { multiplier?: number | null; unit?: NomenclatureUnitLike | null };
 
-function unitIdentity(unit?: NomenclatureUnitLike | null) {
-  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
-  if (guid) return `guid:${guid}`;
-  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+function normalizeUnitToken(value?: string | null) {
+  const token = String(value ?? '')
     .trim()
     .toLocaleLowerCase('ru')
+    .replace(/[().]/g, '')
     .replace(/\s+/g, '');
-  return label ? `label:${label}` : '';
+  if (!token) return '';
+  if (['pce', 'pc', 'pcs', 'piece', 'pieces', 'шт', 'штука', 'штуки', 'штук'].includes(token)) return 'piece';
+  if (['kg', 'kgs', 'кг', 'килограмм', 'килограмма', 'килограммы'].includes(token)) return 'kg';
+  return token;
+}
+
+function unitLabelIdentities(unit?: NomenclatureUnitLike | null) {
+  const labels = [
+    normalizeUnitToken(unit?.symbol),
+    normalizeUnitToken(unit?.name),
+    normalizeUnitToken(`${unit?.symbol ?? ''}${unit?.name ?? ''}`),
+  ].filter(Boolean);
+  return new Set(labels);
+}
+
+function sameUnitIdentity(left?: NomenclatureUnitLike | null, right?: NomenclatureUnitLike | null) {
+  const leftGuid = left?.guid?.trim().toLocaleLowerCase('ru');
+  const rightGuid = right?.guid?.trim().toLocaleLowerCase('ru');
+  if (leftGuid && rightGuid && leftGuid === rightGuid) return true;
+  const leftLabels = unitLabelIdentities(left);
+  const rightLabels = unitLabelIdentities(right);
+  for (const label of leftLabels) {
+    if (rightLabels.has(label)) return true;
+  }
+  return false;
 }
 
 function isBaseUnitPackage(pack: NomenclaturePackageLike, baseUnit?: NomenclatureUnitLike | null) {
   if (!baseUnit) return false;
   const multiplier = Number(pack.multiplier ?? 1);
   const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
-  const packUnit = unitIdentity(pack.unit);
-  const base = unitIdentity(baseUnit);
-  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
+  return sameMultiplier && (!pack.unit || sameUnitIdentity(pack.unit, baseUnit));
 }
 
 function isClosedAgreementStatus(status?: string | null) {

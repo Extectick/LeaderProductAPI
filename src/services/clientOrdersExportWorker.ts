@@ -207,6 +207,20 @@ function readDate(source: Record<string, unknown> | null, keys: string[]) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function readBoolean(source: Record<string, unknown> | null, keys: string[]) {
+  if (!source) return null;
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string' && value.trim()) {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'y', 'да', 'истина'].includes(normalized)) return true;
+      if (['false', '0', 'no', 'n', 'нет', 'ложь'].includes(normalized)) return false;
+    }
+  }
+  return null;
+}
+
 function extractSavedOrder(payload: unknown) {
   const root = asRecord(payload);
   const item = asRecord(root?.item) ?? root;
@@ -215,6 +229,9 @@ function extractSavedOrder(payload: unknown) {
     date1c: readDate(item, ['date1c', 'date', 'Дата']),
     documentGuid: readString(item, ['documentGuid', 'guid', 'id', 'Ссылка']),
     currentState: readString(item, ['currentState', 'statusLabel', 'status', 'ТекущееСостояние']),
+    isPostedIn1c: readBoolean(item, ['isPostedIn1c', 'isPosted', 'posted', 'Проведен']),
+    last1cError: readString(item, ['last1cError', 'lastError']),
+    lastExportError: readString(item, ['lastExportError']),
   };
 }
 
@@ -420,6 +437,8 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
   const saved = extractSavedOrder(payload);
   const syncedAt = new Date();
   const isCancelExport = isCancelExportOrder(order);
+  const savedPostingError = saved.last1cError ?? saved.lastExportError ?? null;
+  const postingError = !isCancelExport && saved.isPostedIn1c !== true ? savedPostingError : null;
 
   await prisma.$transaction(async (tx) => {
     const current = await tx.order.findFirst({
@@ -447,7 +466,7 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
         lastSyncedAt: syncedAt,
         sourceUpdatedAt: syncedAt,
         lastExportError: null,
-        last1cError: null,
+        last1cError: postingError,
         last1cSnapshot: asRecord(payload) ? (payload as Prisma.InputJsonValue) : undefined,
         exportAttempts: { increment: 1 },
       },
@@ -457,7 +476,11 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
       orderId: order.id,
       revision: nextRevision,
       source: OrderEventSource.ONEC_ACK,
-      eventType: isCancelExport ? 'ONEC_ORDER_CANCEL_PUSH_OK' : 'ONEC_ORDER_PUSH_OK',
+      eventType: isCancelExport
+        ? 'ONEC_ORDER_CANCEL_PUSH_OK'
+        : postingError
+          ? 'ONEC_ORDER_PUSH_SAVED_NOT_POSTED'
+          : 'ONEC_ORDER_PUSH_OK',
       payload: {
         requestId,
         transport,
@@ -465,6 +488,8 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
         date1c: saved.date1c?.toISOString() ?? null,
         documentGuid: saved.documentGuid ?? null,
         currentState: saved.currentState ?? null,
+        isPostedIn1c: saved.isPostedIn1c ?? null,
+        postingError,
       } as Prisma.InputJsonValue,
     });
   });

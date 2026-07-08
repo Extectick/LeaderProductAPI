@@ -449,6 +449,31 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12 });
   });
 
+  it('filters 1/1 base-unit packages even when package unit guid differs from base unit guid', async () => {
+    nomenclatureMock.mockResolvedValueOnce(
+      paged([
+        {
+          guid: 'product-guid',
+          name: 'Piece product',
+          baseUnit: { guid: 'base-pcs-unit', name: 'Shtuka', symbol: 'шт' },
+          packages: [
+            { guid: 'pce-package-guid', name: 'PCE', multiplier: 1, unit: { guid: 'pce-unit-guid', name: 'PCE', symbol: 'PCE' } },
+            { guid: 'box-12', name: 'Box 12', multiplier: 12, unit: { guid: 'base-pcs-unit', name: 'Shtuka', symbol: 'шт' } },
+          ],
+          price: 10,
+          costPrice: 9,
+          currency: 'RUB',
+          isActive: true,
+        },
+      ])
+    );
+
+    const result = await getLiveProducts({ limit: 25, offset: 0, includeInactive: false });
+
+    expect(result.items[0].packages).toHaveLength(1);
+    expect(result.items[0].packages[0]).toMatchObject({ guid: 'box-12', multiplier: 12 });
+  });
+
   it('finds products by unordered search tokens when 1C phrase search misses', async () => {
     nomenclatureMock
       .mockResolvedValueOnce(paged([]))
@@ -546,6 +571,7 @@ describe('clientOrders 1C live adapter', () => {
             documentDate: '2026-06-25T09:00:00.000Z',
             paymentForm: 'Безналичная',
             deliveryMethod: 'Самовывоз',
+            last1cError: 'Не удалось провести документ: недостаточно остатка.',
             counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
             organization: { guid: 'org-guid', name: 'Организация' },
             warehouse: { guid: 'warehouse-guid', name: 'Склад' },
@@ -579,6 +605,7 @@ describe('clientOrders 1C live adapter', () => {
       number1c: '00-000123',
       paymentForm: 'Безналичная',
       deliveryMethod: 'Самовывоз',
+      last1cError: 'Не удалось провести документ: недостаточно остатка.',
       syncState: 'SYNCED',
       status: 'CONFIRMED',
       readOnly: false,

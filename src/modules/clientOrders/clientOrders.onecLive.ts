@@ -228,8 +228,8 @@ export type LiveClientOrder = {
   queuedAt: null;
   sentTo1cAt: string | Date | null;
   lastStatusSyncAt: string | Date | null;
-  lastExportError: null;
-  last1cError: null;
+  lastExportError: string | null;
+  last1cError: string | null;
   isPostedIn1c: boolean;
   cancelRequestedAt: null;
   counterparty: { guid: string; name: string; fullName?: string | null; inn?: string | null; kpp?: string | null } | null;
@@ -895,23 +895,44 @@ function mapUnit(record: AnyRecord | null | undefined, productGuid: string) {
   };
 }
 
-function unitIdentity(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
-  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
-  if (guid) return `guid:${guid}`;
-  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+function normalizeUnitToken(value?: string | null) {
+  const token = String(value ?? '')
     .trim()
     .toLocaleLowerCase('ru')
+    .replace(/[().]/g, '')
     .replace(/\s+/g, '');
-  return label ? `label:${label}` : '';
+  if (!token) return '';
+  if (['pce', 'pc', 'pcs', 'piece', 'pieces', 'шт', 'штука', 'штуки', 'штук'].includes(token)) return 'piece';
+  if (['kg', 'kgs', 'кг', 'килограмм', 'килограмма', 'килограммы'].includes(token)) return 'kg';
+  return token;
+}
+
+function unitLabelIdentities(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const labels = [
+    normalizeUnitToken(unit?.symbol),
+    normalizeUnitToken(unit?.name),
+    normalizeUnitToken(`${unit?.symbol ?? ''}${unit?.name ?? ''}`),
+  ].filter(Boolean);
+  return new Set(labels);
+}
+
+function sameUnitIdentity(left: LiveProductPackage['unit'] | LiveProduct['baseUnit'], right: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const leftGuid = left?.guid?.trim().toLocaleLowerCase('ru');
+  const rightGuid = right?.guid?.trim().toLocaleLowerCase('ru');
+  if (leftGuid && rightGuid && leftGuid === rightGuid) return true;
+  const leftLabels = unitLabelIdentities(left);
+  const rightLabels = unitLabelIdentities(right);
+  for (const label of leftLabels) {
+    if (rightLabels.has(label)) return true;
+  }
+  return false;
 }
 
 function isBaseUnitPackage(pack: LiveProductPackage, baseUnit: LiveProduct['baseUnit']) {
   if (!baseUnit) return false;
   const multiplier = Number(pack.multiplier ?? 1);
   const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
-  const packUnit = unitIdentity(pack.unit);
-  const base = unitIdentity(baseUnit);
-  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
+  return sameMultiplier && (!pack.unit || sameUnitIdentity(pack.unit, baseUnit));
 }
 
 function mapPackage(record: AnyRecord, fallbackUnit: LiveProduct['baseUnit']): LiveProductPackage | null {
@@ -1173,8 +1194,8 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     queuedAt: null,
     sentTo1cAt: text(record, ['lastImportedAt', 'sentTo1cAt'], null),
     lastStatusSyncAt: text(record, ['lastStatusSyncAt', 'updatedAt'], null),
-    lastExportError: null,
-    last1cError: null,
+    lastExportError: text(record, ['lastExportError'], null),
+    last1cError: text(record, ['last1cError', 'lastError'], null),
     isPostedIn1c: isPosted,
     cancelRequestedAt: null,
     counterparty: mapOrderCounterparty(readObject(record, ['counterparty', 'Контрагент'])),

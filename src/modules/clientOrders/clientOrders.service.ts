@@ -234,6 +234,50 @@ function jsonNumber(value: unknown) {
   return null;
 }
 
+export function normalizeClientOrderPublicError(value: unknown) {
+  const message = String(value || '').trim();
+  if (!message) return null;
+
+  const lower = message.toLocaleLowerCase('ru');
+  if (lower.includes('недостаточно доступного остатка') || lower.includes('не хватает остатка')) {
+    return 'Недостаточно остатка по одной или нескольким позициям.';
+  }
+
+  if (
+    lower.includes('timeout') ||
+    lower.includes('network') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('1с недоступ') ||
+    lower.includes('1c недоступ')
+  ) {
+    return '1С временно недоступна. Очередь повторит отправку автоматически.';
+  }
+
+  if (
+    lower.includes('ошибка прямого push заказа') ||
+    lower.includes('step=write-document') ||
+    lower.includes('не удалось провести') ||
+    lower.includes('http 500') ||
+    lower.includes('непредвиденная ошибка')
+  ) {
+    return '1С не смогла провести заказ. Проверьте реквизиты, товары и остатки, затем отправьте повторно.';
+  }
+
+  if (
+    lower.includes('errorid=') ||
+    lower.includes('internal_error') ||
+    lower.includes('поле объекта не обнаружено') ||
+    lower.includes('метод объекта не обнаружен') ||
+    lower.includes('stack') ||
+    lower.includes('{')
+  ) {
+    return 'Документ требует проверки. Откройте заказ и отправьте повторно.';
+  }
+
+  return message.length > 300 ? `${message.slice(0, 297).trimEnd()}...` : message;
+}
+
 function latestExportValidationFromEvents(events: Array<{ eventType: string; payload: unknown }>) {
   for (const event of events) {
     if (event.eventType !== 'ONEC_ORDER_PUSH_ERROR') continue;
@@ -334,8 +378,8 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     queuedAt: order.queuedAt,
     sentTo1cAt: order.sentTo1cAt,
     lastStatusSyncAt: order.lastStatusSyncAt,
-    lastExportError: order.lastExportError,
-    last1cError: order.last1cError,
+    lastExportError: normalizeClientOrderPublicError(order.lastExportError),
+    last1cError: normalizeClientOrderPublicError(order.last1cError),
     isPostedIn1c: order.isPostedIn1c,
     hasRealization: order.hasRealization,
     realizationDetectedAt: order.realizationDetectedAt,
@@ -1169,23 +1213,53 @@ function safeLiveName(value: string | null | undefined, fallback: string) {
   return prepared || fallback;
 }
 
-function liveUnitIdentity(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
-  const guid = unit?.guid?.trim().toLocaleLowerCase('ru');
-  if (guid) return `guid:${guid}`;
-  const label = `${unit?.symbol ?? ''} ${unit?.name ?? ''}`
+function normalizeLiveUnitToken(value?: string | null) {
+  const token = String(value ?? '')
     .trim()
     .toLocaleLowerCase('ru')
+    .replace(/[().]/g, '')
     .replace(/\s+/g, '');
-  return label ? `label:${label}` : '';
+  if (!token) return '';
+  if (['pce', 'pc', 'pcs', 'piece', 'pieces', 'шт', 'штука', 'штуки', 'штук'].includes(token)) return 'piece';
+  if (['kg', 'kgs', 'кг', 'килограмм', 'килограмма', 'килограммы'].includes(token)) return 'kg';
+  return token;
+}
+
+function liveUnitLabelIdentities(unit: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const labels = [
+    normalizeLiveUnitToken(unit?.symbol),
+    normalizeLiveUnitToken(unit?.name),
+    normalizeLiveUnitToken(`${unit?.symbol ?? ''}${unit?.name ?? ''}`),
+  ].filter(Boolean);
+  return new Set(labels);
+}
+
+function sameLiveUnitIdentity(left: LiveProductPackage['unit'] | LiveProduct['baseUnit'], right: LiveProductPackage['unit'] | LiveProduct['baseUnit']) {
+  const leftGuid = left?.guid?.trim().toLocaleLowerCase('ru');
+  const rightGuid = right?.guid?.trim().toLocaleLowerCase('ru');
+  if (leftGuid && rightGuid && leftGuid === rightGuid) return true;
+  const leftLabels = liveUnitLabelIdentities(left);
+  const rightLabels = liveUnitLabelIdentities(right);
+  for (const label of leftLabels) {
+    if (rightLabels.has(label)) return true;
+  }
+  return false;
 }
 
 function isLiveBaseUnitPackage(pack: LiveProductPackage, baseUnit: LiveProduct['baseUnit']) {
   if (!baseUnit) return false;
   const multiplier = Number(pack.multiplier ?? 1);
   const sameMultiplier = !Number.isFinite(multiplier) || multiplier <= 0 || Math.abs(multiplier - 1) < 0.000001;
-  const packUnit = liveUnitIdentity(pack.unit);
-  const base = liveUnitIdentity(baseUnit);
-  return sameMultiplier && (!pack.unit || (!!packUnit && !!base && packUnit === base));
+  return sameMultiplier && (!pack.unit || sameLiveUnitIdentity(pack.unit, baseUnit));
+}
+
+function mapProductPackagesForClient(product: { baseUnit?: LiveProduct['baseUnit']; packages: Array<any> }) {
+  return product.packages
+    .filter((pack) => !isLiveBaseUnitPackage({ ...pack, multiplier: decimalToNumber(pack.multiplier) } as LiveProductPackage, product.baseUnit ?? null))
+    .map((pack) => ({
+      ...pack,
+      multiplier: decimalToNumber(pack.multiplier),
+    }));
 }
 
 async function upsertLiveOrganization(tx: Tx, item: LiveOrganization | null, sourceUpdatedAt: Date) {
@@ -2846,8 +2920,8 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
     queuePosition: resolveQueuePosition(local, queuePositions),
     sentTo1cAt: local.sentTo1cAt ?? order.sentTo1cAt,
     lastStatusSyncAt: local.lastStatusSyncAt ?? order.lastStatusSyncAt,
-    lastExportError: local.lastExportError,
-    last1cError: local.last1cError,
+    lastExportError: normalizeClientOrderPublicError(local.lastExportError),
+    last1cError: normalizeClientOrderPublicError(local.last1cError),
     paymentForm: local.paymentForm ?? order.paymentForm,
     deliveryMethod: local.deliveryMethod ?? order.deliveryMethod,
     cancelRequestedAt: local.cancelRequestedAt,
@@ -3142,7 +3216,11 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     return enrichOrderItemsWithImages({ ...live, readOnly: true });
   }
 
-  const mapped = mapOrderDetail(order);
+  const mapped = {
+    ...mapOrderDetail(order),
+    lastExportError: normalizeClientOrderPublicError(order.lastExportError),
+    last1cError: normalizeClientOrderPublicError(order.last1cError),
+  };
   const exportValidation = latestExportValidationFromEvents(mapped.events);
 
   if (userId && order.number1c && !isPinnedLocalOrder(order)) {
@@ -3178,8 +3256,8 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             source: order.source,
             revision: order.revision,
             queuePosition: null,
-            lastExportError: order.lastExportError,
-            last1cError: order.last1cError,
+            lastExportError: normalizeClientOrderPublicError(order.lastExportError),
+            last1cError: normalizeClientOrderPublicError(order.last1cError),
             exportValidation,
             hasRealization: liveDetail.hasRealization || order.hasRealization,
             realizationDetectedAt: order.realizationDetectedAt,
@@ -4479,10 +4557,7 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
           sku: product.sku,
           isWeight: product.isWeight,
           baseUnit: product.baseUnit,
-          packages: product.packages.map((pack) => ({
-            ...pack,
-            multiplier: decimalToNumber(pack.multiplier),
-          })),
+          packages: mapProductPackagesForClient(product),
           basePrice: receiptPrice.value,
           receiptPrice: receiptPrice.value,
           currency: DEFAULT_ORDER_CURRENCY,
@@ -4501,10 +4576,7 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
             sku: product.sku,
             isWeight: product.isWeight,
             baseUnit: product.baseUnit,
-            packages: product.packages.map((pack) => ({
-              ...pack,
-              multiplier: decimalToNumber(pack.multiplier),
-            })),
+            packages: mapProductPackagesForClient(product),
             basePrice: null,
             receiptPrice: null,
             currency: DEFAULT_ORDER_CURRENCY,
@@ -4589,10 +4661,7 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
       sku: product.sku,
       isWeight: product.isWeight,
       baseUnit: product.baseUnit,
-      packages: product.packages.map((pack) => ({
-        ...pack,
-        multiplier: decimalToNumber(pack.multiplier),
-      })),
+      packages: mapProductPackagesForClient(product),
       basePrice: receiptPrice?.value ?? null,
       receiptPrice: receiptPrice?.value ?? null,
       currency: DEFAULT_ORDER_CURRENCY,
