@@ -474,6 +474,59 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'box-12', multiplier: 12 });
   });
 
+  it('keeps live product order and price diagnostics from 1C', async () => {
+    nomenclatureMock.mockResolvedValueOnce(
+      paged([
+        {
+          guid: 'priced-product',
+          name: 'Priced product',
+          price: 100,
+          currency: 'RUB',
+          priceType: { guid: 'price-type-guid', name: 'Retail' },
+          stock: { quantity: 5, available: 5 },
+          isActive: true,
+        },
+        {
+          guid: 'zero-product',
+          name: 'Zero product',
+          price: 0,
+          currency: 'RUB',
+          priceType: { guid: 'price-type-guid', name: 'Retail' },
+          stock: { quantity: 10, available: 10 },
+          isActive: true,
+        },
+        {
+          guid: 'missing-price-product',
+          name: 'Missing price product',
+          price: null,
+          priceError: 'Price is missing',
+          stock: { quantity: 12, available: 12 },
+          isActive: true,
+        },
+      ])
+    );
+
+    const result = await getLiveProducts({
+      limit: 25,
+      offset: 0,
+      priceTypeGuid: 'price-type-guid',
+      includeInactive: false,
+    });
+
+    expect(result.items.map((item) => item.guid)).toEqual([
+      'priced-product',
+      'zero-product',
+      'missing-price-product',
+    ]);
+    expect(result.items[0]).toMatchObject({
+      basePrice: 100,
+      priceType: { guid: 'price-type-guid', name: 'Retail' },
+      stock: { available: 5 },
+    });
+    expect(result.items[1]).toMatchObject({ basePrice: 0 });
+    expect(result.items[2]).toMatchObject({ basePrice: null, priceError: 'Price is missing' });
+  });
+
   it('finds products by unordered search tokens when 1C phrase search misses', async () => {
     nomenclatureMock
       .mockResolvedValueOnce(paged([]))
