@@ -461,6 +461,13 @@ async function onecLive<T>(
   }
 }
 
+function shouldOpenClientOrdersOnecCircuit(error: unknown) {
+  if (error instanceof OnecLpAppHttpError) {
+    return [502, 503, 504].includes(error.upstreamStatus);
+  }
+  return true;
+}
+
 const DEFAULT_ORDER_CURRENCY = 'RUB';
 const SMART_SEARCH_TRIGRAM_THRESHOLD = 0.18;
 const ACTIVE_CONTRACT_STATUS = 'Действует';
@@ -1911,7 +1918,8 @@ async function loadLiveProductsForOrderMaterialization(
         productGuids: productGuids.slice().sort(),
       },
       CLIENT_ORDERS_CACHE_TTL.productsBatch,
-      () => getLiveProductsByGuids(batchBody)
+      () => getLiveProductsByGuids(batchBody),
+      { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
     );
 
     return { products: products.filter(Boolean), source: 'live' };
@@ -4386,7 +4394,8 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
       'products',
       liveQuery,
       CLIENT_ORDERS_CACHE_TTL.products,
-      () => getLiveProducts(liveQuery)
+      () => getLiveProducts(liveQuery),
+      { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
     ),
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
@@ -4608,7 +4617,8 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
       'products:batch',
       { ...liveBody, productGuids: [...new Set(liveBody.productGuids)].sort() },
       CLIENT_ORDERS_CACHE_TTL.productsBatch,
-      () => getLiveProductsByGuids(liveBody)
+      () => getLiveProductsByGuids(liveBody),
+      { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
     ),
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }

@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import { cacheGet, cacheSet } from '../../lib/redis';
 
 type CacheLoader<T> = () => Promise<T>;
+type CacheOptions = {
+  shouldOpenCircuit?: (error: unknown) => boolean;
+};
 
 const pendingReads = new Map<string, Promise<unknown>>();
 const memoryCircuit = new Map<string, number>();
@@ -94,7 +97,8 @@ export async function readThroughClientOrdersCache<T>(
   scope: string,
   payload: unknown,
   ttlSeconds: number,
-  loader: CacheLoader<T>
+  loader: CacheLoader<T>,
+  options: CacheOptions = {}
 ): Promise<T> {
   if (!cacheEnabled() || ttlSeconds <= 0) return loader();
 
@@ -133,7 +137,9 @@ export async function readThroughClientOrdersCache<T>(
       return value;
     })
     .catch(async (error) => {
-      await markClientOrdersOnecCircuitOpen(scopedCircuit);
+      if (options.shouldOpenCircuit?.(error) ?? true) {
+        await markClientOrdersOnecCircuitOpen(scopedCircuit);
+      }
       throw error;
     })
     .finally(() => {
