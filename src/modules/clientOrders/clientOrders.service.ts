@@ -1725,6 +1725,27 @@ async function loadLiveReferenceWithCache<T>(
   return fallback();
 }
 
+async function loadLiveDeliveryAddressForOrderMaterialization(guid: string, counterpartyGuid: string) {
+  try {
+    const liveValue = await findLiveDeliveryAddress(guid, counterpartyGuid);
+    if (liveValue) return liveValue;
+  } catch (error) {
+    if (error instanceof ClientOrdersOnecCircuitOpenError) {
+      return findCachedDeliveryAddress(guid);
+    }
+    if (!isOnecLpAppError(error)) throw error;
+    const cachedValue = await findCachedDeliveryAddress(guid);
+    if (cachedValue) return cachedValue;
+    throwClientOrdersOnecError(error, 'Ошибка получения адреса доставки из 1С');
+  }
+
+  throw new ClientOrdersError(
+    400,
+    ErrorCodes.VALIDATION_ERROR,
+    'Адрес доставки не найден в 1С. Обновите список адресов и выберите адрес заново.'
+  );
+}
+
 async function findCachedOrganization(guid: string): Promise<LiveOrganization | null> {
   const item = await prisma.organization.findUnique({
     where: { guid },
@@ -2000,16 +2021,7 @@ async function loadLiveOrderMaterialization(
           )
         : Promise.resolve(null),
       body.deliveryAddressGuid
-        ? loadLiveReferenceWithCache(
-            () => readThroughClientOrdersCache(
-              'reference:delivery-address',
-              { guid: body.deliveryAddressGuid, counterpartyGuid: body.counterpartyGuid },
-              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
-              () => findLiveDeliveryAddress(body.deliveryAddressGuid!, body.counterpartyGuid)
-            ),
-            () => findCachedDeliveryAddress(body.deliveryAddressGuid!),
-            'Ошибка получения адреса доставки из 1С'
-          )
+        ? loadLiveDeliveryAddressForOrderMaterialization(body.deliveryAddressGuid, body.counterpartyGuid)
         : Promise.resolve(null),
       Promise.all(
         explicitPriceTypeGuids.map((guid) =>
