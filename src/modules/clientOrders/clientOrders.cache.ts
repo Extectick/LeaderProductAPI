@@ -30,8 +30,8 @@ export const CLIENT_ORDERS_CACHE_TTL = {
   deliveryAddresses: 180,
   warehouses: 600,
   priceTypes: 600,
-  products: 45,
-  productsBatch: 45,
+  products: 15,
+  productsBatch: 15,
   referenceData: 120,
   referenceDetails: 300,
 };

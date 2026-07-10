@@ -145,6 +145,8 @@ export type LiveProductPackage = {
   guid: string;
   name: string;
   multiplier: number | null;
+  weight?: number | null;
+  weightUnit?: { guid: string; name: string; symbol?: string | null } | null;
   isDefault: boolean;
   unit: { guid: string; name: string; symbol?: string | null } | null;
 };
@@ -166,6 +168,8 @@ export type LiveProduct = {
   isWeight: boolean;
   isActive: boolean;
   baseUnit: { guid: string; name: string; symbol?: string | null } | null;
+  weight?: number | null;
+  weightUnit?: { guid: string; name: string; symbol?: string | null } | null;
   packages: LiveProductPackage[];
   basePrice: number | null;
   receiptPrice: number | null;
@@ -259,8 +263,8 @@ export type LiveClientOrder = {
     appliedDiscountPercent: number | null;
     lineAmount: number | null;
     comment: string | null;
-    product: { guid: string; name: string; code?: string | null; article?: string | null; sku?: string | null; isWeight?: boolean | null };
-    package?: { guid?: string | null; name?: string | null; multiplier?: number | null; isDefault?: boolean | null } | null;
+    product: { guid: string; name: string; code?: string | null; article?: string | null; sku?: string | null; isWeight?: boolean | null; weight?: number | null; weightUnit?: { guid?: string | null; name?: string | null; symbol?: string | null } | null };
+    package?: { guid?: string | null; name?: string | null; multiplier?: number | null; weight?: number | null; weightUnit?: { guid?: string | null; name?: string | null; symbol?: string | null } | null; isDefault?: boolean | null } | null;
     unit?: { guid?: string | null; name?: string | null; symbol?: string | null } | null;
   }>;
   events: [];
@@ -944,6 +948,8 @@ function mapPackage(record: AnyRecord, fallbackUnit: LiveProduct['baseUnit']): L
     guid,
     name,
     multiplier: numberValue(record, ['multiplier', 'coefficient', 'packageCoefficient', 'quantityPerPackage'], 1),
+    weight: numberValue(record, ['weight', 'weightKg', 'packageWeight', 'packageWeightKg'], null),
+    weightUnit: mapUnit(readObject(record, ['weightUnit']), `${guid}-weight-unit`),
     isDefault: bool(record, ['isDefault', 'default'], false),
     unit,
   };
@@ -982,6 +988,7 @@ function mapProduct(record: AnyRecord): LiveProduct | null {
   const packages = rawPackages.filter((pack) => !isBaseUnitPackage(pack, baseUnit));
   const basePrice = numberValue(record, ['basePrice', 'price'], null);
   const priceType = mapNamedRef(readObject(record, ['priceType']), ['guid', 'priceTypeGuid'], ['name', 'priceTypeName']);
+  const weightUnit = mapUnit(readObject(record, ['weightUnit']), `${guid}-weight-unit`);
   return {
     guid,
     name,
@@ -991,6 +998,8 @@ function mapProduct(record: AnyRecord): LiveProduct | null {
     isWeight: bool(record, ['isWeight'], false),
     isActive: isEntityActive(record),
     baseUnit,
+    weight: numberValue(record, ['weight', 'weightKg', 'unitWeight', 'netWeight'], null),
+    weightUnit,
     packages,
     basePrice,
     receiptPrice: numberValue(record, ['receiptPrice', 'costPrice'], null),
@@ -1129,12 +1138,16 @@ function mapOrderItem(record: AnyRecord, index: number): LiveClientOrder['items'
       article: text(productRecord, ['article', 'Артикул'], null),
       sku: text(productRecord, ['sku'], null),
       isWeight: bool(productRecord, ['isWeight'], false),
+      weight: numberValue(productRecord, ['weight', 'weightKg', 'unitWeight', 'netWeight'], null),
+      weightUnit: mapUnit(readObject(productRecord, ['weightUnit']), `${productGuid}-weight-unit`),
     },
     package: packageRecord
       ? {
           guid: entityGuid(packageRecord),
           name: text(packageRecord, ['name', 'Наименование'], null),
           multiplier: numberValue(packageRecord, ['multiplier', 'coefficient', 'packageCoefficient', 'quantityPerPackage'], null),
+          weight: numberValue(packageRecord, ['weight', 'weightKg', 'packageWeight', 'packageWeightKg'], null),
+          weightUnit: mapUnit(readObject(packageRecord, ['weightUnit']), `${entityGuid(packageRecord) ?? lineGuid}-weight-unit`),
           isDefault: bool(packageRecord, ['isDefault'], false),
         }
       : null,

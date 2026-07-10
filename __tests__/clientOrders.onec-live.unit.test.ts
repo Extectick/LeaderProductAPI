@@ -399,8 +399,10 @@ describe('clientOrders 1C live adapter', () => {
           name: 'Молоко 0,05%',
           code: '41001',
           article: 'YT-00008199',
+          weight: 0.9,
+          weightUnit: { guid: 'kg', name: 'кг', symbol: 'кг' },
           baseUnit: { guid: 'unit-guid', name: 'штука', symbol: 'шт' },
-          packages: [{ guid: 'package-guid', name: 'кор', multiplier: 12, unit: { guid: 'unit-guid', name: 'штука', symbol: 'шт' } }],
+          packages: [{ guid: 'package-guid', name: 'кор', multiplier: 12, weight: 10.8, weightUnit: { guid: 'kg', name: 'кг', symbol: 'кг' }, unit: { guid: 'unit-guid', name: 'штука', symbol: 'шт' } }],
           price: 123.45,
           costPrice: 111.11,
           currency: 'RUB',
@@ -444,9 +446,11 @@ describe('clientOrders 1C live adapter', () => {
       basePrice: 123.45,
       receiptPrice: 111.11,
       currency: 'RUB',
+      weight: 0.9,
+      weightUnit: { guid: 'kg', name: 'кг', symbol: 'кг' },
       stock: { quantity: 37, reserved: 2, available: 35, freeAvailable: 15, myReserved: 20 },
     });
-    expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12 });
+    expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12, weight: 10.8 });
   });
 
   it('filters 1/1 base-unit packages even when package unit guid differs from base unit guid', async () => {
@@ -759,6 +763,54 @@ describe('clientOrders 1C live adapter', () => {
       product: { guid: 'product-guid', name: 'Товар' },
       package: { guid: 'box-10', name: 'кор (10 кг)', multiplier: 10 },
       unit: { guid: 'kg', name: 'Килограмм', symbol: 'кг' },
+    });
+  });
+
+  it('preserves product and package weight in live client order detail lines', async () => {
+    clientOrderMock.mockResolvedValueOnce({
+      item: {
+        guid: 'onec-document-guid',
+        documentGuid: 'onec-document-guid',
+        documentNumber: '00-000124',
+        items: [
+          {
+            lineGuid: 'line-guid-1',
+            product: {
+              guid: 'product-guid',
+              name: 'Product',
+              weight: 1,
+              weightUnit: { guid: 'kg', name: 'kg', symbol: 'kg' },
+            },
+            quantity: 3,
+            quantityBase: 30,
+            package: {
+              guid: 'box-10',
+              name: 'box 10 kg',
+              multiplier: 10,
+              weight: 10,
+              weightUnit: { guid: 'kg', name: 'kg', symbol: 'kg' },
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await getLiveClientOrder('onec-document-guid', { managerGuid: 'manager-guid' });
+
+    expect(result.items[0]).toMatchObject({
+      product: {
+        guid: 'product-guid',
+        name: 'Product',
+        weight: 1,
+        weightUnit: { guid: 'kg', name: 'kg', symbol: 'kg' },
+      },
+      package: {
+        guid: 'box-10',
+        name: 'box 10 kg',
+        multiplier: 10,
+        weight: 10,
+        weightUnit: { guid: 'kg', name: 'kg', symbol: 'kg' },
+      },
     });
   });
 
