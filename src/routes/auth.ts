@@ -69,6 +69,13 @@ import {
 } from '../types/routes';
 import { getProfile } from '../services/userService';
 import { normalizePhoneToBigInt, toApiPhoneString } from '../utils/phone';
+import {
+  buildDeviceInfoFromRequestBody,
+  hashRefreshToken,
+  persistRefreshToken,
+  REFRESH_TOKEN_GRACE_MS,
+  type AuthDeviceInfo,
+} from '../services/authRefreshTokenService';
 
 const router = express.Router();
 
@@ -451,15 +458,15 @@ async function resolveMaxUserState(
   return { state: 'READY', userId: created.id };
 }
 
-async function issueAuthTokensForUser(userId: number) {
+async function issueAuthTokensForUser(userId: number, deviceInfo?: AuthDeviceInfo | null) {
   const user = await loadUserWithRolePermissions(userId);
   if (!user) {
     throw new Error('Пользователь не найден');
   }
   const accessToken = generateAccessToken(user);
-  const refreshToken = await createUniqueRefreshToken(user.id);
+  const refreshToken = await createUniqueRefreshToken(user.id, deviceInfo);
   const profile = await getProfile(user.id);
-  return { accessToken, refreshToken, profile };
+  return { accessToken, refreshToken: refreshToken.token, deviceSessionId: refreshToken.deviceSessionId, profile };
 }
 
 function parseTelegramSession(tgSessionToken: string): TelegramSessionInfo {
@@ -678,6 +685,7 @@ async function handleQrAuthStatus(
         state: 'AUTHORIZED',
         accessToken: authPayload.accessToken,
         refreshToken: authPayload.refreshToken,
+        deviceSessionId: authPayload.deviceSessionId,
         profile: authPayload.profile,
         message: `Вход через ${qrProviderLabel(provider)} успешен`,
       })
@@ -782,19 +790,24 @@ function generateSecureRandomToken(length = 64) {
 }
 
 // Функция создания уникального refresh токена с повтором при коллизии
-export async function createUniqueRefreshToken(userId: number): Promise<string> {
+export async function createUniqueRefreshToken(
+  userId: number,
+  deviceInfo?: AuthDeviceInfo | null,
+  db: any = prisma,
+  familyId?: string | null
+): Promise<{ token: string; deviceSessionId: string | null; recordId: number }> {
   const jti = randomUUID(); // Гарантирует уникальность
   const token = jwt.sign({ userId, jti }, refreshTokenSecret, { expiresIn: '30d' });
 
-  await prisma.refreshToken.create({
-    data: {
-      token,
-      userId,
-      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-    },
+  const persisted = await persistRefreshToken(db, {
+    rawToken: token,
+    userId,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    deviceInfo,
+    familyId,
   });
 
-  return token;
+  return { token, deviceSessionId: persisted.deviceSessionId, recordId: persisted.record.id };
 }
 
 /**
@@ -2208,7 +2221,7 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
 
     const accessToken = generateAccessToken(user);
     // Создаём refresh токен и сохраняем сразу
-    const refreshToken = await createUniqueRefreshToken(user.id);
+    const refreshToken = await createUniqueRefreshToken(user.id, buildDeviceInfoFromRequestBody(req.body));
 
     await prisma.loginAttempt.create({
       data: { userId: user.id, success: true, ip: req.ip },
@@ -2236,7 +2249,8 @@ router.post('/login', async (req: express.Request<{}, {}, AuthLoginRequest>, res
     const resProfile = await getProfile(user.id);
     res.json(successResponse({
       accessToken,
-      refreshToken,
+      refreshToken: refreshToken.token,
+      deviceSessionId: refreshToken.deviceSessionId,
       profile: resProfile,
       message: "Вход успешный"
     }));
@@ -2293,11 +2307,17 @@ router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res
     );
   }
 
-  console.log('Получен refreshToken:', refreshToken);
-
   try {
-    const storedToken = await prisma.refreshToken.findUnique({
-      where: { token: refreshToken },
+    const tokenHash = hashRefreshToken(refreshToken);
+    const now = new Date();
+    const storedToken = await prisma.refreshToken.findFirst({
+      where: {
+        OR: [
+          { tokenHash },
+          { token: refreshToken },
+          { token: tokenHash },
+        ],
+      },
     });
 
     if (!storedToken) {
@@ -2307,15 +2327,29 @@ router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res
       );
     }
 
-    if (storedToken.revoked || storedToken.expiresAt < new Date()) {
-      console.error('Refresh токен отозван или просрочен');
+    if (storedToken.revoked) {
+      if (storedToken.graceUntil && storedToken.graceUntil > now) {
+        return res.status(409).json(
+          errorResponse('Refresh токен уже обновляется другим процессом', ErrorCodes.CONFLICT, {
+            reason: 'REFRESH_TOKEN_ROTATED',
+          })
+        );
+      }
+      console.error('Refresh токен отозван');
+      return res.status(403).json(
+        errorResponse('Неверный или просроченный refresh токен', ErrorCodes.UNAUTHORIZED)
+      );
+    }
+
+    if (storedToken.expiresAt < now) {
+      console.error('Refresh токен просрочен');
       return res.status(403).json(
         errorResponse('Неверный или просроченный refresh токен', ErrorCodes.UNAUTHORIZED)
       );
     }
 
     jwt.verify(refreshToken, refreshTokenSecret, async (err: VerifyErrors | null, payload: any) => {
-      if (err || !payload?.userId) {
+      if (err || !payload?.userId || Number(payload.userId) !== storedToken.userId) {
         console.error('Неверный refresh токен:', err?.message || 'payload.userId отсутствует');
         return res.status(403).json(
           errorResponse('Неверный refresh токен', ErrorCodes.UNAUTHORIZED)
@@ -2346,34 +2380,62 @@ router.post('/token', async (req: express.Request<{}, {}, AuthTokenRequest>, res
       const newAccessToken = generateAccessToken(userWithRole);
 
       try {
-        // Отзываем старый токен и создаём новый
-        await prisma.$transaction(async (tx) => {
-          await tx.refreshToken.update({
+        const deviceInfo = buildDeviceInfoFromRequestBody({
+          ...req.body,
+          deviceSessionId: req.body.deviceSessionId || storedToken.deviceSessionId,
+        });
+        const newRefreshToken = await prisma.$transaction(async (tx) => {
+          const currentToken = await tx.refreshToken.findUnique({
             where: { id: storedToken.id },
-            data: { revoked: true },
           });
+          if (!currentToken || currentToken.revoked || currentToken.expiresAt < new Date()) {
+            const rotatedError = new Error('REFRESH_TOKEN_ROTATED');
+            (rotatedError as any).code = 'REFRESH_TOKEN_ROTATED';
+            throw rotatedError;
+          }
 
-          await createUniqueRefreshToken(user.id); // важное: сюда передаём ID
+          const claimed = await tx.refreshToken.updateMany({
+            where: {
+              id: currentToken.id,
+              revoked: false,
+              expiresAt: { gte: new Date() },
+            },
+            data: {
+              revoked: true,
+              usedAt: new Date(),
+              graceUntil: new Date(Date.now() + REFRESH_TOKEN_GRACE_MS),
+            },
+          });
+          if (claimed.count !== 1) {
+            const rotatedError = new Error('REFRESH_TOKEN_ROTATED');
+            (rotatedError as any).code = 'REFRESH_TOKEN_ROTATED';
+            throw rotatedError;
+          }
+
+          const created = await createUniqueRefreshToken(user.id, deviceInfo, tx, currentToken.familyId);
+          await tx.refreshToken.update({
+            where: { id: currentToken.id },
+            data: { replacedById: created.recordId },
+          });
+          return created;
         });
-
-        // Получаем только что созданный токен
-        const newRefreshToken = await prisma.refreshToken.findFirst({
-          where: { userId: user.id, revoked: false },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (!newRefreshToken) {
-          throw new Error('Не удалось получить новый refresh токен после создания');
-        }
 
         const profile = await getProfile(user.id);
 
         res.json(successResponse({
           accessToken: newAccessToken,
           refreshToken: newRefreshToken.token,
+          deviceSessionId: newRefreshToken.deviceSessionId,
           profile
         }));
-      } catch (e) {
+      } catch (e: any) {
+        if (e?.code === 'REFRESH_TOKEN_ROTATED') {
+          return res.status(409).json(
+            errorResponse('Refresh токен уже обновляется другим процессом', ErrorCodes.CONFLICT, {
+              reason: 'REFRESH_TOKEN_ROTATED',
+            })
+          );
+        }
         console.error('Ошибка создания нового refresh токена:', e);
         res.status(500).json(
           errorResponse('Ошибка обновления токенов', ErrorCodes.INTERNAL_ERROR)
@@ -2433,8 +2495,16 @@ router.post('/logout', authenticateToken, async (req: AuthRequest & { body: Auth
     );
 
   try {
+    const tokenHash = hashRefreshToken(refreshToken);
     await prisma.refreshToken.updateMany({
-      where: { token: refreshToken, userId: req.user!.userId },
+      where: {
+        userId: req.user!.userId,
+        OR: [
+          { tokenHash },
+          { token: refreshToken },
+          { token: tokenHash },
+        ],
+      },
       data: { revoked: true },
     });
     res.json(successResponse({ message: 'Logged out successfully' }));
@@ -2599,12 +2669,13 @@ router.post('/verify', async (req: express.Request<{}, {}, AuthVerifyRequest>, r
     }
 
     const accessToken = generateAccessToken(userWithRole as UserWithRolePermissions);
-    const refreshToken = await createUniqueRefreshToken(userWithRole.id);
+    const refreshToken = await createUniqueRefreshToken(userWithRole.id, buildDeviceInfoFromRequestBody(req.body));
     const profile = await getProfile(userWithRole.id);
 
     res.json(successResponse({
       accessToken,
-      refreshToken,
+      refreshToken: refreshToken.token,
+      deviceSessionId: refreshToken.deviceSessionId,
       profile,
       message: 'Аккаунт подтвержден и активирован'
     }));

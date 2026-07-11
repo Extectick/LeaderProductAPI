@@ -55,6 +55,7 @@ const telegramBotService_1 = require("../services/telegramBotService");
 const maxBotService_1 = require("../services/maxBotService");
 const userService_1 = require("../services/userService");
 const phone_1 = require("../utils/phone");
+const authRefreshTokenService_1 = require("../services/authRefreshTokenService");
 const router = express_1.default.Router();
 /**
  * @openapi
@@ -348,15 +349,15 @@ async function resolveMaxUserState(session, phoneDigits11) {
     maxLog('created_max_user', { userId: created.id, maxId: session.maxId });
     return { state: 'READY', userId: created.id };
 }
-async function issueAuthTokensForUser(userId) {
+async function issueAuthTokensForUser(userId, deviceInfo) {
     const user = await loadUserWithRolePermissions(userId);
     if (!user) {
         throw new Error('Пользователь не найден');
     }
     const accessToken = generateAccessToken(user);
-    const refreshToken = await createUniqueRefreshToken(user.id);
+    const refreshToken = await createUniqueRefreshToken(user.id, deviceInfo);
     const profile = await (0, userService_1.getProfile)(user.id);
-    return { accessToken, refreshToken, profile };
+    return { accessToken, refreshToken: refreshToken.token, deviceSessionId: refreshToken.deviceSessionId, profile };
 }
 function parseTelegramSession(tgSessionToken) {
     const parsed = (0, telegramAuthService_1.parseTelegramSessionToken)(tgSessionToken);
@@ -531,6 +532,7 @@ async function handleQrAuthStatus(provider, sessionToken, res) {
             state: 'AUTHORIZED',
             accessToken: authPayload.accessToken,
             refreshToken: authPayload.refreshToken,
+            deviceSessionId: authPayload.deviceSessionId,
             profile: authPayload.profile,
             message: `Вход через ${qrProviderLabel(provider)} успешен`,
         }));
@@ -619,17 +621,17 @@ function generateSecureRandomToken(length = 64) {
     return crypto_1.default.randomBytes(length).toString('hex'); // 128-символьный строковый токен
 }
 // Функция создания уникального refresh токена с повтором при коллизии
-async function createUniqueRefreshToken(userId) {
+async function createUniqueRefreshToken(userId, deviceInfo, db = client_1.default, familyId) {
     const jti = (0, crypto_1.randomUUID)(); // Гарантирует уникальность
     const token = jsonwebtoken_1.default.sign({ userId, jti }, refreshTokenSecret, { expiresIn: '30d' });
-    await client_1.default.refreshToken.create({
-        data: {
-            token,
-            userId,
-            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        },
+    const persisted = await (0, authRefreshTokenService_1.persistRefreshToken)(db, {
+        rawToken: token,
+        userId,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        deviceInfo,
+        familyId,
     });
-    return token;
+    return { token, deviceSessionId: persisted.deviceSessionId, recordId: persisted.record.id };
 }
 /**
  * @openapi
@@ -1786,7 +1788,7 @@ router.post('/login', async (req, res) => {
             activeProfile = user.employeeProfile;
         const accessToken = generateAccessToken(user);
         // Создаём refresh токен и сохраняем сразу
-        const refreshToken = await createUniqueRefreshToken(user.id);
+        const refreshToken = await createUniqueRefreshToken(user.id, (0, authRefreshTokenService_1.buildDeviceInfoFromRequestBody)(req.body));
         await client_1.default.loginAttempt.create({
             data: { userId: user.id, success: true, ip: req.ip },
         });
@@ -1811,7 +1813,8 @@ router.post('/login', async (req, res) => {
         const resProfile = await (0, userService_1.getProfile)(user.id);
         res.json((0, apiResponse_1.successResponse)({
             accessToken,
-            refreshToken,
+            refreshToken: refreshToken.token,
+            deviceSessionId: refreshToken.deviceSessionId,
             profile: resProfile,
             message: "Вход успешный"
         }));
@@ -1861,21 +1864,37 @@ router.post('/token', async (req, res) => {
     if (!refreshToken) {
         return res.status(400).json((0, apiResponse_1.errorResponse)('Требуется refresh токен', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
     }
-    console.log('Получен refreshToken:', refreshToken);
     try {
-        const storedToken = await client_1.default.refreshToken.findUnique({
-            where: { token: refreshToken },
+        const tokenHash = (0, authRefreshTokenService_1.hashRefreshToken)(refreshToken);
+        const now = new Date();
+        const storedToken = await client_1.default.refreshToken.findFirst({
+            where: {
+                OR: [
+                    { tokenHash },
+                    { token: refreshToken },
+                    { token: tokenHash },
+                ],
+            },
         });
         if (!storedToken) {
             console.error('Refresh токен не найден в БД');
             return res.status(403).json((0, apiResponse_1.errorResponse)('Неверный refresh токен', apiResponse_1.ErrorCodes.UNAUTHORIZED));
         }
-        if (storedToken.revoked || storedToken.expiresAt < new Date()) {
-            console.error('Refresh токен отозван или просрочен');
+        if (storedToken.revoked) {
+            if (storedToken.graceUntil && storedToken.graceUntil > now) {
+                return res.status(409).json((0, apiResponse_1.errorResponse)('Refresh токен уже обновляется другим процессом', apiResponse_1.ErrorCodes.CONFLICT, {
+                    reason: 'REFRESH_TOKEN_ROTATED',
+                }));
+            }
+            console.error('Refresh токен отозван');
+            return res.status(403).json((0, apiResponse_1.errorResponse)('Неверный или просроченный refresh токен', apiResponse_1.ErrorCodes.UNAUTHORIZED));
+        }
+        if (storedToken.expiresAt < now) {
+            console.error('Refresh токен просрочен');
             return res.status(403).json((0, apiResponse_1.errorResponse)('Неверный или просроченный refresh токен', apiResponse_1.ErrorCodes.UNAUTHORIZED));
         }
         jsonwebtoken_1.default.verify(refreshToken, refreshTokenSecret, async (err, payload) => {
-            if (err || !payload?.userId) {
+            if (err || !payload?.userId || Number(payload.userId) !== storedToken.userId) {
                 console.error('Неверный refresh токен:', err?.message || 'payload.userId отсутствует');
                 return res.status(403).json((0, apiResponse_1.errorResponse)('Неверный refresh токен', apiResponse_1.ErrorCodes.UNAUTHORIZED));
             }
@@ -1898,30 +1917,57 @@ router.post('/token', async (req, res) => {
             const userWithRole = user;
             const newAccessToken = generateAccessToken(userWithRole);
             try {
-                // Отзываем старый токен и создаём новый
-                await client_1.default.$transaction(async (tx) => {
-                    await tx.refreshToken.update({
+                const deviceInfo = (0, authRefreshTokenService_1.buildDeviceInfoFromRequestBody)({
+                    ...req.body,
+                    deviceSessionId: req.body.deviceSessionId || storedToken.deviceSessionId,
+                });
+                const newRefreshToken = await client_1.default.$transaction(async (tx) => {
+                    const currentToken = await tx.refreshToken.findUnique({
                         where: { id: storedToken.id },
-                        data: { revoked: true },
                     });
-                    await createUniqueRefreshToken(user.id); // важное: сюда передаём ID
+                    if (!currentToken || currentToken.revoked || currentToken.expiresAt < new Date()) {
+                        const rotatedError = new Error('REFRESH_TOKEN_ROTATED');
+                        rotatedError.code = 'REFRESH_TOKEN_ROTATED';
+                        throw rotatedError;
+                    }
+                    const claimed = await tx.refreshToken.updateMany({
+                        where: {
+                            id: currentToken.id,
+                            revoked: false,
+                            expiresAt: { gte: new Date() },
+                        },
+                        data: {
+                            revoked: true,
+                            usedAt: new Date(),
+                            graceUntil: new Date(Date.now() + authRefreshTokenService_1.REFRESH_TOKEN_GRACE_MS),
+                        },
+                    });
+                    if (claimed.count !== 1) {
+                        const rotatedError = new Error('REFRESH_TOKEN_ROTATED');
+                        rotatedError.code = 'REFRESH_TOKEN_ROTATED';
+                        throw rotatedError;
+                    }
+                    const created = await createUniqueRefreshToken(user.id, deviceInfo, tx, currentToken.familyId);
+                    await tx.refreshToken.update({
+                        where: { id: currentToken.id },
+                        data: { replacedById: created.recordId },
+                    });
+                    return created;
                 });
-                // Получаем только что созданный токен
-                const newRefreshToken = await client_1.default.refreshToken.findFirst({
-                    where: { userId: user.id, revoked: false },
-                    orderBy: { createdAt: 'desc' },
-                });
-                if (!newRefreshToken) {
-                    throw new Error('Не удалось получить новый refresh токен после создания');
-                }
                 const profile = await (0, userService_1.getProfile)(user.id);
                 res.json((0, apiResponse_1.successResponse)({
                     accessToken: newAccessToken,
                     refreshToken: newRefreshToken.token,
+                    deviceSessionId: newRefreshToken.deviceSessionId,
                     profile
                 }));
             }
             catch (e) {
+                if (e?.code === 'REFRESH_TOKEN_ROTATED') {
+                    return res.status(409).json((0, apiResponse_1.errorResponse)('Refresh токен уже обновляется другим процессом', apiResponse_1.ErrorCodes.CONFLICT, {
+                        reason: 'REFRESH_TOKEN_ROTATED',
+                    }));
+                }
                 console.error('Ошибка создания нового refresh токена:', e);
                 res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка обновления токенов', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
             }
@@ -1974,8 +2020,16 @@ router.post('/logout', auth_1.authenticateToken, async (req, res) => {
     if (!refreshToken)
         return res.status(400).json((0, apiResponse_1.errorResponse)('Refresh token required', apiResponse_1.ErrorCodes.VALIDATION_ERROR));
     try {
+        const tokenHash = (0, authRefreshTokenService_1.hashRefreshToken)(refreshToken);
         await client_1.default.refreshToken.updateMany({
-            where: { token: refreshToken, userId: req.user.userId },
+            where: {
+                userId: req.user.userId,
+                OR: [
+                    { tokenHash },
+                    { token: refreshToken },
+                    { token: tokenHash },
+                ],
+            },
             data: { revoked: true },
         });
         res.json((0, apiResponse_1.successResponse)({ message: 'Logged out successfully' }));
@@ -2106,11 +2160,12 @@ router.post('/verify', async (req, res) => {
             return res.status(500).json((0, apiResponse_1.errorResponse)('Ошибка получения данных пользователя', apiResponse_1.ErrorCodes.INTERNAL_ERROR));
         }
         const accessToken = generateAccessToken(userWithRole);
-        const refreshToken = await createUniqueRefreshToken(userWithRole.id);
+        const refreshToken = await createUniqueRefreshToken(userWithRole.id, (0, authRefreshTokenService_1.buildDeviceInfoFromRequestBody)(req.body));
         const profile = await (0, userService_1.getProfile)(userWithRole.id);
         res.json((0, apiResponse_1.successResponse)({
             accessToken,
-            refreshToken,
+            refreshToken: refreshToken.token,
+            deviceSessionId: refreshToken.deviceSessionId,
             profile,
             message: 'Аккаунт подтвержден и активирован'
         }));

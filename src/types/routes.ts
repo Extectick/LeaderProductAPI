@@ -8,11 +8,17 @@ import { Profile } from './userTypes';
 export type AuthLoginRequest = {
   email: string;
   password: string;
+  installId?: string;
+  deviceSessionId?: string;
+  platform?: string;
+  appVersion?: string;
+  deviceName?: string;
 };
 
 export type AuthLoginResponseData = {
   accessToken: string;
   refreshToken: string;
+  deviceSessionId?: string | null;
   profile: Profile;
   message: string;
 };
@@ -34,11 +40,17 @@ export type AuthRegisterResponse = SuccessResponse<{
 export type AuthVerifyRequest = {
   email: string;
   code: string;
+  installId?: string;
+  deviceSessionId?: string;
+  platform?: string;
+  appVersion?: string;
+  deviceName?: string;
 };
 
 export type AuthVerifyResponseData = {
   accessToken: string;
   refreshToken: string;
+  deviceSessionId?: string | null;
   profile: Profile | null;
   message: string;
 };
@@ -47,11 +59,17 @@ export type AuthVerifyResponse = SuccessResponse<AuthVerifyResponseData> | Error
 
 export type AuthTokenRequest = {
   refreshToken: string;
+  installId?: string;
+  deviceSessionId?: string;
+  platform?: string;
+  appVersion?: string;
+  deviceName?: string;
 };
 
 export type AuthTokenResponse = SuccessResponse<{
   accessToken: string;
   refreshToken: string;
+  deviceSessionId?: string | null;
   profile: Profile | null;
 }> | ErrorResponse;
 
@@ -189,6 +207,7 @@ export type MessengerQrAuthStatusResponse = SuccessResponse<{
   message?: string;
   accessToken?: string;
   refreshToken?: string;
+  deviceSessionId?: string | null;
   profile?: Profile | null;
 }> | ErrorResponse;
 
@@ -490,9 +509,12 @@ export type QRRestoreResponse = SuccessResponse<{
 
 // Tracking (routes & coordinates) types
 export type TrackingPointInput = {
+  clientPointId?: string;
   latitude: number;
   longitude: number;
   recordedAt: string; // ISO string
+  recordedTimeZone?: string;
+  recordedTimezoneOffsetMinutes?: number;
   eventType?: 'MOVE' | 'STOP';
   accuracy?: number;
   speed?: number;
@@ -501,6 +523,9 @@ export type TrackingPointInput = {
 };
 
 export type SaveTrackingPointsRequest = {
+  routeId?: number;
+  startNewRoute?: boolean;
+  endRoute?: boolean;
   points: TrackingPointInput[];
 };
 
@@ -510,9 +535,31 @@ export type SaveTrackingPointsResponse = SuccessResponse<{
   routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
 }> | ErrorResponse;
 
+export type TrackingRouteStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+
+export type TrackingSessionDto = {
+  id: number;
+  status: TrackingRouteStatus;
+  startedAt: string;
+  endedAt?: string | null;
+  pointsCount?: number;
+};
+
+export type StartTrackingSessionResponse = SuccessResponse<{
+  route: TrackingSessionDto;
+}> | ErrorResponse;
+
+export type StopTrackingSessionRequest = {
+  routeId?: number;
+};
+
+export type StopTrackingSessionResponse = SuccessResponse<{
+  route: TrackingSessionDto | null;
+}> | ErrorResponse;
+
 export type TrackingRouteSummary = {
   id: number;
-  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+  status: TrackingRouteStatus;
   startedAt: string;
   endedAt?: string | null;
   pointsCount: number;
@@ -545,6 +592,8 @@ export type RoutePointDto = {
   latitude: number;
   longitude: number;
   recordedAt: string;
+  recordedTimeZone?: string | null;
+  recordedTimezoneOffsetMinutes?: number | null;
   eventType: 'MOVE' | 'STOP';
   accuracy?: number | null;
   speed?: number | null;
@@ -574,6 +623,15 @@ export type GetUserPointsQuery = {
 export type GetUserPointsResponse = SuccessResponse<{
   user: { id: number };
   points: RoutePointDto[];
+}> | ErrorResponse;
+
+export type TrackingStatusResponse = SuccessResponse<{
+  serverTime: string;
+  activeRoute: TrackingSessionDto | null;
+  lastRoute: TrackingSessionDto | null;
+  lastPoint: RoutePointDto | null;
+  activePointsCount: number;
+  todayPointsCount: number;
 }> | ErrorResponse;
 
 export type DailyTrackingStat = {

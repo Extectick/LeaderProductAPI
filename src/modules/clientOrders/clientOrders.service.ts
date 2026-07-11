@@ -234,6 +234,60 @@ function jsonNumber(value: unknown) {
   return null;
 }
 
+export async function resolveActiveTrackingOrderSnapshot(tx: Tx, userId: number) {
+  const activeRoute = await tx.userRoute.findFirst({
+    where: { userId, status: 'ACTIVE' },
+    orderBy: { startedAt: 'desc' },
+    select: {
+      id: true,
+      startedAt: true,
+    },
+  });
+  if (!activeRoute) return null;
+
+  const point = await tx.routePoint.findFirst({
+    where: { userId, routeId: activeRoute.id },
+    orderBy: { recordedAt: 'desc' },
+    select: {
+      id: true,
+      routeId: true,
+      latitude: true,
+      longitude: true,
+      recordedAt: true,
+      recordedTimeZone: true,
+      recordedTimezoneOffsetMinutes: true,
+      eventType: true,
+      accuracy: true,
+      speed: true,
+      heading: true,
+      sequence: true,
+    },
+  });
+  if (!point) return null;
+
+  const snapshot: Prisma.InputJsonObject = {
+    routeId: activeRoute.id,
+    routeStartedAt: activeRoute.startedAt.toISOString(),
+    routePointId: point.id,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    recordedAt: point.recordedAt.toISOString(),
+    recordedTimeZone: point.recordedTimeZone ?? null,
+    recordedTimezoneOffsetMinutes: point.recordedTimezoneOffsetMinutes ?? null,
+    eventType: point.eventType,
+    accuracy: point.accuracy ?? null,
+    speed: point.speed ?? null,
+    heading: point.heading ?? null,
+    sequence: point.sequence ?? null,
+    capturedAt: now().toISOString(),
+  };
+
+  return {
+    routePointId: point.id,
+    snapshot,
+  };
+}
+
 export function normalizeClientOrderPublicError(value: unknown) {
   const message = String(value || '').trim();
   if (!message) return null;
@@ -4711,6 +4765,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
     await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
+    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
     const guid = randomUUID();
 
     const order = await tx.order.create({
@@ -4732,6 +4787,8 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
+        trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4761,6 +4818,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        trackingSnapshot: trackingSnapshot?.snapshot ?? null,
         generalDiscountPercent: body.generalDiscountPercent ?? null,
         items: prepared.items.map((item) => item.snapshot),
       } as Prisma.InputJsonValue,
@@ -4866,6 +4924,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     const nextRevision = order.revision + 1;
     const isAutosave = body.saveReason === 'autosave';
     const queueState = resolveUpdatedOrderQueueState(order.status);
+    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
 
     await tx.orderItem.deleteMany({ where: { orderId: order.id } });
 
@@ -4888,6 +4947,12 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        ...(trackingSnapshot
+          ? {
+              trackingRoutePointId: trackingSnapshot.routePointId,
+              trackingSnapshot: trackingSnapshot.snapshot,
+            }
+          : {}),
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -4919,6 +4984,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
           paymentForm: body.paymentForm ?? null,
           deliveryMethod: body.deliveryMethod ?? null,
+          trackingSnapshot: trackingSnapshot?.snapshot ?? null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,
           items: prepared.items.map((item) => item.snapshot),
         } as Prisma.InputJsonValue,
@@ -4992,6 +5058,7 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
 
     const nextRevision = order.revision + 1;
     const queuedAt = now();
+    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
 
     await tx.order.update({
       where: { id: order.id },
@@ -5005,6 +5072,12 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         exportAttempts: 0,
         lastExportError: null,
         last1cError: null,
+        ...(trackingSnapshot
+          ? {
+              trackingRoutePointId: trackingSnapshot.routePointId,
+              trackingSnapshot: trackingSnapshot.snapshot,
+            }
+          : {}),
         sourceUpdatedAt: queuedAt,
       },
     });
@@ -5015,7 +5088,10 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
       source: OrderEventSource.APP_MANAGER,
       eventType: 'CLIENT_ORDER_SUBMITTED',
       actorUserId: userId,
-      payload: { queuedAt: queuedAt.toISOString() },
+      payload: {
+        queuedAt: queuedAt.toISOString(),
+        trackingSnapshot: trackingSnapshot?.snapshot ?? null,
+      },
     });
 
     await saveUserCounterpartyDefaults(tx, userId, guid);

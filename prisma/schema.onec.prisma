@@ -618,6 +618,7 @@ model Order {
   organizationId    String?
   priceTypeId       String?
   createdByUserId   Int?
+  trackingRoutePointId Int?
 
   status            OrderStatus @default(DRAFT)
   comment           String?
@@ -654,6 +655,8 @@ model Order {
   organization      Organization?   @relation(fields: [organizationId], references: [id])
   priceType         PriceType?      @relation(fields: [priceTypeId], references: [id])
   createdByUser     User?           @relation("OrdersCreatedBy", fields: [createdByUserId], references: [id])
+  trackingRoutePoint RoutePoint?     @relation("OrderTrackingPoint", fields: [trackingRoutePointId], references: [id], onDelete: SetNull)
+  trackingSnapshot  Json?
 
   items             OrderItem[]
   events            OrderEvent[]
@@ -668,6 +671,7 @@ model Order {
   @@index([organizationId])
   @@index([priceTypeId])
   @@index([createdByUserId])
+  @@index([trackingRoutePointId])
   @@index([status])
   @@index([source])
   @@index([source, updatedAt])

@@ -1,4 +1,6 @@
 import express from 'express';
+import { ActionType } from '@prisma/client';
+import { createHash, randomBytes } from 'crypto';
 import prisma from '../prisma/client';
 import {
   authenticateToken,
@@ -26,6 +28,11 @@ import {
   GetUserRoutesWithPointsResponse,
   GetUserPointsQuery,
   GetUserPointsResponse,
+  StartTrackingSessionResponse,
+  StopTrackingSessionRequest,
+  StopTrackingSessionResponse,
+  TrackingSessionDto,
+  TrackingStatusResponse,
 } from '../types/routes';
 
 const router = express.Router();
@@ -33,11 +40,163 @@ const router = express.Router();
 const MAX_POINTS_BATCH = 1000;
 const DEFAULT_MAX_ACCURACY_METERS = 100;
 const MIN_DISTANCE_METERS = 5;
+const TRACKING_DEVICE_TOKEN_PREFIX = 'lpt_';
+const TRACKING_DEVICE_TOKEN_TTL_DAYS = Number(process.env.TRACKING_DEVICE_TOKEN_TTL_DAYS || 180);
+
+type NativeTrackingTokenRequest = {
+  installId?: string | null;
+  deviceSessionId?: string | null;
+  platform?: string | null;
+  appVersion?: string | null;
+  deviceName?: string | null;
+};
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function generateTrackingDeviceToken() {
+  return `${TRACKING_DEVICE_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+}
+
+function hashTrackingDeviceToken(token: string) {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function readBearerToken(req: express.Request) {
+  const header = req.headers.authorization;
+  if (typeof header === 'string' && header.toLowerCase().startsWith('bearer ')) {
+    return header.slice(7).trim();
+  }
+  const fallback = req.headers['x-tracking-token'];
+  return typeof fallback === 'string' ? fallback.trim() : undefined;
+}
+
+function cleanTokenMeta(value?: string | null) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || undefined;
+}
+
+type TrackingRouteLike = {
+  id: number;
+  userId: number;
+  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+  startedAt: Date;
+  endedAt?: Date | null;
+};
+
+function mapRouteToSessionDto(
+  route: {
+    id: number;
+    status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+    startedAt: Date;
+    endedAt?: Date | null;
+  },
+  pointsCount?: number
+): TrackingSessionDto {
+  return {
+    id: route.id,
+    status: route.status,
+    startedAt: route.startedAt.toISOString(),
+    endedAt: route.endedAt ? route.endedAt.toISOString() : null,
+    pointsCount,
+  };
+}
+
+function mapRoutePointToDto(point: {
+  id: number;
+  routeId: number;
+  latitude: number;
+  longitude: number;
+  recordedAt: Date;
+  recordedTimeZone?: string | null;
+  recordedTimezoneOffsetMinutes?: number | null;
+  eventType: 'MOVE' | 'STOP';
+  accuracy?: number | null;
+  speed?: number | null;
+  heading?: number | null;
+  stayDurationSeconds?: number | null;
+  sequence?: number | null;
+}): RoutePointDto {
+  return {
+    id: point.id,
+    routeId: point.routeId,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    recordedAt: point.recordedAt.toISOString(),
+    recordedTimeZone: point.recordedTimeZone ?? null,
+    recordedTimezoneOffsetMinutes: point.recordedTimezoneOffsetMinutes ?? null,
+    eventType: point.eventType,
+    accuracy: point.accuracy,
+    speed: point.speed,
+    heading: point.heading,
+    stayDurationSeconds: point.stayDurationSeconds,
+    sequence: point.sequence,
+  };
+}
+
+async function writeTrackingAudit(
+  db: any,
+  userId: number,
+  trackingAction: 'START' | 'STOP' | 'POINTS',
+  routeId?: number | null,
+  details?: Record<string, unknown>
+) {
+  try {
+    await db.auditLog.create({
+      data: {
+        userId,
+        action: ActionType.OTHER,
+        targetType: 'USER_ROUTE',
+        targetId: routeId ?? undefined,
+        details: JSON.stringify({
+          trackingAction,
+          ...details,
+        }),
+      },
+    });
+  } catch (error) {
+    console.warn('[tracking] audit write failed', error);
+  }
+}
 
 function parseDate(value?: string): Date | undefined {
   if (!value) return undefined;
   const d = new Date(value);
   return isNaN(d.getTime()) ? undefined : d;
+}
+
+function parseTimezoneOffsetMinutes(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const rounded = Math.round(value);
+  return rounded >= -14 * 60 && rounded <= 14 * 60 ? rounded : undefined;
+}
+
+function parseTimeZone(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  if (!text || text.length > 128) return undefined;
+  if (!/^[A-Za-z0-9_+\-./]+$/.test(text)) return undefined;
+  return text;
+}
+
+function clampRouteEndAt(route: { startedAt: Date }, candidate?: Date | null) {
+  const endAt = candidate ?? new Date();
+  return endAt < route.startedAt ? route.startedAt : endAt;
+}
+
+async function ensureRouteStartedAtCoversPoint<T extends TrackingRouteLike>(
+  db: any,
+  route: T,
+  firstPointAt: Date
+): Promise<T> {
+  if (firstPointAt >= route.startedAt) return route;
+  return db.userRoute.update({
+    where: { id: route.id },
+    data: { startedAt: firstPointAt },
+  }) as Promise<T>;
 }
 
 function haversineDistanceMeters(
@@ -66,6 +225,434 @@ function haversineDistanceMeters(
  *   - name: Tracking
  *     description: Маршруты и трекинг геопозиции пользователей
  */
+
+router.post(
+  '/sessions/start',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 60 }),
+  async (
+    req: AuthRequest<{}, StartTrackingSessionResponse, {}>,
+    res: express.Response<StartTrackingSessionResponse>
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      let created = false;
+      const route = await prisma.$transaction(async (tx) => {
+        let active = await tx.userRoute.findFirst({
+          where: { userId, status: 'ACTIVE' },
+          orderBy: { startedAt: 'desc' },
+        });
+
+        if (!active) {
+          created = true;
+          active = await tx.userRoute.create({
+            data: {
+              userId,
+              status: 'ACTIVE',
+              startedAt: new Date(),
+            },
+          });
+        }
+
+        await writeTrackingAudit(tx, userId, 'START', active.id, {
+          created,
+        });
+        return active;
+      });
+
+      const pointsCount = await prisma.routePoint.count({
+        where: { routeId: route.id, userId },
+      });
+
+      return res.json(
+        successResponse(
+          { route: mapRouteToSessionDto(route, pointsCount) },
+          'Сессия отслеживания маршрута активна'
+        )
+      );
+    } catch (err) {
+      console.error('Ошибка старта сессии отслеживания:', err);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка старта сессии отслеживания',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? err : undefined
+        )
+      );
+    }
+  }
+);
+
+router.post(
+  '/sessions/stop',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 60 }),
+  async (
+    req: AuthRequest<{}, StopTrackingSessionResponse, StopTrackingSessionRequest>,
+    res: express.Response<StopTrackingSessionResponse>
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const rawRouteId = req.body?.routeId;
+      const routeId =
+        rawRouteId === undefined || rawRouteId === null
+          ? undefined
+          : Number(rawRouteId);
+
+      if (routeId !== undefined && (!Number.isInteger(routeId) || routeId <= 0)) {
+        return res
+          .status(400)
+          .json(errorResponse('routeId должен быть положительным целым числом', ErrorCodes.VALIDATION_ERROR));
+      }
+
+      const route = await prisma.$transaction(async (tx) => {
+        let active = routeId
+          ? await tx.userRoute.findFirst({ where: { id: routeId, userId } })
+          : await tx.userRoute.findFirst({
+              where: { userId, status: 'ACTIVE' },
+              orderBy: { startedAt: 'desc' },
+            });
+
+        if (!active) return null;
+
+        if (active.status !== 'ACTIVE') {
+          await writeTrackingAudit(tx, userId, 'STOP', active.id, {
+            alreadyClosed: true,
+            status: active.status,
+          });
+          return active;
+        }
+
+        const lastPoint = await tx.routePoint.findFirst({
+          where: { routeId: active.id, userId },
+          orderBy: { recordedAt: 'desc' },
+        });
+        const firstPoint = await tx.routePoint.findFirst({
+          where: { routeId: active.id, userId },
+          orderBy: { recordedAt: 'asc' },
+        });
+        if (firstPoint) {
+          active = await ensureRouteStartedAtCoversPoint(tx, active, firstPoint.recordedAt);
+        }
+
+        active = await tx.userRoute.update({
+          where: { id: active.id },
+          data: {
+            status: 'COMPLETED',
+            endedAt: clampRouteEndAt(active, lastPoint?.recordedAt),
+          },
+        });
+
+        await writeTrackingAudit(tx, userId, 'STOP', active.id, {
+          lastPointAt: lastPoint?.recordedAt?.toISOString() ?? null,
+        });
+        return active;
+      });
+
+      const pointsCount = route
+        ? await prisma.routePoint.count({ where: { routeId: route.id, userId } })
+        : 0;
+
+      return res.json(
+        successResponse(
+          { route: route ? mapRouteToSessionDto(route, pointsCount) : null },
+          route ? 'Сессия отслеживания маршрута остановлена' : 'Активная сессия отслеживания не найдена'
+        )
+      );
+    } catch (err) {
+      console.error('Ошибка остановки сессии отслеживания:', err);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка остановки сессии отслеживания',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? err : undefined
+        )
+      );
+    }
+  }
+);
+
+router.get(
+  '/status',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  async (
+    req: AuthRequest<{}, TrackingStatusResponse>,
+    res: express.Response<TrackingStatusResponse>
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      const [activeRoute, lastRoute, lastPoint, todayPointsCount] = await Promise.all([
+        prisma.userRoute.findFirst({
+          where: { userId, status: 'ACTIVE' },
+          orderBy: { startedAt: 'desc' },
+        }),
+        prisma.userRoute.findFirst({
+          where: { userId },
+          orderBy: { startedAt: 'desc' },
+        }),
+        prisma.routePoint.findFirst({
+          where: { userId },
+          orderBy: { recordedAt: 'desc' },
+        }),
+        prisma.routePoint.count({
+          where: { userId, recordedAt: { gte: todayStart } },
+        }),
+      ]);
+
+      const activePointsCount = activeRoute
+        ? await prisma.routePoint.count({ where: { routeId: activeRoute.id, userId } })
+        : 0;
+      const lastRoutePointsCount = lastRoute
+        ? activeRoute && lastRoute.id === activeRoute.id
+          ? activePointsCount
+          : await prisma.routePoint.count({ where: { routeId: lastRoute.id, userId } })
+        : 0;
+
+      return res.json(
+        successResponse(
+          {
+            serverTime: new Date().toISOString(),
+            activeRoute: activeRoute ? mapRouteToSessionDto(activeRoute, activePointsCount) : null,
+            lastRoute: lastRoute ? mapRouteToSessionDto(lastRoute, lastRoutePointsCount) : null,
+            lastPoint: lastPoint ? mapRoutePointToDto(lastPoint) : null,
+            activePointsCount,
+            todayPointsCount,
+          },
+          'Статус отслеживания получен'
+        )
+      );
+    } catch (err) {
+      console.error('Ошибка получения статуса отслеживания:', err);
+      return res.status(500).json(
+        errorResponse(
+          'Ошибка получения статуса отслеживания',
+          ErrorCodes.INTERNAL_ERROR,
+          process.env.NODE_ENV === 'development' ? err : undefined
+        )
+      );
+    }
+  }
+);
+
+async function authenticateTrackingDeviceToken(
+  req: AuthRequest<{}, SaveTrackingPointsResponse, SaveTrackingPointsRequest>,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  try {
+    const token = readBearerToken(req);
+    if (!token) {
+      return res
+        .status(401)
+        .json(errorResponse('Требуется токен трекинга', ErrorCodes.UNAUTHORIZED));
+    }
+
+    const tokenRecord = await prisma.trackingDeviceToken.findUnique({
+      where: { tokenHash: hashTrackingDeviceToken(token) },
+      include: {
+        user: {
+          select: {
+            id: true,
+            isActive: true,
+            profileStatus: true,
+          },
+        },
+      },
+    });
+
+    const now = new Date();
+    if (
+      !tokenRecord ||
+      tokenRecord.revokedAt ||
+      (tokenRecord.expiresAt && tokenRecord.expiresAt <= now)
+    ) {
+      return res
+        .status(401)
+        .json(errorResponse('Токен трекинга недействителен', ErrorCodes.UNAUTHORIZED));
+    }
+
+    if (!tokenRecord.user?.isActive) {
+      return res
+        .status(403)
+        .json(errorResponse('Пользователь отключен', ErrorCodes.FORBIDDEN));
+    }
+
+    req.user = {
+      userId: tokenRecord.userId,
+      role: 'tracking-device',
+      permissions: [],
+      profileStatus: tokenRecord.user.profileStatus,
+      iat: 0,
+      exp: Math.floor((tokenRecord.expiresAt?.getTime() || now.getTime() + 60_000) / 1000),
+    };
+
+    void prisma.trackingDeviceToken
+      .update({
+        where: { id: tokenRecord.id },
+        data: { lastUsedAt: now },
+      })
+      .catch((error) => console.warn('[tracking] device token touch failed', error));
+
+    return next();
+  } catch (error) {
+    console.error('[tracking] native token auth failed', error);
+    return res
+      .status(500)
+      .json(errorResponse('Ошибка проверки токена трекинга', ErrorCodes.INTERNAL_ERROR));
+  }
+}
+
+router.post(
+  '/native-token',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 30 }),
+  async (
+    req: AuthRequest<{}, { ok: boolean }, NativeTrackingTokenRequest>,
+    res
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const now = new Date();
+      const token = generateTrackingDeviceToken();
+      const expiresAt = addDays(now, Number.isFinite(TRACKING_DEVICE_TOKEN_TTL_DAYS) ? TRACKING_DEVICE_TOKEN_TTL_DAYS : 180);
+      const installId = cleanTokenMeta(req.body?.installId);
+      const deviceSessionId = cleanTokenMeta(req.body?.deviceSessionId);
+      const revokeOr = [
+        installId ? { installId } : undefined,
+        deviceSessionId ? { deviceSessionId } : undefined,
+      ].filter(Boolean) as Array<{ installId?: string; deviceSessionId?: string }>;
+
+      await prisma.$transaction(async (tx) => {
+        if (revokeOr.length > 0) {
+          await tx.trackingDeviceToken.updateMany({
+            where: {
+              userId,
+              revokedAt: null,
+              OR: revokeOr,
+            },
+            data: { revokedAt: now },
+          });
+        }
+
+        await tx.trackingDeviceToken.create({
+          data: {
+            tokenHash: hashTrackingDeviceToken(token),
+            userId,
+            installId,
+            deviceSessionId,
+            platform: cleanTokenMeta(req.body?.platform),
+            appVersion: cleanTokenMeta(req.body?.appVersion),
+            deviceName: cleanTokenMeta(req.body?.deviceName),
+            expiresAt,
+          },
+        });
+      });
+
+      return res.json(
+        successResponse(
+          {
+            token,
+            expiresAt: expiresAt.toISOString(),
+            endpoint: '/tracking/native/points',
+          },
+          'Токен фонового трекинга создан'
+        )
+      );
+    } catch (error) {
+      console.error('[tracking] native token issue failed', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка создания токена фонового трекинга', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
+
+router.delete(
+  '/native-token',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 60 }),
+  async (
+    req: AuthRequest<{}, { ok: boolean }, NativeTrackingTokenRequest & { token?: string }>,
+    res
+  ) => {
+    try {
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
+      }
+
+      const now = new Date();
+      const token = cleanTokenMeta(req.body?.token);
+      const installId = cleanTokenMeta(req.body?.installId);
+      const deviceSessionId = cleanTokenMeta(req.body?.deviceSessionId);
+      const revokeOr = [
+        token ? { tokenHash: hashTrackingDeviceToken(token) } : undefined,
+        installId ? { installId } : undefined,
+        deviceSessionId ? { deviceSessionId } : undefined,
+      ].filter(Boolean) as Array<{ tokenHash?: string; installId?: string; deviceSessionId?: string }>;
+
+      const result = await prisma.trackingDeviceToken.updateMany({
+        where: {
+          userId,
+          revokedAt: null,
+          ...(revokeOr.length > 0 ? { OR: revokeOr } : {}),
+        },
+        data: { revokedAt: now },
+      });
+
+      return res.json(
+        successResponse(
+          { revoked: result.count },
+          'Токены фонового трекинга отозваны'
+        )
+      );
+    } catch (error) {
+      console.error('[tracking] native token revoke failed', error);
+      return res
+        .status(500)
+        .json(errorResponse('Ошибка отзыва токена фонового трекинга', ErrorCodes.INTERNAL_ERROR));
+    }
+  }
+);
 
 /**
  * @openapi
@@ -145,16 +732,10 @@ function haversineDistanceMeters(
  *       403:
  *         description: Доступ запрещён
  */
-router.post(
-  '/points',
-  authenticateToken,
-  checkUserStatus,
-  authorizeServiceAccess('tracking'),
-  rateLimit({ windowSec: 60, limit: 600 }),
-  async (
-    req: AuthRequest<{}, SaveTrackingPointsResponse, SaveTrackingPointsRequest>,
-    res: express.Response<SaveTrackingPointsResponse>
-  ) => {
+const saveTrackingPointsHandler = async (
+  req: AuthRequest<{}, SaveTrackingPointsResponse, SaveTrackingPointsRequest>,
+  res: express.Response<SaveTrackingPointsResponse>
+) => {
     try {
       const userId = req.user?.userId;
       if (!userId) {
@@ -163,7 +744,7 @@ router.post(
           .json(errorResponse('Пользователь не авторизован', ErrorCodes.UNAUTHORIZED));
       }
 
-      const { points } = req.body || {};
+      const { points, routeId, startNewRoute, endRoute } = req.body || {};
 
       if (!Array.isArray(points) || points.length === 0) {
         return res.status(400).json(
@@ -184,9 +765,12 @@ router.post(
       }
 
       const parsedPoints: {
+        clientPointId?: string;
         latitude: number;
         longitude: number;
         recordedAt: Date;
+        recordedTimeZone?: string;
+        recordedTimezoneOffsetMinutes?: number;
         eventType: 'MOVE' | 'STOP';
         accuracy?: number;
         speed?: number;
@@ -232,9 +816,12 @@ router.post(
         }
 
         parsedPoints.push({
+          clientPointId: typeof p.clientPointId === 'string' && p.clientPointId.trim() ? p.clientPointId.trim() : undefined,
           latitude: p.latitude,
           longitude: p.longitude,
           recordedAt: recordedAtDate,
+          recordedTimeZone: parseTimeZone(p.recordedTimeZone),
+          recordedTimezoneOffsetMinutes: parseTimezoneOffsetMinutes(p.recordedTimezoneOffsetMinutes),
           eventType,
           accuracy:
             typeof p.accuracy === 'number' ? p.accuracy : undefined,
@@ -255,19 +842,75 @@ router.post(
       await prisma.$transaction(async (tx) => {
         // Всегда используем один непрерывный активный маршрут пользователя,
         // чтобы писать точки круглосуточно. Если нет - создаём.
-        let active = await tx.userRoute.findFirst({
-          where: { userId, status: 'ACTIVE' },
-          orderBy: { startedAt: 'desc' },
-        });
+        let active = routeId
+          ? await tx.userRoute.findFirst({
+              where: { id: routeId, userId },
+            })
+          : null;
+
+        if (active && active.status !== 'ACTIVE' && !endRoute) {
+          active = null;
+        }
+
+        if (!active && startNewRoute) {
+          const previousActive = await tx.userRoute.findFirst({
+            where: { userId, status: 'ACTIVE' },
+            orderBy: { startedAt: 'desc' },
+          });
+          if (previousActive) {
+            await tx.userRoute.update({
+              where: { id: previousActive.id },
+              data: {
+                status: 'COMPLETED',
+                endedAt: clampRouteEndAt(previousActive, parsedPoints[0]?.recordedAt),
+              },
+            });
+          }
+        }
+
+        if (!active && !startNewRoute) {
+          active = await tx.userRoute.findFirst({
+            where: { userId, status: 'ACTIVE' },
+            orderBy: { startedAt: 'desc' },
+          });
+        }
         const lastSavedPoint = active
           ? await tx.routePoint.findFirst({
               where: { routeId: active.id, userId },
               orderBy: { recordedAt: 'desc' },
             })
           : null;
+        const firstSavedPoint = active
+          ? await tx.routePoint.findFirst({
+              where: { routeId: active.id, userId },
+              orderBy: { recordedAt: 'asc' },
+            })
+          : null;
+
+        const incomingClientPointIds = parsedPoints
+          .map((p) => p.clientPointId)
+          .filter((id): id is string => Boolean(id));
+        const duplicateClientPointIds = incomingClientPointIds.length
+          ? new Set(
+              (
+                await tx.routePoint.findMany({
+                  where: {
+                    userId,
+                    clientPointId: { in: incomingClientPointIds },
+                  },
+                  select: { clientPointId: true },
+                })
+              )
+                .map((p) => p.clientPointId)
+                .filter((id): id is string => Boolean(id))
+            )
+          : new Set<string>();
 
         const filteredPoints: typeof parsedPoints = [];
         for (const p of parsedPoints) {
+          if (p.clientPointId && duplicateClientPointIds.has(p.clientPointId)) {
+            continue;
+          }
           const prev = filteredPoints.length
             ? filteredPoints[filteredPoints.length - 1]
             : lastSavedPoint;
@@ -294,6 +937,21 @@ router.post(
                 startedAt: fallbackStartedAt,
                 status: 'ACTIVE',
               },
+            });
+          } else if (firstSavedPoint) {
+            active = await ensureRouteStartedAtCoversPoint(tx, active, firstSavedPoint.recordedAt);
+          }
+          if (endRoute && active.status === 'ACTIVE') {
+            active = await tx.userRoute.update({
+              where: { id: active.id },
+              data: {
+                status: 'COMPLETED',
+                endedAt: clampRouteEndAt(active, parsedPoints[parsedPoints.length - 1]?.recordedAt),
+              },
+            });
+            await writeTrackingAudit(tx, userId, 'STOP', active.id, {
+              createdPoints: 0,
+              duplicateOrTooClose: true,
             });
           }
           targetRouteId = active.id;
@@ -322,6 +980,12 @@ router.post(
               status: 'ACTIVE',
             },
           });
+        } else {
+          const firstPointAt =
+            firstSavedPoint && firstSavedPoint.recordedAt < minTs
+              ? firstSavedPoint.recordedAt
+              : minTs;
+          active = await ensureRouteStartedAtCoversPoint(tx, active, firstPointAt);
         }
         targetRouteId = active.id;
         routeStatus = active.status;
@@ -336,16 +1000,39 @@ router.post(
           latitude: p.latitude,
           longitude: p.longitude,
           recordedAt: p.recordedAt,
+          recordedTimeZone: p.recordedTimeZone,
+          recordedTimezoneOffsetMinutes: p.recordedTimezoneOffsetMinutes,
           eventType: p.eventType,
           accuracy: p.accuracy,
           speed: p.speed,
           heading: p.heading,
           stayDurationSeconds: p.stayDurationSeconds,
+          clientPointId: p.clientPointId,
           sequence: existingPointsCount + idx + 1,
         }));
 
-        await tx.routePoint.createMany({ data });
+        await tx.routePoint.createMany({ data, skipDuplicates: true });
         createdPoints = data.length;
+        await writeTrackingAudit(tx, userId, 'POINTS', targetRouteId, {
+          createdPoints,
+          receivedPoints: parsedPoints.length,
+          endRoute: Boolean(endRoute),
+        });
+
+        if (endRoute && active.status === 'ACTIVE') {
+          active = await tx.userRoute.update({
+            where: { id: active.id },
+            data: {
+              status: 'COMPLETED',
+              endedAt: clampRouteEndAt(active, maxTs),
+            },
+          });
+          await writeTrackingAudit(tx, userId, 'STOP', active.id, {
+            createdPoints,
+            endedAt: clampRouteEndAt(active, maxTs).toISOString(),
+          });
+          routeStatus = active.status;
+        }
       });
 
       if (createdPoints === 0) {
@@ -390,7 +1077,23 @@ router.post(
         )
       );
     }
-  }
+};
+
+router.post(
+  '/points',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 600 }),
+  saveTrackingPointsHandler
+);
+
+router.post(
+  '/native/points',
+  authenticateTrackingDeviceToken,
+  authorizeServiceAccess('tracking'),
+  rateLimit({ windowSec: 60, limit: 1200 }),
+  saveTrackingPointsHandler
 );
 
 /**
@@ -1013,6 +1716,8 @@ router.get(
         latitude: p.latitude,
         longitude: p.longitude,
         recordedAt: p.recordedAt.toISOString(),
+        recordedTimeZone: p.recordedTimeZone ?? null,
+        recordedTimezoneOffsetMinutes: p.recordedTimezoneOffsetMinutes ?? null,
         eventType: p.eventType,
         accuracy: p.accuracy,
         speed: p.speed,
@@ -1495,6 +2200,8 @@ router.get(
         latitude: p.latitude,
         longitude: p.longitude,
         recordedAt: p.recordedAt.toISOString(),
+        recordedTimeZone: p.recordedTimeZone ?? null,
+        recordedTimezoneOffsetMinutes: p.recordedTimezoneOffsetMinutes ?? null,
         eventType: p.eventType,
         accuracy: p.accuracy,
         speed: p.speed,
@@ -1666,6 +2373,8 @@ router.get(
         latitude: p.latitude,
         longitude: p.longitude,
         recordedAt: p.recordedAt.toISOString(),
+        recordedTimeZone: p.recordedTimeZone ?? null,
+        recordedTimezoneOffsetMinutes: p.recordedTimezoneOffsetMinutes ?? null,
         eventType: p.eventType,
         accuracy: p.accuracy,
         speed: p.speed,

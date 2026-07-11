@@ -47,6 +47,16 @@ const TrackingRoutePoint = {
       format: 'date-time',
       example: '2025-08-22T10:05:00.000Z',
     },
+    recordedTimeZone: {
+      type: 'string',
+      nullable: true,
+      example: 'Asia/Novosibirsk',
+    },
+    recordedTimezoneOffsetMinutes: {
+      type: 'integer',
+      nullable: true,
+      example: 420,
+    },
     eventType: RouteEventTypeEnum,
     accuracy: { type: 'number', nullable: true, example: 5.2 },
     speed: { type: 'number', nullable: true, example: 1.8 },

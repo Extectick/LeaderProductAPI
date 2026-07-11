@@ -285,6 +285,7 @@ model User {
   loginAttempts      LoginAttempt[]
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
+  deviceSessions     DeviceSession[]
   role               Role                @relation(fields: [roleId], references: [id])
   departmentRoles    DepartmentRole[]
   serviceAccesses    ServiceUserAccess[]
@@ -296,6 +297,7 @@ model User {
   qrlist             QRList[]
   routes             UserRoute[]
   routePoints        RoutePoint[]
+  trackingDeviceTokens TrackingDeviceToken[]
   createdOrders      Order[]             @relation("OrdersCreatedBy")
   orderEvents        OrderEvent[]        @relation("OrderEventsActor")
   lastSeenAt         DateTime?
@@ -623,13 +625,42 @@ model ServiceUserAccess {
 }
 
 model RefreshToken {
-  id        Int      @id @default(autoincrement())
-  token     String   @unique
-  userId    Int
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  revoked   Boolean  @default(false)
-  user      User     @relation(fields: [userId], references: [id])
+  id              Int      @id @default(autoincrement())
+  token           String   @unique
+  tokenHash       String?  @unique
+  userId          Int
+  deviceSessionId String?
+  familyId        String?
+  replacedById    Int?
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  revoked         Boolean  @default(false)
+  usedAt          DateTime?
+  graceUntil      DateTime?
+  user            User     @relation(fields: [userId], references: [id])
+  deviceSession   DeviceSession? @relation(fields: [deviceSessionId], references: [id])
+
+  @@index([userId])
+  @@index([deviceSessionId])
+  @@index([familyId])
+}
+
+model DeviceSession {
+  id            String   @id
+  userId        Int
+  installId     String
+  platform      String?
+  appVersion    String?
+  deviceName    String?
+  createdAt     DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+  revokedAt     DateTime?
+
+  user          User     @relation(fields: [userId], references: [id])
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@index([installId])
 }
 
 model LoginAttempt {
@@ -701,24 +732,51 @@ model UserRoute {
 }
 
 model RoutePoint {
-  id                  Int             @id @default(autoincrement())
-  routeId             Int
-  route               UserRoute       @relation(fields: [routeId], references: [id])
-  userId              Int
-  user                User            @relation(fields: [userId], references: [id])
-  latitude            Float
-  longitude           Float
-  recordedAt          DateTime
-  eventType           RouteEventType  @default(MOVE)
-  accuracy            Float?
-  speed               Float?
-  heading             Float?
-  stayDurationSeconds Int?
-  sequence            Int?
-  createdAt           DateTime        @default(now())
+  id                              Int             @id @default(autoincrement())
+  routeId                         Int
+  route                           UserRoute       @relation(fields: [routeId], references: [id])
+  userId                          Int
+  user                            User            @relation(fields: [userId], references: [id])
+  orderTrackingSnapshots          Order[]         @relation("OrderTrackingPoint")
+  latitude                        Float
+  longitude                       Float
+  recordedAt                      DateTime
+  recordedTimeZone                String?
+  recordedTimezoneOffsetMinutes  Int?
+  eventType                       RouteEventType  @default(MOVE)
+  accuracy                        Float?
+  speed                           Float?
+  heading                         Float?
+  stayDurationSeconds             Int?
+  sequence                        Int?
+  clientPointId                   String?
+  createdAt                       DateTime        @default(now())
 
+  @@unique([userId, clientPointId])
   @@index([userId, recordedAt])
   @@index([routeId, recordedAt])
+}
+
+model TrackingDeviceToken {
+  id              Int       @id @default(autoincrement())
+  tokenHash       String    @unique
+  userId          Int
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  installId       String?
+  deviceSessionId String?
+  platform        String?
+  appVersion      String?
+  deviceName      String?
+  createdAt       DateTime  @default(now())
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
+  expiresAt       DateTime?
+
+  @@index([userId])
+  @@index([installId])
+  @@index([deviceSessionId])
+  @@index([revokedAt])
+  @@index([expiresAt])
 }
 
 enum QRStatus {

@@ -48,6 +48,24 @@ export const orderDetailSelect = {
   cancelReason: true,
   last1cError: true,
   last1cSnapshot: true,
+  trackingRoutePointId: true,
+  trackingSnapshot: true,
+  trackingRoutePoint: {
+    select: {
+      id: true,
+      routeId: true,
+      latitude: true,
+      longitude: true,
+      recordedAt: true,
+      recordedTimeZone: true,
+      recordedTimezoneOffsetMinutes: true,
+      eventType: true,
+      accuracy: true,
+      speed: true,
+      heading: true,
+      sequence: true,
+    },
+  },
   createdAt: true,
   updatedAt: true,
   counterparty: {
@@ -242,6 +260,28 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     cancelReason: order.cancelReason,
     last1cError: order.last1cError,
     last1cSnapshot: order.last1cSnapshot,
+    tracking: order.trackingSnapshot
+      ? {
+          routePointId: order.trackingRoutePointId,
+          snapshot: order.trackingSnapshot,
+          routePoint: order.trackingRoutePoint
+            ? {
+                id: order.trackingRoutePoint.id,
+                routeId: order.trackingRoutePoint.routeId,
+                latitude: order.trackingRoutePoint.latitude,
+                longitude: order.trackingRoutePoint.longitude,
+                recordedAt: order.trackingRoutePoint.recordedAt,
+                recordedTimeZone: order.trackingRoutePoint.recordedTimeZone,
+                recordedTimezoneOffsetMinutes: order.trackingRoutePoint.recordedTimezoneOffsetMinutes,
+                eventType: order.trackingRoutePoint.eventType,
+                accuracy: order.trackingRoutePoint.accuracy,
+                speed: order.trackingRoutePoint.speed,
+                heading: order.trackingRoutePoint.heading,
+                sequence: order.trackingRoutePoint.sequence,
+              }
+            : null,
+        }
+      : null,
     counterparty: order.counterparty,
     agreement: order.agreement
       ? {

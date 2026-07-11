@@ -1,5 +1,9 @@
 node_modules
 dist
+backups
+local-db-backups
+prod-db-backups
+uploads
 *.log
 docker-compose.yml
 .dockerignore
@@ -9,3 +13,5 @@ src/tests/
 .vscode
 __tests__
 tests
+.tmp*
+api-schema.txt
