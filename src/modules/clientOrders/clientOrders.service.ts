@@ -118,6 +118,7 @@ type ManagerOrderContext = {
     guid: string;
     name: string;
     counterpartyId: string | null;
+    organizationId: string | null;
     contractId: string | null;
     warehouseId: string | null;
     priceTypeId: string | null;
@@ -524,16 +525,12 @@ function shouldOpenClientOrdersOnecCircuit(error: unknown) {
 
 const DEFAULT_ORDER_CURRENCY = 'RUB';
 const SMART_SEARCH_TRIGRAM_THRESHOLD = 0.18;
+const ACTIVE_AGREEMENT_STATUS = 'Действует';
 const ACTIVE_CONTRACT_STATUS = 'Действует';
-const CLOSED_AGREEMENT_STATUS = 'Закрыто';
 const CLOSED_CONTRACT_STATUS = 'Закрыт';
 const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const RECEIPT_PRICE_TYPE_TOKEN = '\u0446\u0435\u043d\u0430\u043f\u043e\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044f';
 const now = () => new Date();
-
-const agreementNotClosedWhere = (): Prisma.ClientAgreementWhereInput => ({
-  OR: [{ status: null }, { status: { not: CLOSED_AGREEMENT_STATUS } }],
-});
 
 const contractSelectableWhere = (): Prisma.ClientContractWhereInput => {
   const today = new Date();
@@ -549,15 +546,15 @@ const contractSelectableWhere = (): Prisma.ClientContractWhereInput => {
   };
 };
 
-const activeAgreementWhere = (): Prisma.ClientAgreementWhereInput => ({ isActive: true, AND: [agreementNotClosedWhere()] });
+const activeAgreementWhere = (): Prisma.ClientAgreementWhereInput => ({ isActive: true, status: ACTIVE_AGREEMENT_STATUS });
 const activeContractWhere = (): Prisma.ClientContractWhereInput => ({ isActive: true, AND: [contractSelectableWhere()] });
 
 function normalizedRu(value?: string | null) {
   return value?.trim().toLocaleLowerCase('ru') ?? '';
 }
 
-function isClosedAgreementStatus(status?: string | null) {
-  return normalizedRu(status) === normalizedRu(CLOSED_AGREEMENT_STATUS);
+function isActiveAgreementStatus(status?: string | null) {
+  return normalizedRu(status) === normalizedRu(ACTIVE_AGREEMENT_STATUS);
 }
 
 function isClosedContractStatus(status?: string | null) {
@@ -1136,6 +1133,7 @@ async function loadAgreementByGuid(tx: Tx, guid: string) {
       guid: true,
       name: true,
       counterpartyId: true,
+      organizationId: true,
       contractId: true,
       warehouseId: true,
       priceTypeId: true,
@@ -1148,12 +1146,8 @@ async function loadAgreementByGuid(tx: Tx, guid: string) {
   if (!agreement) {
     throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Соглашение ${guid} не найдено`);
   }
-  if (agreement.isActive === false) {
+  if (agreement.isActive === false || !isActiveAgreementStatus(agreement.status)) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Соглашение ${guid} неактивно`);
-  }
-
-  if (isClosedAgreementStatus(agreement.status)) {
-    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Соглашение ${guid} закрыто и не может использоваться в заказе`);
   }
 
   return agreement;
@@ -1505,7 +1499,7 @@ async function upsertLiveAgreement(
       priceTypeId,
       currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
       status: item.status ?? null,
-      isActive: item.isActive,
+      isActive: item.isActive && isActiveAgreementStatus(item.status),
       sourceUpdatedAt,
       lastSyncedAt: sourceUpdatedAt,
     },
@@ -1520,7 +1514,7 @@ async function upsertLiveAgreement(
       priceTypeId,
       currency: item.currency ?? DEFAULT_ORDER_CURRENCY,
       status: item.status ?? null,
-      isActive: item.isActive,
+      isActive: item.isActive && isActiveAgreementStatus(item.status),
       sourceUpdatedAt,
       lastSyncedAt: sourceUpdatedAt,
     },
@@ -2111,6 +2105,9 @@ async function materializeLiveOrderReferences(tx: Tx, data: LiveOrderMaterializa
   const organization = await upsertLiveOrganization(tx, data.organization, sourceUpdatedAt);
   const counterparty = await upsertLiveCounterparty(tx, data.counterparty, sourceUpdatedAt);
   const warehouse = await upsertLiveWarehouse(tx, data.warehouse, sourceUpdatedAt);
+  const agreementOrganization = data.agreement?.organization
+    ? await upsertLiveOrganization(tx, { ...data.agreement.organization, code: data.agreement.organization.code ?? null, isActive: true }, sourceUpdatedAt)
+    : null;
 
   const materializedPriceTypeGuids = new Set<string>();
   for (const priceType of [
@@ -2152,7 +2149,7 @@ async function materializeLiveOrderReferences(tx: Tx, data: LiveOrderMaterializa
     tx,
     data.agreement,
     counterparty?.id ?? null,
-    organization?.id ?? null,
+    agreementOrganization?.id ?? (data.agreement?.organizationGuid ? null : organization?.id ?? null),
     contract?.id ?? null,
     agreementWarehouse?.id ?? warehouse?.id ?? null,
     materializedAgreementPriceType?.id ?? null,
@@ -2179,6 +2176,9 @@ async function materializeLiveDefaultsReferences(defaults: LiveClientOrderDefaul
     const organization = await upsertLiveOrganization(tx, defaults.organization, sourceUpdatedAt);
     const counterparty = await upsertLiveCounterparty(tx, defaults.counterparty, sourceUpdatedAt);
     const warehouse = await upsertLiveWarehouse(tx, defaults.warehouse, sourceUpdatedAt);
+    const agreementOrganization = defaults.agreement?.organization
+      ? await upsertLiveOrganization(tx, { ...defaults.agreement.organization, code: defaults.agreement.organization.code ?? null, isActive: true }, sourceUpdatedAt)
+      : null;
     const agreementPriceType = await upsertLivePriceType(tx, defaults.priceType ?? defaults.agreement?.priceType ?? null, sourceUpdatedAt);
     const contract = await upsertLiveContract(
       tx,
@@ -2191,7 +2191,7 @@ async function materializeLiveDefaultsReferences(defaults: LiveClientOrderDefaul
       tx,
       defaults.agreement,
       counterparty?.id ?? null,
-      organization?.id ?? null,
+      agreementOrganization?.id ?? (defaults.agreement?.organizationGuid ? null : organization?.id ?? null),
       contract?.id ?? null,
       warehouse?.id ?? null,
       agreementPriceType?.id ?? null,
@@ -2214,6 +2214,9 @@ async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): 
 
   if (agreement?.counterpartyId && agreement.counterpartyId !== counterparty.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Соглашение не принадлежит выбранному контрагенту');
+  }
+  if (agreement && agreement.organizationId !== organization.id) {
+    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Соглашение не принадлежит выбранной организации');
   }
 
   if (contract?.counterpartyId !== undefined && contract.counterpartyId !== counterparty.id) {
@@ -2249,6 +2252,7 @@ async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): 
           guid: agreement.guid,
           name: agreement.name,
           counterpartyId: agreement.counterpartyId,
+          organizationId: agreement.organizationId,
           contractId: agreement.contractId,
           warehouseId: agreement.warehouseId,
           priceTypeId: agreement.priceTypeId,
@@ -3512,7 +3516,7 @@ export async function getClientOrderReferenceDetails(params: ClientOrderReferenc
 
   if (kind === 'counterparty') {
     const item = await prisma.counterparty.findFirst({
-      where: { guid, isActive: true },
+      where: { guid, ...activeAgreementWhere() },
       include: {
         defaultAgreement: { select: { guid: true, name: true } },
         defaultContract: { select: { guid: true, number: true } },
@@ -4507,11 +4511,8 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
   if (query.agreementGuid && !agreement) {
     throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Соглашение ${query.agreementGuid} не найдено`);
   }
-  if (agreement?.isActive === false) {
+  if (agreement && (agreement.isActive === false || !isActiveAgreementStatus(agreement.status))) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Соглашение ${query.agreementGuid} неактивно`);
-  }
-  if (agreement && isClosedAgreementStatus(agreement.status)) {
-    throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, `Соглашение ${query.agreementGuid} закрыто и не может использоваться в заказе`);
   }
   if (agreement?.counterpartyId && contextCounterparty && agreement.counterpartyId !== contextCounterparty.id) {
     throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Соглашение не принадлежит выбранному контрагенту');

@@ -69,7 +69,7 @@ type SessionOutcome = {
 
 type TxClient = Prisma.TransactionClient;
 
-const CLOSED_AGREEMENT_STATUS = 'Закрыто';
+const ACTIVE_AGREEMENT_STATUS = 'Действует';
 const ACTIVE_CONTRACT_STATUS = 'Действует';
 const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const ZERO_GUID = '00000000-0000-0000-0000-000000000000';
@@ -127,8 +127,8 @@ function isBaseUnitPackage(pack: NomenclaturePackageLike, baseUnit?: Nomenclatur
   return sameMultiplier && (!pack.unit || sameUnitIdentity(pack.unit, baseUnit));
 }
 
-function isClosedAgreementStatus(status?: string | null) {
-  return status?.trim().toLocaleLowerCase('ru') === CLOSED_AGREEMENT_STATUS.toLocaleLowerCase('ru');
+function isActiveAgreementStatus(status?: string | null) {
+  return status?.trim().toLocaleLowerCase('ru') === ACTIVE_AGREEMENT_STATUS.toLocaleLowerCase('ru');
 }
 
 function normalizedRu(value?: string | null) {
@@ -1431,7 +1431,7 @@ async function applyStagedAgreements(tx: TxClient, sessionId: string, syncedAt: 
         financialAccountingGroupGuid: item.agreement.financialAccountingGroupGuid ?? null,
         cashFlowItemGuid: item.agreement.cashFlowItemGuid ?? null,
         activityDirectionGuid: item.agreement.activityDirectionGuid ?? null,
-        isActive: (item.agreement.isActive ?? true) && !isClosedAgreementStatus(item.agreement.status),
+        isActive: (item.agreement.isActive ?? true) && isActiveAgreementStatus(item.agreement.status),
         sourceUpdatedAt: item.agreement.sourceUpdatedAt ?? syncedAt,
         lastSyncedAt: syncedAt,
       };

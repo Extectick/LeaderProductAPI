@@ -5,6 +5,7 @@ import prisma from '../prisma/client';
 import {
   authenticateToken,
   AuthRequest,
+  authorizeRoles,
 } from '../middleware/auth';
 import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { checkUserStatus } from '../middleware/checkUserStatus';
@@ -40,6 +41,10 @@ const router = express.Router();
 const MAX_POINTS_BATCH = 1000;
 const DEFAULT_MAX_ACCURACY_METERS = 100;
 const MIN_DISTANCE_METERS = 5;
+const MIN_MOVING_DISTANCE_METERS = 12;
+const MIN_MOVING_INTERVAL_MS = 12_000;
+const STATIONARY_ALIVE_INTERVAL_MS = 90_000;
+const ACTIVE_DEVICE_STALE_MS = 15 * 60_000;
 const TRACKING_DEVICE_TOKEN_PREFIX = 'lpt_';
 const TRACKING_DEVICE_TOKEN_TTL_DAYS = Number(process.env.TRACKING_DEVICE_TOKEN_TTL_DAYS || 180);
 
@@ -49,6 +54,7 @@ type NativeTrackingTokenRequest = {
   platform?: string | null;
   appVersion?: string | null;
   deviceName?: string | null;
+  reason?: 'start' | 'repair' | 'token_invalid' | null;
 };
 
 function addDays(date: Date, days: number) {
@@ -140,7 +146,7 @@ function mapRoutePointToDto(point: {
 async function writeTrackingAudit(
   db: any,
   userId: number,
-  trackingAction: 'START' | 'STOP' | 'POINTS',
+  trackingAction: 'START' | 'STOP' | 'POINTS' | 'TOKEN_ISSUED' | 'TOKEN_REVOKED' | 'UPLOAD_REJECTED',
   routeId?: number | null,
   details?: Record<string, unknown>
 ) {
@@ -408,7 +414,9 @@ router.get(
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
-      const [activeRoute, lastRoute, lastPoint, todayPointsCount] = await Promise.all([
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60_000);
+      const [activeRoute, lastRoute, lastPoint, todayPointsCount, nativeToken, tokenIssueCountLastHour] = await Promise.all([
         prisma.userRoute.findFirst({
           where: { userId, status: 'ACTIVE' },
           orderBy: { startedAt: 'desc' },
@@ -423,6 +431,17 @@ router.get(
         }),
         prisma.routePoint.count({
           where: { userId, recordedAt: { gte: todayStart } },
+        }),
+        prisma.trackingDeviceToken.findFirst({
+          where: {
+            userId,
+            revokedAt: null,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          },
+          orderBy: [{ lastUsedAt: 'desc' }, { createdAt: 'desc' }],
+        }),
+        prisma.trackingDeviceToken.count({
+          where: { userId, createdAt: { gte: oneHourAgo } },
         }),
       ]);
 
@@ -444,6 +463,18 @@ router.get(
             lastPoint: lastPoint ? mapRoutePointToDto(lastPoint) : null,
             activePointsCount,
             todayPointsCount,
+            nativeDevice: nativeToken
+              ? {
+                  active: true,
+                  installId: nativeToken.installId,
+                  platform: nativeToken.platform,
+                  appVersion: nativeToken.appVersion,
+                  lastUploadAt: nativeToken.lastUsedAt?.toISOString() ?? null,
+                  tokenExpiresAt: nativeToken.expiresAt?.toISOString() ?? null,
+                  stale: !nativeToken.lastUsedAt || now.getTime() - nativeToken.lastUsedAt.getTime() > ACTIVE_DEVICE_STALE_MS,
+                  tokenIssueCountLastHour,
+                }
+              : null,
           },
           'Статус отслеживания получен'
         )
@@ -552,22 +583,48 @@ router.post(
       const expiresAt = addDays(now, Number.isFinite(TRACKING_DEVICE_TOKEN_TTL_DAYS) ? TRACKING_DEVICE_TOKEN_TTL_DAYS : 180);
       const installId = cleanTokenMeta(req.body?.installId);
       const deviceSessionId = cleanTokenMeta(req.body?.deviceSessionId);
+      const requestedReason = cleanTokenMeta(req.body?.reason);
+      const issueReason = requestedReason === 'start' || requestedReason === 'repair' || requestedReason === 'token_invalid'
+        ? requestedReason
+        : 'repair';
       const revokeOr = [
         installId ? { installId } : undefined,
         deviceSessionId ? { deviceSessionId } : undefined,
       ].filter(Boolean) as Array<{ installId?: string; deviceSessionId?: string }>;
 
+      // A healthy application never asks for more than one token per install.
+      // Keep a small recovery allowance, then reject a loop before it revokes
+      // the working device credential again and again.
+      const recentIssueCount = await prisma.trackingDeviceToken.count({
+        where: {
+          userId,
+          createdAt: { gte: new Date(now.getTime() - 15 * 60_000) },
+          ...(revokeOr.length > 0 ? { OR: revokeOr } : {}),
+        },
+      });
+      if (recentIssueCount >= 3) {
+        await writeTrackingAudit(prisma, userId, 'UPLOAD_REJECTED', null, {
+          reason: 'TOKEN_CHURN_RATE_LIMIT',
+          installId,
+          deviceSessionId,
+          recentIssueCount,
+        });
+        return res.status(429).json(
+          errorResponse('Слишком частое обновление токена трекинга. Откройте приложение позже.', ErrorCodes.TOO_MANY_REQUESTS)
+        );
+      }
+
       await prisma.$transaction(async (tx) => {
-        if (revokeOr.length > 0) {
-          await tx.trackingDeviceToken.updateMany({
-            where: {
-              userId,
-              revokedAt: null,
-              OR: revokeOr,
-            },
-            data: { revokedAt: now },
-          });
-        }
+        const revoked = revokeOr.length > 0
+          ? await tx.trackingDeviceToken.updateMany({
+              where: {
+                userId,
+                revokedAt: null,
+                OR: revokeOr,
+              },
+              data: { revokedAt: now },
+            })
+          : { count: 0 };
 
         await tx.trackingDeviceToken.create({
           data: {
@@ -578,8 +635,16 @@ router.post(
             platform: cleanTokenMeta(req.body?.platform),
             appVersion: cleanTokenMeta(req.body?.appVersion),
             deviceName: cleanTokenMeta(req.body?.deviceName),
+            issueReason,
             expiresAt,
           },
+        });
+        await writeTrackingAudit(tx, userId, 'TOKEN_ISSUED', null, {
+          installId,
+          deviceSessionId,
+          issueReason,
+          revokedActiveTokens: revoked.count,
+          expiresAt: expiresAt.toISOString(),
         });
       });
 
@@ -638,6 +703,14 @@ router.delete(
         },
         data: { revokedAt: now },
       });
+
+      if (result.count > 0) {
+        await writeTrackingAudit(prisma, userId, 'TOKEN_REVOKED', null, {
+          installId,
+          deviceSessionId,
+          revoked: result.count,
+        });
+      }
 
       return res.json(
         successResponse(
@@ -838,6 +911,9 @@ const saveTrackingPointsHandler = async (
       let targetRouteId: number | undefined;
       let routeStatus: 'ACTIVE' | 'COMPLETED' | 'CANCELLED' = 'ACTIVE';
       let createdPoints = 0;
+      let rejectedAccuracyPoints = 0;
+      let rejectedDuplicatePoints = 0;
+      let rejectedJitterPoints = 0;
 
       await prisma.$transaction(async (tx) => {
         // Всегда используем один непрерывный активный маршрут пользователя,
@@ -907,21 +983,36 @@ const saveTrackingPointsHandler = async (
           : new Set<string>();
 
         const filteredPoints: typeof parsedPoints = [];
+        const seenClientPointIds = new Set<string>();
         for (const p of parsedPoints) {
-          if (p.clientPointId && duplicateClientPointIds.has(p.clientPointId)) {
+          if (
+            (p.clientPointId && duplicateClientPointIds.has(p.clientPointId)) ||
+            (p.clientPointId && seenClientPointIds.has(p.clientPointId))
+          ) {
+            rejectedDuplicatePoints += 1;
+            continue;
+          }
+          if (p.clientPointId) seenClientPointIds.add(p.clientPointId);
+          if (p.accuracy !== undefined && p.accuracy > DEFAULT_MAX_ACCURACY_METERS) {
+            rejectedAccuracyPoints += 1;
             continue;
           }
           const prev = filteredPoints.length
             ? filteredPoints[filteredPoints.length - 1]
             : lastSavedPoint;
-          if (prev) {
+          if (prev && p.eventType !== 'STOP') {
             const distance = haversineDistanceMeters(
               prev.latitude,
               prev.longitude,
               p.latitude,
               p.longitude
             );
-            if (distance < MIN_DISTANCE_METERS) {
+            const elapsed = Math.max(0, p.recordedAt.getTime() - prev.recordedAt.getTime());
+            const isJitter =
+              (distance < MIN_DISTANCE_METERS && elapsed < STATIONARY_ALIVE_INTERVAL_MS) ||
+              (distance < MIN_MOVING_DISTANCE_METERS && elapsed < MIN_MOVING_INTERVAL_MS);
+            if (isJitter) {
+              rejectedJitterPoints += 1;
               continue;
             }
           }
@@ -951,11 +1042,22 @@ const saveTrackingPointsHandler = async (
             });
             await writeTrackingAudit(tx, userId, 'STOP', active.id, {
               createdPoints: 0,
-              duplicateOrTooClose: true,
+              rejectedAccuracyPoints,
+              rejectedDuplicatePoints,
+              rejectedJitterPoints,
             });
           }
           targetRouteId = active.id;
           routeStatus = active.status;
+          if (rejectedAccuracyPoints || rejectedDuplicatePoints || rejectedJitterPoints) {
+            await writeTrackingAudit(tx, userId, 'UPLOAD_REJECTED', active.id, {
+              source: req.user?.role === 'tracking-device' ? 'native' : 'app',
+              receivedPoints: parsedPoints.length,
+              rejectedAccuracyPoints,
+              rejectedDuplicatePoints,
+              rejectedJitterPoints,
+            });
+          }
           return;
         }
 
@@ -1011,12 +1113,16 @@ const saveTrackingPointsHandler = async (
           sequence: existingPointsCount + idx + 1,
         }));
 
-        await tx.routePoint.createMany({ data, skipDuplicates: true });
-        createdPoints = data.length;
+        const insertResult = await tx.routePoint.createMany({ data, skipDuplicates: true });
+        createdPoints = insertResult.count;
         await writeTrackingAudit(tx, userId, 'POINTS', targetRouteId, {
           createdPoints,
           receivedPoints: parsedPoints.length,
           endRoute: Boolean(endRoute),
+          source: req.user?.role === 'tracking-device' ? 'native' : 'app',
+          rejectedAccuracyPoints,
+          rejectedDuplicatePoints,
+          rejectedJitterPoints,
         });
 
         if (endRoute && active.status === 'ACTIVE') {
@@ -1094,6 +1200,85 @@ router.post(
   authorizeServiceAccess('tracking'),
   rateLimit({ windowSec: 60, limit: 1200 }),
   saveTrackingPointsHandler
+);
+
+/**
+ * Compact operational view for administrators. It deliberately exposes no
+ * device token or route coordinates, only the health signals needed to react
+ * to a stalled collector.
+ */
+router.get(
+  '/admin/health',
+  authenticateToken,
+  checkUserStatus,
+  authorizeServiceAccess('tracking'),
+  async (req: AuthRequest<{}, any, {}, { limit?: string }>, res) => {
+    const role = String(req.user?.role || '').toLowerCase();
+    if (!role.includes('admin')) {
+      return res.status(403).json(
+        errorResponse('Недостаточно прав для просмотра состояния трекинга', ErrorCodes.FORBIDDEN)
+      );
+    }
+    try {
+      const requestedLimit = Number(req.query.limit || 50);
+      const limit = Number.isFinite(requestedLimit) ? Math.min(200, Math.max(1, Math.floor(requestedLimit))) : 50;
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60_000);
+      const devices = await prisma.trackingDeviceToken.findMany({
+        where: {
+          revokedAt: null,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
+        orderBy: [{ lastUsedAt: 'asc' }, { createdAt: 'desc' }],
+        take: limit,
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              middleName: true,
+              email: true,
+            },
+          },
+        },
+      });
+      const [activeDevices, staleDevices, tokenIssuesLastHour] = await Promise.all([
+        prisma.trackingDeviceToken.count({
+          where: { revokedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+        }),
+        prisma.trackingDeviceToken.count({
+          where: {
+            revokedAt: null,
+            OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: new Date(now.getTime() - ACTIVE_DEVICE_STALE_MS) } }],
+          },
+        }),
+        prisma.trackingDeviceToken.count({ where: { createdAt: { gte: oneHourAgo } } }),
+      ]);
+      return res.json(successResponse({
+        serverTime: now.toISOString(),
+        thresholds: { staleAfterMinutes: ACTIVE_DEVICE_STALE_MS / 60_000 },
+        summary: { activeDevices, staleDevices, tokenIssuesLastHour },
+        devices: devices.map((device) => ({
+          id: device.id,
+          user: device.user,
+          installId: device.installId,
+          platform: device.platform,
+          appVersion: device.appVersion,
+          issueReason: device.issueReason,
+          createdAt: device.createdAt.toISOString(),
+          lastUploadAt: device.lastUsedAt?.toISOString() ?? null,
+          expiresAt: device.expiresAt?.toISOString() ?? null,
+          stale: !device.lastUsedAt || now.getTime() - device.lastUsedAt.getTime() > ACTIVE_DEVICE_STALE_MS,
+        })),
+      }, 'Состояние устройств трекинга получено'));
+    } catch (error) {
+      console.error('[tracking] admin health failed', error);
+      return res.status(500).json(
+        errorResponse('Не удалось получить состояние устройств трекинга', ErrorCodes.INTERNAL_ERROR)
+      );
+    }
+  }
 );
 
 /**

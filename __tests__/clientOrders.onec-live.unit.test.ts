@@ -164,6 +164,45 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.items[0].isActive).toBe(false);
   });
 
+  it('does not return inactive agreements in the client-order picker', async () => {
+    agreementsMock.mockResolvedValueOnce(
+      paged([
+        {
+          guid: 'agreement-active',
+          name: 'Действующее соглашение',
+          counterpartyGuid: 'counterparty-guid',
+          organizationGuid: 'organization-guid',
+          status: 'Действует',
+          isActive: true,
+        },
+        {
+          guid: 'agreement-closed',
+          name: 'Закрытое соглашение',
+          counterpartyGuid: 'counterparty-guid',
+          organizationGuid: 'organization-guid',
+          status: 'Закрыто',
+          isActive: false,
+        },
+      ])
+    );
+
+    const result = await getLiveAgreements({
+      limit: 25,
+      offset: 0,
+      organizationGuid: 'organization-guid',
+      counterpartyGuid: 'counterparty-guid',
+      includeInactive: false,
+    });
+
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        guid: 'agreement-active',
+        status: 'Действует',
+        isActive: true,
+      }),
+    ]);
+  });
+
   it('does not materialize a random row when 1C ignores guid filter', async () => {
     counterpartiesMock.mockResolvedValueOnce(
       paged([

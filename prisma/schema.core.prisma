@@ -767,6 +767,7 @@ model TrackingDeviceToken {
   platform        String?
   appVersion      String?
   deviceName      String?
+  issueReason     String?
   createdAt       DateTime  @default(now())
   lastUsedAt      DateTime?
   revokedAt       DateTime?

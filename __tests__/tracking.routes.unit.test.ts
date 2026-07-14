@@ -31,8 +31,14 @@ const mockPrisma = {
     findFirst: jest.fn(),
     count: jest.fn(),
   },
+  auditLog: {
+    create: jest.fn(),
+  },
   trackingDeviceToken: {
     findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    count: jest.fn(),
     update: jest.fn(),
     updateMany: jest.fn(),
   },
@@ -102,7 +108,11 @@ describe('/tracking/points', () => {
     mockPrisma.userRoute.findFirst.mockReset();
     mockPrisma.routePoint.findFirst.mockReset();
     mockPrisma.routePoint.count.mockReset();
+    mockPrisma.auditLog.create.mockReset();
     mockPrisma.trackingDeviceToken.findUnique.mockReset();
+    mockPrisma.trackingDeviceToken.findFirst.mockReset();
+    mockPrisma.trackingDeviceToken.findMany.mockReset();
+    mockPrisma.trackingDeviceToken.count.mockReset();
     mockPrisma.trackingDeviceToken.update.mockReset();
     mockPrisma.trackingDeviceToken.updateMany.mockReset();
     mockTrackingServiceAccessAllowed = true;
@@ -193,6 +203,34 @@ describe('/tracking/points', () => {
     });
   });
 
+  it('filters unusable accuracy before it creates a route point', async () => {
+    mockTx.userRoute.findFirst.mockResolvedValueOnce({
+      id: 46,
+      userId: 7,
+      status: 'ACTIVE',
+      startedAt: new Date('2026-07-10T08:00:00.000Z'),
+      endedAt: null,
+    });
+    mockTx.routePoint.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+    mockTx.routePoint.findMany.mockResolvedValueOnce([]);
+
+    const response = await request(app)
+      .post('/tracking/points')
+      .send({
+        routeId: 46,
+        points: [{ ...point, clientPointId: 'too-inaccurate', accuracy: 150 }],
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ routeId: 46, createdPoints: 0 });
+    expect(mockTx.routePoint.createMany).not.toHaveBeenCalled();
+    expect(mockTx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ details: expect.stringContaining('rejectedAccuracyPoints') }),
+    });
+  });
+
   it('backfills active route start from the first point before completing it', async () => {
     const startedAt = new Date('2026-07-10T12:00:00.000Z');
     const pointRecordedAt = new Date(point.recordedAt);
@@ -260,6 +298,9 @@ describe('/tracking native token', () => {
     mockTx.trackingDeviceToken.updateMany.mockResolvedValue({ count: 1 });
     mockTx.trackingDeviceToken.create.mockResolvedValue({ id: 1 });
     mockPrisma.trackingDeviceToken.findUnique.mockReset();
+    mockPrisma.trackingDeviceToken.findFirst.mockReset();
+    mockPrisma.trackingDeviceToken.findMany.mockReset();
+    mockPrisma.trackingDeviceToken.count.mockReset();
     mockPrisma.trackingDeviceToken.update.mockResolvedValue({});
     mockPrisma.trackingDeviceToken.updateMany.mockResolvedValue({ count: 1 });
     mockTx.userRoute.findFirst.mockReset();
@@ -307,6 +348,38 @@ describe('/tracking native token', () => {
     expect(mockTx.trackingDeviceToken.create.mock.calls[0][0].data.tokenHash).not.toBe(
       response.body.data.token
     );
+  });
+
+  it('records the reason when a device token replaces an active installation token', async () => {
+    const response = await request(app)
+      .post('/tracking/native-token')
+      .send({ installId: 'install-1', reason: 'token_invalid' });
+
+    expect(response.status).toBe(200);
+    expect(mockTx.trackingDeviceToken.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ issueReason: 'token_invalid' }),
+    });
+    expect(mockTx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 7,
+        details: expect.stringContaining('TOKEN_ISSUED'),
+      }),
+    });
+  });
+
+  it('rejects a token churn loop before it replaces another active token', async () => {
+    mockPrisma.trackingDeviceToken.count.mockResolvedValueOnce(3);
+
+    const response = await request(app)
+      .post('/tracking/native-token')
+      .send({ installId: 'install-1', reason: 'repair' });
+
+    expect(response.status).toBe(429);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'TOO_MANY_REQUESTS' },
+    });
+    expect(mockTx.trackingDeviceToken.create).not.toHaveBeenCalled();
   });
 
   it('rejects native points with an invalid scoped token', async () => {
@@ -391,6 +464,17 @@ describe('/tracking service access', () => {
     expect(pointsResponse.status).toBe(403);
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
+
+  it('does not expose operational device health to a regular tracking user', async () => {
+    mockTrackingServiceAccessAllowed = true;
+    const response = await request(app).get('/tracking/admin/health');
+
+    expect(response.status).toBe(403);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'FORBIDDEN' },
+    });
+  });
 });
 
 describe('/tracking/sessions and status', () => {
@@ -406,6 +490,7 @@ describe('/tracking/sessions and status', () => {
     mockPrisma.userRoute.findFirst.mockReset();
     mockPrisma.routePoint.findFirst.mockReset();
     mockPrisma.routePoint.count.mockReset();
+    mockPrisma.auditLog.create.mockReset();
   });
 
   it('starts a tracking session by reusing an active route', async () => {
@@ -503,6 +588,15 @@ describe('/tracking/sessions and status', () => {
     mockPrisma.routePoint.count
       .mockResolvedValueOnce(8)
       .mockResolvedValueOnce(4);
+    mockPrisma.trackingDeviceToken.findFirst.mockResolvedValueOnce({
+      id: 8,
+      installId: 'install-1',
+      platform: 'android',
+      appVersion: '0.1.23',
+      lastUsedAt: new Date(),
+      expiresAt: new Date('2027-01-01T00:00:00.000Z'),
+    });
+    mockPrisma.trackingDeviceToken.count.mockResolvedValueOnce(1);
 
     const response = await request(app).get('/tracking/status');
 
@@ -517,6 +611,12 @@ describe('/tracking/sessions and status', () => {
       id: 500,
       routeId: 92,
       latitude: 55.03,
+    });
+    expect(response.body.data.nativeDevice).toMatchObject({
+      active: true,
+      installId: 'install-1',
+      stale: false,
+      tokenIssueCountLastHour: 1,
     });
   });
 });

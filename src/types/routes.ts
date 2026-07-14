@@ -632,6 +632,16 @@ export type TrackingStatusResponse = SuccessResponse<{
   lastPoint: RoutePointDto | null;
   activePointsCount: number;
   todayPointsCount: number;
+  nativeDevice: {
+    active: boolean;
+    installId?: string | null;
+    platform?: string | null;
+    appVersion?: string | null;
+    lastUploadAt?: string | null;
+    tokenExpiresAt?: string | null;
+    stale: boolean;
+    tokenIssueCountLastHour: number;
+  } | null;
 }> | ErrorResponse;
 
 export type DailyTrackingStat = {
