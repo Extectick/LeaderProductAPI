@@ -1249,9 +1249,19 @@ async function findOneFromList<T extends { guid: string | null; isActive?: boole
   keys: string[],
   mapper: (item: AnyRecord) => T | null
 ) {
-  const payload = await loader({ ...query, guid, search: guid, limit: 20, offset: 0 });
+  const request = { ...query, guid, limit: 20, offset: 0 };
+  const payload = await loader(request);
   const page = visiblePage(paged(payload, keys, mapper, { limit: 20, offset: 0 }), Boolean(query.includeInactive));
-  return findItemByGuid(page.items, guid);
+  const item = findItemByGuid(page.items, guid);
+  if (item) return item;
+
+  // Older 1C endpoints may not implement the guid parameter.
+  const fallbackPayload = await loader({ ...request, search: guid });
+  const fallbackPage = visiblePage(
+    paged(fallbackPayload, keys, mapper, { limit: 20, offset: 0 }),
+    Boolean(query.includeInactive)
+  );
+  return findItemByGuid(fallbackPage.items, guid);
 }
 
 export async function getLiveOrganizations(query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean } = {}) {
@@ -1276,8 +1286,14 @@ export async function getLiveAgreements(query: ClientOrdersAgreementsQuery) {
   return { ...page, items: await enrichOrganizationNames(page.items) };
 }
 
-export async function findLiveAgreement(guid: string, counterpartyGuid?: string) {
-  const item = await findOneFromList(guid, { counterpartyGuid }, getOnecLpAppAgreements, ['agreements'], mapAgreement);
+export async function findLiveAgreement(guid: string, counterpartyGuid?: string, organizationGuid?: string) {
+  const item = await findOneFromList(
+    guid,
+    { counterpartyGuid, organizationGuid },
+    getOnecLpAppAgreements,
+    ['agreements'],
+    mapAgreement
+  );
   return item ? (await enrichOrganizationNames([item]))[0] ?? null : null;
 }
 

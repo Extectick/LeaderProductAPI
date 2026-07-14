@@ -2000,6 +2000,30 @@ async function loadLiveProductsForOrderMaterialization(
   }
 }
 
+async function loadCurrentLiveAgreementForOrder(
+  agreementGuid: string,
+  counterpartyGuid: string,
+  organizationGuid: string
+): Promise<LiveAgreement> {
+  try {
+    const agreement = await findLiveAgreement(agreementGuid, counterpartyGuid, organizationGuid);
+    if (!agreement || !agreement.isActive || !isActiveAgreementStatus(agreement.status)) {
+      throw new ClientOrdersError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        `Соглашение ${agreementGuid} недоступно: оно закрыто, удалено или не соответствует выбранной организации/контрагенту`
+      );
+    }
+    return agreement;
+  } catch (error) {
+    if (error instanceof ClientOrdersError) throw error;
+    if (isOnecLpAppError(error) || error instanceof ClientOrdersOnecCircuitOpenError) {
+      throwClientOrdersOnecError(error, 'Ошибка проверки соглашения в 1С');
+    }
+    throw error;
+  }
+}
+
 async function loadLiveOrderMaterialization(
   body: ClientOrderCreateBody,
   managerGuid?: string | null
@@ -2033,16 +2057,7 @@ async function loadLiveOrderMaterialization(
         'Ошибка получения контрагента из 1С'
       ),
       body.agreementGuid
-        ? loadLiveReferenceWithCache(
-            () => readThroughClientOrdersCache(
-              'reference:agreement',
-              { guid: body.agreementGuid, counterpartyGuid: body.counterpartyGuid },
-              CLIENT_ORDERS_CACHE_TTL.referenceDetails,
-              () => findLiveAgreement(body.agreementGuid!, body.counterpartyGuid)
-            ),
-            () => findCachedAgreement(body.agreementGuid!),
-            'Ошибка получения соглашения из 1С'
-          )
+        ? loadCurrentLiveAgreementForOrder(body.agreementGuid, body.counterpartyGuid, body.organizationGuid)
         : Promise.resolve(null),
       body.contractGuid
         ? loadLiveReferenceWithCache(
@@ -4012,12 +4027,7 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
   const deliveryDateResolution = resolveDeliveryDateSettings(settings);
   try {
     const defaults = await onecLive(
-      () => readThroughClientOrdersCache(
-        'defaults',
-        query,
-        CLIENT_ORDERS_CACHE_TTL.defaults,
-        () => getLiveClientOrderDefaults(query)
-      ),
+      () => getLiveClientOrderDefaults(query),
       'Ошибка получения подсказок по умолчанию из 1С',
       { allowCachedWhenCircuitOpen: true }
     );
@@ -4189,12 +4199,7 @@ async function resolveCounterpartyIdOrNull(counterpartyGuid?: string) {
 export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQuery) {
   try {
     const result = await onecLive(
-      () => readThroughClientOrdersCache(
-        'agreements',
-        query,
-        CLIENT_ORDERS_CACHE_TTL.agreements,
-        () => getLiveAgreements(query)
-      ),
+      () => getLiveAgreements(query),
       'Ошибка получения соглашений из 1С',
       { allowCachedWhenCircuitOpen: true }
     );
@@ -4209,12 +4214,7 @@ export async function getClientOrdersAgreements(query: ClientOrdersAgreementsQue
 
   const defaultsQuery = { organizationGuid: query.organizationGuid!, counterpartyGuid: query.counterpartyGuid! };
   const defaults = await onecLive(
-    () => readThroughClientOrdersCache(
-      'defaults',
-      defaultsQuery,
-      CLIENT_ORDERS_CACHE_TTL.defaults,
-      () => getLiveClientOrderDefaults(defaultsQuery)
-    ),
+    () => getLiveClientOrderDefaults(defaultsQuery),
     'Ошибка получения соглашения по умолчанию из 1С',
     { allowCachedWhenCircuitOpen: true }
   );
