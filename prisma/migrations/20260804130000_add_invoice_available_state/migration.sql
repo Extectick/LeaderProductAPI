@@ -1,0 +1,1 @@
+ALTER TYPE "ClientOrderInvoiceState" ADD VALUE IF NOT EXISTS 'AVAILABLE';

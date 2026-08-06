@@ -381,6 +381,24 @@ export async function sendMaxInfoMessage(params: {
   return true;
 }
 
+export async function sendMaxDocument(params: {
+  chatId: string | number | bigint;
+  buffer: Buffer;
+  fileName: string;
+  caption?: string;
+}) {
+  const bot = getBot();
+  if (!bot) return false;
+
+  const attachment = await bot.api.uploadFile({ source: params.buffer });
+  await bot.api.sendMessageToUser(
+    toIntId(params.chatId),
+    params.caption || params.fileName,
+    { attachments: [attachment.toJson()] }
+  );
+  return true;
+}
+
 export async function sendMaxWelcomeMessage(params: {
   chatId: string | number | bigint;
   startParam?: string;

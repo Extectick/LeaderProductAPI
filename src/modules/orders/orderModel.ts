@@ -43,6 +43,23 @@ export const orderDetailSelect = {
   isPostedIn1c: true,
   postedAt1c: true,
   hasRealization: true,
+  invoiceRequested: true,
+  invoices: {
+    orderBy: [{ updatedAt: 'desc' as const }, { version: 'desc' as const }],
+    select: {
+      id: true,
+      realizationGuid: true,
+      realizationNumber: true,
+      realizationDate: true,
+      version: true,
+      state: true,
+      waitReason: true,
+      fileName: true,
+      s3Key: true,
+      sentAt: true,
+      lastError: true,
+    },
+  },
   realizationDetectedAt: true,
   cancelRequestedAt: true,
   cancelReason: true,
@@ -230,6 +247,7 @@ export const orderDetailSelect = {
 export type OrderDetailRecord = Prisma.OrderGetPayload<{ select: typeof orderDetailSelect }>;
 
 export function mapOrderDetail(order: OrderDetailRecord) {
+  const invoiceAggregate = mapInvoiceAggregate(order.invoiceRequested, order.invoices);
   return {
     guid: order.guid,
     number1c: order.number1c,
@@ -254,6 +272,11 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     isPostedIn1c: order.isPostedIn1c,
     postedAt1c: order.postedAt1c,
     hasRealization: order.hasRealization,
+    invoiceRequested: order.invoiceRequested,
+    ...invoiceAggregate,
+    invoices: order.invoices
+      .filter((invoice) => !['SUPERSEDED', 'CANCELLED'].includes(invoice.state))
+      .map(mapInvoicePublic),
     realizationDetectedAt: order.realizationDetectedAt,
     readOnlyReason: order.hasRealization ? 'По заказу создана проведенная реализация товаров и услуг.' : null,
     cancelRequestedAt: order.cancelRequestedAt,
@@ -353,5 +376,37 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     })),
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
+  };
+}
+
+type InvoiceRow = OrderDetailRecord['invoices'][number];
+
+function mapInvoicePublic(invoice: InvoiceRow) {
+  return {
+    id: invoice.id,
+    realizationGuid: invoice.realizationGuid,
+    realizationNumber: invoice.realizationNumber,
+    realizationDate: invoice.realizationDate,
+    version: invoice.version,
+    state: invoice.state,
+    waitReason: invoice.waitReason ?? invoice.lastError,
+    downloadAvailable: Boolean(invoice.s3Key),
+    fileName: invoice.fileName,
+    sentAt: invoice.sentAt,
+  };
+}
+
+function mapInvoiceAggregate(invoiceRequested: boolean, invoices: InvoiceRow[]) {
+  const active = invoices.filter((invoice) => !['SUPERSEDED', 'CANCELLED'].includes(invoice.state));
+  const latest = active[0] ?? null;
+  const latestVersion = active.reduce((max, invoice) => Math.max(max, invoice.version), 0) || null;
+  return {
+    invoiceState: invoiceRequested
+      ? (latest?.state ?? 'WAITING')
+      : 'NOT_REQUESTED',
+    invoiceWaitReason: invoiceRequested ? (latest?.waitReason ?? latest?.lastError ?? null) : null,
+    latestInvoiceVersion: latestVersion,
+    invoiceCount: active.length,
+    invoiceDownloadAvailable: active.some((invoice) => Boolean(invoice.s3Key)),
   };
 }

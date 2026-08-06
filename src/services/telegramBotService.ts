@@ -276,6 +276,23 @@ export async function sendTelegramInfoMessage(params: {
   return true;
 }
 
+export async function sendTelegramDocument(params: {
+  chatId: string | number | bigint;
+  buffer: Buffer;
+  fileName: string;
+  caption?: string;
+}) {
+  const bot = getBot();
+  if (!bot) return false;
+
+  await bot.telegram.sendDocument(
+    String(params.chatId),
+    { source: params.buffer, filename: params.fileName },
+    params.caption ? { caption: params.caption } : undefined
+  );
+  return true;
+}
+
 export async function sendTelegramWelcomeMessage(params: {
   chatId: string | number | bigint;
   startParam?: string;

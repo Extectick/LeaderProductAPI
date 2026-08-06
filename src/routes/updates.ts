@@ -43,6 +43,13 @@ const UPDATE_MAX_FILESIZE = 300 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = Number(process.env.UPDATE_UPLOAD_TIMEOUT_MS || 20 * 60 * 1000);
 const UPDATE_PUBLIC_BASE_URL = String(process.env.UPDATE_PUBLIC_BASE_URL || '').trim();
 const HAS_EXTERNAL_PRESIGN_ENDPOINT = Boolean(String(process.env.S3_PRESIGN_ENDPOINT || '').trim());
+const LATEST_UPDATE_CACHE_TTL_MS = 30_000;
+
+type LatestUpdate = Awaited<ReturnType<typeof prisma.appUpdate.findFirst>>;
+type LatestUpdateCacheEntry = { expiresAt: number; value: LatestUpdate };
+
+const latestUpdateCache = new Map<string, LatestUpdateCacheEntry>();
+const latestUpdateLoads = new Map<string, Promise<LatestUpdate>>();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -195,6 +202,36 @@ function shouldIncludeUpdate(deviceId: string | undefined, updateId: number, rol
   return bucket < rolloutPercent;
 }
 
+function latestUpdateCacheKey(platform: 'ANDROID' | 'IOS', channel: string) {
+  return `${platform}:${channel}`;
+}
+
+function invalidateLatestUpdateCache() {
+  latestUpdateCache.clear();
+  latestUpdateLoads.clear();
+}
+
+async function findLatestActiveUpdate(platform: 'ANDROID' | 'IOS', channel: string): Promise<LatestUpdate> {
+  const key = latestUpdateCacheKey(platform, channel);
+  const cached = latestUpdateCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const existingLoad = latestUpdateLoads.get(key);
+  if (existingLoad) return existingLoad;
+
+  const load = prisma.appUpdate.findFirst({
+    where: { platform, channel, isActive: true },
+    orderBy: { versionCode: 'desc' },
+  }).then((value) => {
+    latestUpdateCache.set(key, { value, expiresAt: Date.now() + LATEST_UPDATE_CACHE_TTL_MS });
+    return value;
+  }).finally(() => {
+    latestUpdateLoads.delete(key);
+  });
+  latestUpdateLoads.set(key, load);
+  return load;
+}
+
 async function resolveUpdateDownloadUrl(key: string) {
   if (HAS_EXTERNAL_PRESIGN_ENDPOINT) {
     const presigned = await presignGet(key);
@@ -293,10 +330,7 @@ router.get(
       const channel = parseChannel(req.query.channel);
       const deviceId = req.query.deviceId ? String(req.query.deviceId) : undefined;
 
-      const latest = await prisma.appUpdate.findFirst({
-        where: { platform, channel, isActive: true },
-        orderBy: { versionCode: 'desc' },
-      });
+      const latest = await findLatestActiveUpdate(platform, channel);
 
       if (!latest) {
         const payload = { updateAvailable: false, mandatory: false };
@@ -552,6 +586,7 @@ router.post(
           checksumMd5: parsed.data.checksumMd5,
         },
       });
+      invalidateLatestUpdateCache();
 
       return res.status(201).json(
         successResponse(
@@ -679,6 +714,7 @@ router.put(
         where: { id },
         data,
       });
+      invalidateLatestUpdateCache();
 
       return res.json(
         successResponse(
@@ -749,6 +785,7 @@ router.delete(
       }
 
       await prisma.appUpdate.delete({ where: { id } });
+      invalidateLatestUpdateCache();
 
       if (purgeFile) {
         await safeDeleteApk(target.apkKey, id);
@@ -806,6 +843,7 @@ router.post(
           await safeDeleteApk(u.apkKey, u.id);
         }
       }
+      if (deletedIds.length) invalidateLatestUpdateCache();
 
       return res.json(
         successResponse(
@@ -936,6 +974,7 @@ router.post(
           checksumMd5: parsed.data.checksumMd5 || checksumMd5,
         },
       });
+      invalidateLatestUpdateCache();
 
       return res.status(201).json(
         successResponse(

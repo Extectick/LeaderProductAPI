@@ -169,9 +169,9 @@ function buildBinaryHeaders(): Record<string, string> {
   return headers;
 }
 
-async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery) {
+async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeoutMs = getTimeoutMs()) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(buildUrl(path, query), {
@@ -305,6 +305,80 @@ export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
 
 export function postOnecLpAppClientOrder(body: unknown) {
   return callOnecLpApp('/client-orders', {
+    method: 'POST',
+    body,
+    timeoutMs: getWriteTimeoutMs(),
+  });
+}
+
+export type OnecClientOrderInvoiceQueueItem = {
+  appOrderGuid: string;
+  orderGuid: string;
+  realizationGuid: string;
+  realizationNumber?: string | null;
+  realizationDate?: string | null;
+  invoiceAmount?: number | string | null;
+  currency?: string | null;
+  counterpartyName?: string | null;
+  organizationName?: string | null;
+  orderNumber?: string | null;
+  state: 'WAITING' | 'READY' | 'QUEUED' | 'SENDING' | 'STORED' | 'PARTIAL' | 'SENT' | 'ERROR' | 'CANCELLED';
+  waitReason?: string | null;
+  businessHash?: string | null;
+  version: number;
+  token: string;
+  readyAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export function getOnecLpAppClientOrderInvoices(limit = 100) {
+  return callOnecLpApp('/client-order-invoices', { query: { limit } }) as Promise<{
+    items: OnecClientOrderInvoiceQueueItem[];
+  }>;
+}
+
+export async function requestOnecLpAppClientOrderInvoice(appOrderGuid: string) {
+  const request = async (legacyGet = false) => callOnecLpApp('/client-order-invoices', legacyGet
+    ? { query: { requestAppOrderGuid: appOrderGuid }, timeoutMs: getWriteTimeoutMs() }
+    : { method: 'POST', body: { appOrderGuid, immediate: true }, timeoutMs: getWriteTimeoutMs() }) as Promise<{
+    requested: boolean;
+    message?: string | null;
+    protocolVersion?: string | null;
+    items?: OnecClientOrderInvoiceQueueItem[];
+  }>;
+
+  try {
+    return await request();
+  } catch (error) {
+    // Старые публикации HTTP-сервиса могут ещё не содержать POST-метод,
+    // но уже иметь GET-маршрут очереди. Он поддерживает безопасный переходный запрос.
+    if (error instanceof OnecLpAppHttpError && error.upstreamStatus === 405) {
+      const fallback = await request(true);
+      if (typeof fallback.requested === 'boolean') return fallback;
+    }
+    throw error;
+  }
+}
+
+export function validateOnecLpAppClientOrderInvoice(token: string) {
+  return callOnecLpApp(`/client-order-invoices/${encodeURIComponent(token)}`) as Promise<
+    OnecClientOrderInvoiceQueueItem | { item: OnecClientOrderInvoiceQueueItem }
+  >;
+}
+
+export function getOnecLpAppClientOrderInvoicePdf(token: string) {
+  return callOnecLpAppBinary(
+    `/client-order-invoices/${encodeURIComponent(token)}/pdf`,
+    undefined,
+    getWriteTimeoutMs()
+  );
+}
+
+export function ackOnecLpAppClientOrderInvoice(
+  token: string,
+  body: { state: 'STORED' | 'SENT' | 'PARTIAL' | 'ERROR'; error?: string | null; sentAt?: string | null }
+) {
+  return callOnecLpApp(`/client-order-invoices/${encodeURIComponent(token)}/ack`, {
     method: 'POST',
     body,
     timeoutMs: getWriteTimeoutMs(),

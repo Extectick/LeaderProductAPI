@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+ENV_FILE="${LEADER_ENV_FILE:-/opt/leader-api/.env}"
+BACKUP_DIR="${LEADER_BACKUP_DIR:-/opt/leader-api/backups}"
+AWS_CLI_IMAGE="${LEADER_AWS_CLI_IMAGE:-amazon/aws-cli:2.17.49}"
+
+read_env() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1 | tr -d '\r'
+}
+
+require_value() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    echo "Required setting ${name} is missing in ${ENV_FILE}" >&2
+    exit 1
+  fi
+}
+
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "Environment file is not readable: ${ENV_FILE}" >&2
+  exit 1
+fi
+
+if [[ ! -d "$BACKUP_DIR" ]]; then
+  echo "Backup directory does not exist: ${BACKUP_DIR}" >&2
+  exit 1
+fi
+
+endpoint="$(read_env S3_ENDPOINT)"
+region="$(read_env S3_REGION)"
+access_key="$(read_env S3_ACCESS_KEY)"
+secret_key="$(read_env S3_SECRET_KEY)"
+bucket="$(read_env S3_BUCKET)"
+environment_prefix="$(read_env S3_ENV_PREFIX)"
+
+region="${region:-ru1}"
+environment_prefix="${environment_prefix:-prod}"
+remote_prefix="${environment_prefix#/}/backups/postgres"
+
+require_value S3_ENDPOINT "$endpoint"
+require_value S3_ACCESS_KEY "$access_key"
+require_value S3_SECRET_KEY "$secret_key"
+require_value S3_BUCKET "$bucket"
+
+if [[ ! "$remote_prefix" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$remote_prefix" == *".."* ]]; then
+  echo "Unsafe S3 backup prefix: ${remote_prefix}" >&2
+  exit 1
+fi
+
+install -d -m 0755 /run/lock
+exec 9>/run/lock/leader-db-backup-s3.lock
+if ! flock -n 9; then
+  echo "Another S3 backup upload is already running"
+  exit 0
+fi
+
+docker run --rm \
+  --label leader-product.job=db-backup-s3 \
+  -e AWS_ACCESS_KEY_ID="$access_key" \
+  -e AWS_SECRET_ACCESS_KEY="$secret_key" \
+  -e AWS_DEFAULT_REGION="$region" \
+  -e AWS_EC2_METADATA_DISABLED=true \
+  -v "$BACKUP_DIR:/backups:ro" \
+  "$AWS_CLI_IMAGE" \
+  --endpoint-url "$endpoint" \
+  s3 sync /backups "s3://${bucket}/${remote_prefix}" \
+  --delete \
+  --only-show-errors \
+  --no-progress
+
+echo "PostgreSQL backups synchronized to s3://${bucket}/${remote_prefix}"

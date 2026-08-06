@@ -230,8 +230,13 @@ function extractSavedOrder(payload: unknown) {
     documentGuid: readString(item, ['documentGuid', 'guid', 'id', 'Ссылка']),
     currentState: readString(item, ['currentState', 'statusLabel', 'status', 'ТекущееСостояние']),
     isPostedIn1c: readBoolean(item, ['isPostedIn1c', 'isPosted', 'posted', 'Проведен']),
+    postedAt1c: readDate(item, ['postedAt1c', 'postedAt']),
     last1cError: readString(item, ['last1cError', 'lastError']),
     lastExportError: readString(item, ['lastExportError']),
+    saveResult: readString(item, ['saveResult']),
+    vatTaxation: readString(item, ['vatTaxation']),
+    vatCalculationSource: readString(item, ['vatCalculationSource']),
+    priceIncludesVat: readBoolean(item, ['priceIncludesVat']),
   };
 }
 
@@ -438,7 +443,9 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
   const syncedAt = new Date();
   const isCancelExport = isCancelExportOrder(order);
   const savedPostingError = saved.last1cError ?? saved.lastExportError ?? null;
-  const postingError = !isCancelExport && saved.isPostedIn1c !== true ? savedPostingError : null;
+  const postingError = !isCancelExport && saved.isPostedIn1c !== true
+    ? savedPostingError ?? 'Документ сохранен в 1С, но не проведен.'
+    : null;
 
   await prisma.$transaction(async (tx) => {
     const current = await tx.order.findFirst({
@@ -467,6 +474,12 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
         sourceUpdatedAt: syncedAt,
         lastExportError: null,
         last1cError: postingError,
+        isPostedIn1c: isCancelExport ? undefined : saved.isPostedIn1c ?? false,
+        postedAt1c: isCancelExport
+          ? undefined
+          : saved.isPostedIn1c === true
+            ? saved.postedAt1c ?? syncedAt
+            : null,
         last1cSnapshot: asRecord(payload) ? (payload as Prisma.InputJsonValue) : undefined,
         exportAttempts: { increment: 1 },
       },
@@ -489,7 +502,12 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
         documentGuid: saved.documentGuid ?? null,
         currentState: saved.currentState ?? null,
         isPostedIn1c: saved.isPostedIn1c ?? null,
+        postedAt1c: saved.postedAt1c?.toISOString() ?? null,
+        saveResult: saved.saveResult ?? null,
         postingError,
+        vatTaxation: saved.vatTaxation ?? null,
+        vatCalculationSource: saved.vatCalculationSource ?? null,
+        priceIncludesVat: saved.priceIncludesVat ?? null,
       } as Prisma.InputJsonValue,
     });
   });

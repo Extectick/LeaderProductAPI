@@ -449,6 +449,13 @@ export const orderAckSchema = z.object({
   date1c: nullableDate,
   sentTo1cAt: nullableDate,
   sourceUpdatedAt: nullableDate,
+  isPostedIn1c: z.boolean().optional(),
+  postedAt1c: nullableDate,
+  saveResult: z.enum(['POSTED', 'SAVED_NOT_POSTED']).optional(),
+  last1cError: z.string().nullable().optional(),
+  vatTaxation: z.string().nullable().optional(),
+  vatCalculationSource: z.enum(['CONTRACT', 'ACTIVITY_DIRECTION', 'ORGANIZATION']).nullable().optional(),
+  priceIncludesVat: z.boolean().nullable().optional(),
   error: z.string().optional(),
 });
 

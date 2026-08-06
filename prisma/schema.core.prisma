@@ -13,7 +13,7 @@ enum ProfileStatus {
   BLOCKED
 }
 
-/*
+/**
  * Новые enum'ы для обращений
  */
 enum AppealStatus {
@@ -91,23 +91,23 @@ enum ServiceKind {
 }
 
 model AppUpdate {
-  id                      Int         @id @default(autoincrement())
+  id                      Int              @id @default(autoincrement())
   platform                AppPlatform
-  channel                 String      @default("prod")
+  channel                 String           @default("prod")
   versionCode             Int
   versionName             String
   minSupportedVersionCode Int
-  isMandatory             Boolean     @default(false)
-  rolloutPercent          Int         @default(100)
-  isActive                Boolean     @default(true)
+  isMandatory             Boolean          @default(false)
+  rolloutPercent          Int              @default(100)
+  isActive                Boolean          @default(true)
   releaseNotes            String?
   storeUrl                String?
   apkKey                  String?
   fileSize                Int?
   checksum                String?
   checksumMd5             String?
-  createdAt               DateTime    @default(now())
-  updatedAt               DateTime    @updatedAt
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
   events                  AppUpdateEvent[]
 
   @@unique([platform, channel, versionCode])
@@ -116,9 +116,9 @@ model AppUpdate {
 }
 
 model AppUpdateEvent {
-  id          Int               @id @default(autoincrement())
+  id          Int                @id @default(autoincrement())
   updateId    Int?
-  update      AppUpdate?        @relation(fields: [updateId], references: [id])
+  update      AppUpdate?         @relation(fields: [updateId], references: [id])
   platform    AppPlatform
   channel     String
   versionCode Int
@@ -126,8 +126,8 @@ model AppUpdateEvent {
   deviceId    String?
   eventType   AppUpdateEventType
   userId      Int?
-  user        User?             @relation(fields: [userId], references: [id])
-  createdAt   DateTime          @default(now())
+  user        User?              @relation(fields: [userId], references: [id])
+  createdAt   DateTime           @default(now())
 
   @@index([platform, channel, versionCode])
   @@index([deviceId])
@@ -135,25 +135,25 @@ model AppUpdateEvent {
 }
 
 model AppOtaUpdate {
-  id                 Int         @id @default(autoincrement())
-  platform           AppPlatform
-  channel            String      @default("prod")
-  runtimeVersion     String
-  updateId           String      @unique
-  manifestKey        String?
-  launchAssetKey     String
-  launchAssetHash    String?
-  launchAssetType    String      @default("application/javascript")
-  assets             Json?
-  metadata           Json?
-  otaSequence        Int?
-  displayVersion     String?
-  isActive           Boolean     @default(true)
-  rolloutPercent     Int         @default(100)
-  commitSha          String?
-  releaseNotes       String?
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  id              Int         @id @default(autoincrement())
+  platform        AppPlatform
+  channel         String      @default("prod")
+  runtimeVersion  String
+  updateId        String      @unique
+  manifestKey     String?
+  launchAssetKey  String
+  launchAssetHash String?
+  launchAssetType String      @default("application/javascript")
+  assets          Json?
+  metadata        Json?
+  otaSequence     Int?
+  displayVersion  String?
+  isActive        Boolean     @default(true)
+  rolloutPercent  Int         @default(100)
+  commitSha       String?
+  releaseNotes    String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
 
   @@index([platform, channel, runtimeVersion, createdAt])
   @@index([platform, channel, runtimeVersion, isActive])
@@ -161,12 +161,12 @@ model AppOtaUpdate {
 }
 
 model ClientProfile {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @unique
-  user      User     @relation(fields: [userId], references: [id])
-  addressId Int?
-  address   Address? @relation(fields: [addressId], references: [id])
-  avatarUrl String?
+  id             Int           @id @default(autoincrement())
+  userId         Int           @unique
+  user           User          @relation(fields: [userId], references: [id])
+  addressId      Int?
+  address        Address?      @relation(fields: [addressId], references: [id])
+  avatarUrl      String?
   counterpartyId String?
   counterparty   Counterparty? @relation("ClientProfileCounterparty", fields: [counterpartyId], references: [id])
 
@@ -184,9 +184,9 @@ model ClientProfile {
 
   activeDeliveryAddressId String?
   activeDeliveryAddress   DeliveryAddress? @relation("ClientProfileActiveDeliveryAddress", fields: [activeDeliveryAddressId], references: [id])
-  status    ProfileStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  status                  ProfileStatus    @default(PENDING)
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
 
   @@index([counterpartyId])
   @@index([activeAgreementId])
@@ -197,53 +197,53 @@ model ClientProfile {
 }
 
 model SupplierProfile {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @unique
-  user      User     @relation(fields: [userId], references: [id])
+  id        Int           @id @default(autoincrement())
+  userId    Int           @unique
+  user      User          @relation(fields: [userId], references: [id])
   addressId Int?
-  address   Address? @relation(fields: [addressId], references: [id])
+  address   Address?      @relation(fields: [addressId], references: [id])
   avatarUrl String?
   status    ProfileStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
 }
 
 model EmployeeProfile {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @unique
-  user      User     @relation(fields: [userId], references: [id])
-  departmentId Int?
-  department Department? @relation("EmployeeProfilePrimaryDepartment", fields: [departmentId], references: [id])
-  activeDepartmentId Int?
-  activeDepartment Department? @relation("EmployeeProfileActiveDepartment", fields: [activeDepartmentId], references: [id])
-  appealLaborHourlyRate Decimal? @db.Decimal(8, 2)
-  onecUserGuid String? @unique
-  onecPhysicalPersonGuid String? @unique
-  departmentRoles DepartmentRole[] @relation("EmployeeDepartmentRoles")
-  avatarUrl String?
-  status    ProfileStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                     Int              @id @default(autoincrement())
+  userId                 Int              @unique
+  user                   User             @relation(fields: [userId], references: [id])
+  departmentId           Int?
+  department             Department?      @relation("EmployeeProfilePrimaryDepartment", fields: [departmentId], references: [id])
+  activeDepartmentId     Int?
+  activeDepartment       Department?      @relation("EmployeeProfileActiveDepartment", fields: [activeDepartmentId], references: [id])
+  appealLaborHourlyRate  Decimal?         @db.Decimal(8, 2)
+  onecUserGuid           String?          @unique
+  onecPhysicalPersonGuid String?          @unique
+  departmentRoles        DepartmentRole[] @relation("EmployeeDepartmentRoles")
+  avatarUrl              String?
+  status                 ProfileStatus    @default(PENDING)
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
 
   @@index([status, departmentId, userId])
   @@index([activeDepartmentId])
 }
 
 model Department {
-  id    Int     @id @default(autoincrement())
-  name  String  @unique
-  appealPaymentRequired Boolean @default(true)
-  appealLaborHourlyRate Decimal @default(1.0) @db.Decimal(8, 2)
-  departmentRoles DepartmentRole[]
-  employeeProfiles EmployeeProfile[] @relation("EmployeeProfilePrimaryDepartment")
-  activeEmployeeProfiles EmployeeProfile[] @relation("EmployeeProfileActiveDepartment")
-  serviceAccesses ServiceDepartmentAccess[]
+  id                            Int                           @id @default(autoincrement())
+  name                          String                        @unique
+  appealPaymentRequired         Boolean                       @default(true)
+  appealLaborHourlyRate         Decimal                       @default(1.0) @db.Decimal(8, 2)
+  departmentRoles               DepartmentRole[]
+  employeeProfiles              EmployeeProfile[]             @relation("EmployeeProfilePrimaryDepartment")
+  activeEmployeeProfiles        EmployeeProfile[]             @relation("EmployeeProfileActiveDepartment")
+  serviceAccesses               ServiceDepartmentAccess[]
   serviceDepartmentRoleAccesses ServiceDepartmentRoleAccess[]
-  appealAnalyticsThresholds AppealAnalyticsThreshold[]
+  appealAnalyticsThresholds     AppealAnalyticsThreshold[]
 
   // Новые связи с обращениями
-  appealsFrom   Appeal[] @relation("AppealsFrom")
-  appealsTo     Appeal[] @relation("AppealsTo")
+  appealsFrom Appeal[] @relation("AppealsFrom")
+  appealsTo   Appeal[] @relation("AppealsTo")
 }
 
 enum ProfileType {
@@ -260,74 +260,75 @@ enum AuthProvider {
 }
 
 model User {
-  id                 Int                 @id @default(autoincrement())
-  email              String?             @unique
-  passwordHash       String?
-  isActive           Boolean             @default(false)
-  roleId             Int 
-  firstName          String?             // Имя
-  lastName           String?             // Фамилия
-  middleName         String?             // Отчество
-  phone              BigInt?             @unique // Телефон пользователя в формате 79612231345
-  phoneVerifiedAt    DateTime?
-  avatarUrl          String?             // (устар.) Ссылка на аватар пользователя
-  telegramId         BigInt?             @unique
-  telegramUsername   String?
-  telegramLinkedAt   DateTime?
-  maxId              BigInt?             @unique
-  maxUsername        String?
-  maxLinkedAt        DateTime?
-  authProvider       AuthProvider        @default(LOCAL)
-  deletedAt          DateTime?           // Для soft delete
-  currentProfileType ProfileType?        // Текущий активный профиль
-  emailVerifications EmailVerification[]
-  emailChangeSessions EmailChangeSession[]
-  loginAttempts      LoginAttempt[]
-  passwordResets     PasswordReset[]
-  refreshTokens      RefreshToken[]
-  deviceSessions     DeviceSession[]
-  role               Role                @relation(fields: [roleId], references: [id])
-  departmentRoles    DepartmentRole[]
-  serviceAccesses    ServiceUserAccess[]
-  auditLogs          AuditLog[]          @relation("UserAuditLogs")
-  clientProfile      ClientProfile?
-  supplierProfile    SupplierProfile?
-  employeeProfile    EmployeeProfile?
-  profileStatus      ProfileStatus       @default(PENDING)
-  qrlist             QRList[]
-  routes             UserRoute[]
-  routePoints        RoutePoint[]
+  id                   Int                   @id @default(autoincrement())
+  email                String?               @unique
+  passwordHash         String?
+  isActive             Boolean               @default(false)
+  roleId               Int
+  firstName            String? // Имя
+  lastName             String? // Фамилия
+  middleName           String? // Отчество
+  phone                BigInt?               @unique // Телефон пользователя в формате 79612231345
+  phoneVerifiedAt      DateTime?
+  avatarUrl            String? // (устар.) Ссылка на аватар пользователя
+  telegramId           BigInt?               @unique
+  telegramUsername     String?
+  telegramLinkedAt     DateTime?
+  maxId                BigInt?               @unique
+  maxUsername          String?
+  maxLinkedAt          DateTime?
+  authProvider         AuthProvider          @default(LOCAL)
+  deletedAt            DateTime? // Для soft delete
+  currentProfileType   ProfileType? // Текущий активный профиль
+  emailVerifications   EmailVerification[]
+  emailChangeSessions  EmailChangeSession[]
+  loginAttempts        LoginAttempt[]
+  passwordResets       PasswordReset[]
+  refreshTokens        RefreshToken[]
+  deviceSessions       DeviceSession[]
+  role                 Role                  @relation(fields: [roleId], references: [id])
+  departmentRoles      DepartmentRole[]
+  serviceAccesses      ServiceUserAccess[]
+  auditLogs            AuditLog[]            @relation("UserAuditLogs")
+  clientProfile        ClientProfile?
+  supplierProfile      SupplierProfile?
+  employeeProfile      EmployeeProfile?
+  profileStatus        ProfileStatus         @default(PENDING)
+  qrlist               QRList[]
+  routes               UserRoute[]
+  routePoints          RoutePoint[]
   trackingDeviceTokens TrackingDeviceToken[]
-  createdOrders      Order[]             @relation("OrdersCreatedBy")
-  orderEvents        OrderEvent[]        @relation("OrderEventsActor")
-  lastSeenAt         DateTime?
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  createdOrders        Order[]               @relation("OrdersCreatedBy")
+  orderEvents          OrderEvent[]          @relation("OrderEventsActor")
+  lastSeenAt           DateTime?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
 
-  /*
+  /**
    * Новые связи с обращениями
    */
-  appealsCreated    Appeal[]            @relation("AppealsCreated")
-  appealAssignees   AppealAssignee[]
-  appealWatchers    AppealWatcher[]
-  appealMessages    AppealMessage[]
-  appealStatusHistory AppealStatusHistory[]
-  deviceTokens      DeviceToken[]
-  appealMessageReads AppealMessageRead[]
-  appealLaborEntriesAssignee AppealLaborEntry[] @relation("AppealLaborEntryAssignee")
-  appealLaborEntriesPaidBy AppealLaborEntry[] @relation("AppealLaborEntryPaidBy")
-  appealLaborEntriesCreatedBy AppealLaborEntry[] @relation("AppealLaborEntryCreatedBy")
-  appealLaborEntriesUpdatedBy AppealLaborEntry[] @relation("AppealLaborEntryUpdatedBy")
-  appealLaborAuditAssignee AppealLaborAuditLog[]
-  appealLaborAuditChangedBy AppealLaborAuditLog[] @relation("AppealLaborAuditChangedBy")
-  updateEvents      AppUpdateEvent[]
-  phoneVerificationSessions PhoneVerificationSession[]
-  phoneMigrationReports     UserPhoneMigrationReport[]
-  notificationSettings UserNotificationSettings?
-  appealMutes          AppealMute[]
-  clientOrderSettings  ClientOrderUserSettings?
-  transportTaskSettings UserTransportTaskSettings?
+  appealsCreated                Appeal[]                              @relation("AppealsCreated")
+  appealAssignees               AppealAssignee[]
+  appealWatchers                AppealWatcher[]
+  appealMessages                AppealMessage[]
+  appealStatusHistory           AppealStatusHistory[]
+  deviceTokens                  DeviceToken[]
+  appealMessageReads            AppealMessageRead[]
+  appealLaborEntriesAssignee    AppealLaborEntry[]                    @relation("AppealLaborEntryAssignee")
+  appealLaborEntriesPaidBy      AppealLaborEntry[]                    @relation("AppealLaborEntryPaidBy")
+  appealLaborEntriesCreatedBy   AppealLaborEntry[]                    @relation("AppealLaborEntryCreatedBy")
+  appealLaborEntriesUpdatedBy   AppealLaborEntry[]                    @relation("AppealLaborEntryUpdatedBy")
+  appealLaborAuditAssignee      AppealLaborAuditLog[]
+  appealLaborAuditChangedBy     AppealLaborAuditLog[]                 @relation("AppealLaborAuditChangedBy")
+  updateEvents                  AppUpdateEvent[]
+  phoneVerificationSessions     PhoneVerificationSession[]
+  phoneMigrationReports         UserPhoneMigrationReport[]
+  notificationSettings          UserNotificationSettings?
+  appealMutes                   AppealMute[]
+  clientOrderSettings           ClientOrderUserSettings?
+  transportTaskSettings         UserTransportTaskSettings?
   clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[]
+  clientOrderInvoicePreferences ClientOrderInvoicePreference[]
 
   @@index([email])
   @@index([currentProfileType, roleId, createdAt])
@@ -370,12 +371,12 @@ enum EmailChangeSessionStatus {
 }
 
 model PhoneVerificationSession {
-  id             String                  @id @default(cuid())
+  id             String                    @id @default(cuid())
   userId         Int
   requestedPhone BigInt
-  status         PhoneVerificationStatus @default(PENDING)
+  status         PhoneVerificationStatus   @default(PENDING)
   provider       PhoneVerificationProvider @default(TELEGRAM)
-  tokenHash      String                  @unique
+  tokenHash      String                    @unique
   telegramUserId BigInt?
   chatId         BigInt?
   maxUserId      BigInt?
@@ -383,8 +384,8 @@ model PhoneVerificationSession {
   expiresAt      DateTime
   verifiedAt     DateTime?
   failureReason  String?
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
@@ -432,19 +433,19 @@ model UserPhoneMigrationReport {
 }
 
 model EmailChangeSession {
-  id            String                   @id @default(cuid())
-  userId        Int
-  currentEmail  String?
+  id             String                   @id @default(cuid())
+  userId         Int
+  currentEmail   String?
   requestedEmail String
-  codeHash      String
-  status        EmailChangeSessionStatus @default(PENDING)
-  attemptsCount Int                      @default(0)
-  expiresAt     DateTime
-  verifiedAt    DateTime?
-  lastSentAt    DateTime?
-  failureReason String?
-  createdAt     DateTime                 @default(now())
-  updatedAt     DateTime                 @updatedAt
+  codeHash       String
+  status         EmailChangeSessionStatus @default(PENDING)
+  attemptsCount  Int                      @default(0)
+  expiresAt      DateTime
+  verifiedAt     DateTime?
+  lastSentAt     DateTime?
+  failureReason  String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
@@ -454,7 +455,7 @@ model EmailChangeSession {
 }
 
 model DepartmentRole {
-  id           Int       @id @default(autoincrement())
+  id           Int @id @default(autoincrement())
   userId       Int
   roleId       Int
   departmentId Int
@@ -469,32 +470,32 @@ model DepartmentRole {
 }
 
 model Address {
-  id        Int      @id @default(autoincrement())
-  street    String
-  city      String
-  state     String?
+  id         Int      @id @default(autoincrement())
+  street     String
+  city       String
+  state      String?
   postalCode String?
-  country   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  country    String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   clientProfiles   ClientProfile[]
   supplierProfiles SupplierProfile[]
 }
 
 model Role {
-  id            Int               @id @default(autoincrement())
-  name          String            @unique
-  displayName   String            @default("")
-  permissions   RolePermissions[] @relation("RolePermissions")
-  users         User[]
-  departmentRoles DepartmentRole[]
-  serviceAccesses ServiceRoleAccess[]
+  id                        Int                           @id @default(autoincrement())
+  name                      String                        @unique
+  displayName               String                        @default("")
+  permissions               RolePermissions[]             @relation("RolePermissions")
+  users                     User[]
+  departmentRoles           DepartmentRole[]
+  serviceAccesses           ServiceRoleAccess[]
   serviceDepartmentAccesses ServiceDepartmentRoleAccess[]
 
-  parentRoleId  Int?              // Родительская роль для иерархии ролей
-  parentRole    Role?             @relation("RoleHierarchy", fields: [parentRoleId], references: [id])
-  childRoles    Role[]            @relation("RoleHierarchy")
+  parentRoleId Int? // Родительская роль для иерархии ролей
+  parentRole   Role?  @relation("RoleHierarchy", fields: [parentRoleId], references: [id])
+  childRoles   Role[] @relation("RoleHierarchy")
 }
 
 model Permission {
@@ -535,26 +536,26 @@ model RolePermissions {
 }
 
 model Service {
-  id              Int                      @id @default(autoincrement())
-  key             String                   @unique
-  name            String
-  kind            ServiceKind              @default(CLOUD)
-  route           String?
-  icon            String?
-  description     String?
-  gradientStart   String?
-  gradientEnd     String?
-  isActive        Boolean                  @default(true)
-  defaultVisible  Boolean                  @default(true)
-  defaultEnabled  Boolean                  @default(true)
-  createdAt       DateTime                 @default(now())
-  updatedAt       DateTime                 @updatedAt
+  id             Int         @id @default(autoincrement())
+  key            String      @unique
+  name           String
+  kind           ServiceKind @default(CLOUD)
+  route          String?
+  icon           String?
+  description    String?
+  gradientStart  String?
+  gradientEnd    String?
+  isActive       Boolean     @default(true)
+  defaultVisible Boolean     @default(true)
+  defaultEnabled Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 
-  roleAccess      ServiceRoleAccess[]
-  departmentAccess ServiceDepartmentAccess[]
+  roleAccess           ServiceRoleAccess[]
+  departmentAccess     ServiceDepartmentAccess[]
   departmentRoleAccess ServiceDepartmentRoleAccess[]
-  userAccess      ServiceUserAccess[]
-  permissionGroup PermissionGroup?
+  userAccess           ServiceUserAccess[]
+  permissionGroup      PermissionGroup?
 }
 
 model ServiceRoleAccess {
@@ -591,13 +592,13 @@ model ServiceDepartmentAccess {
 
 model ServiceDepartmentRoleAccess {
   id           Int      @id @default(autoincrement())
-  serviceId     Int
-  departmentId  Int
-  roleId        Int
-  visible       Boolean?
-  enabled       Boolean?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  serviceId    Int
+  departmentId Int
+  roleId       Int
+  visible      Boolean?
+  enabled      Boolean?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   service    Service    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
@@ -625,19 +626,19 @@ model ServiceUserAccess {
 }
 
 model RefreshToken {
-  id              Int      @id @default(autoincrement())
-  token           String   @unique
-  tokenHash       String?  @unique
+  id              Int            @id @default(autoincrement())
+  token           String         @unique
+  tokenHash       String?        @unique
   userId          Int
   deviceSessionId String?
   familyId        String?
   replacedById    Int?
   expiresAt       DateTime
-  createdAt       DateTime @default(now())
-  revoked         Boolean  @default(false)
+  createdAt       DateTime       @default(now())
+  revoked         Boolean        @default(false)
   usedAt          DateTime?
   graceUntil      DateTime?
-  user            User     @relation(fields: [userId], references: [id])
+  user            User           @relation(fields: [userId], references: [id])
   deviceSession   DeviceSession? @relation(fields: [deviceSessionId], references: [id])
 
   @@index([userId])
@@ -646,17 +647,17 @@ model RefreshToken {
 }
 
 model DeviceSession {
-  id            String   @id
-  userId        Int
-  installId     String
-  platform      String?
-  appVersion    String?
-  deviceName    String?
-  createdAt     DateTime @default(now())
-  lastSeenAt    DateTime @default(now())
-  revokedAt     DateTime?
+  id         String    @id
+  userId     Int
+  installId  String
+  platform   String?
+  appVersion String?
+  deviceName String?
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  revokedAt  DateTime?
 
-  user          User     @relation(fields: [userId], references: [id])
+  user          User           @relation(fields: [userId], references: [id])
   refreshTokens RefreshToken[]
 
   @@index([userId])
@@ -673,15 +674,15 @@ model LoginAttempt {
 }
 
 model EmailVerification {
-  id           Int      @id @default(autoincrement())
-  userId       Int
-  code         String
-  expiresAt    DateTime
-  used         Boolean  @default(false)
-  attemptsCount Int      @default(0)
-  lastSentAt   DateTime?
-  createdAt    DateTime @default(now())
-  user         User     @relation(fields: [userId], references: [id])
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  code          String
+  expiresAt     DateTime
+  used          Boolean   @default(false)
+  attemptsCount Int       @default(0)
+  lastSentAt    DateTime?
+  createdAt     DateTime  @default(now())
+  user          User      @relation(fields: [userId], references: [id])
 }
 
 model PasswordReset {
@@ -714,7 +715,7 @@ model AuditLog {
   timestamp  DateTime   @default(now())
   details    String?
 
-  user       User?      @relation("UserAuditLogs", fields: [userId], references: [id])
+  user User? @relation("UserAuditLogs", fields: [userId], references: [id])
 }
 
 model UserRoute {
@@ -732,25 +733,25 @@ model UserRoute {
 }
 
 model RoutePoint {
-  id                              Int             @id @default(autoincrement())
-  routeId                         Int
-  route                           UserRoute       @relation(fields: [routeId], references: [id])
-  userId                          Int
-  user                            User            @relation(fields: [userId], references: [id])
-  orderTrackingSnapshots          Order[]         @relation("OrderTrackingPoint")
-  latitude                        Float
-  longitude                       Float
-  recordedAt                      DateTime
-  recordedTimeZone                String?
-  recordedTimezoneOffsetMinutes  Int?
-  eventType                       RouteEventType  @default(MOVE)
-  accuracy                        Float?
-  speed                           Float?
-  heading                         Float?
-  stayDurationSeconds             Int?
-  sequence                        Int?
-  clientPointId                   String?
-  createdAt                       DateTime        @default(now())
+  id                            Int            @id @default(autoincrement())
+  routeId                       Int
+  route                         UserRoute      @relation(fields: [routeId], references: [id])
+  userId                        Int
+  user                          User           @relation(fields: [userId], references: [id])
+  orderTrackingSnapshots        Order[]        @relation("OrderTrackingPoint")
+  latitude                      Float
+  longitude                     Float
+  recordedAt                    DateTime
+  recordedTimeZone              String?
+  recordedTimezoneOffsetMinutes Int?
+  eventType                     RouteEventType @default(MOVE)
+  accuracy                      Float?
+  speed                         Float?
+  heading                       Float?
+  stayDurationSeconds           Int?
+  sequence                      Int?
+  clientPointId                 String?
+  createdAt                     DateTime       @default(now())
 
   @@unique([userId, clientPointId])
   @@index([userId, recordedAt])
@@ -797,31 +798,31 @@ enum QRType {
 }
 
 model QRList {
-  id          String      @id
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  status      QRStatus    @default(ACTIVE)
-  createdBy   User        @relation(fields: [createdById], references: [id])
+  id          String       @id
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  status      QRStatus     @default(ACTIVE)
+  createdBy   User         @relation(fields: [createdById], references: [id])
   createdById Int
   qrData      String
-  qrType      QRType      @default(TEXT)
+  qrType      QRType       @default(TEXT)
   description String?
   analytics   QRAnalytic[]
 }
 
 model QRAnalytic {
-  id           Int       @id @default(autoincrement())
+  id           Int      @id @default(autoincrement())
   ip           String?
   location     String?
   browser      String?
   device       String?
-  scanDuration Int?      // Время в миллисекундах
-  createdAt    DateTime  @default(now())
-  qrList       QRList    @relation(fields: [qrListId], references: [id])
+  scanDuration Int? // Время в миллисекундах
+  createdAt    DateTime @default(now())
+  qrList       QRList   @relation(fields: [qrListId], references: [id])
   qrListId     String
 }
 
-/*
+/**
  * Новые модели для системы обращений
  */
 model Appeal {
@@ -838,113 +839,113 @@ model Appeal {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  fromDepartment   Department?    @relation("AppealsFrom", fields: [fromDepartmentId], references: [id])
-  toDepartment     Department     @relation("AppealsTo", fields: [toDepartmentId], references: [id])
-  createdBy        User           @relation("AppealsCreated", fields: [createdById], references: [id])
-  assignees        AppealAssignee[]
-  watchers         AppealWatcher[]
-  messages         AppealMessage[]
-  statusHistory    AppealStatusHistory[]
-  laborEntries     AppealLaborEntry[]
-  laborAuditLogs   AppealLaborAuditLog[]
-  mutes            AppealMute[]
+  fromDepartment Department?           @relation("AppealsFrom", fields: [fromDepartmentId], references: [id])
+  toDepartment   Department            @relation("AppealsTo", fields: [toDepartmentId], references: [id])
+  createdBy      User                  @relation("AppealsCreated", fields: [createdById], references: [id])
+  assignees      AppealAssignee[]
+  watchers       AppealWatcher[]
+  messages       AppealMessage[]
+  statusHistory  AppealStatusHistory[]
+  laborEntries   AppealLaborEntry[]
+  laborAuditLogs AppealLaborAuditLog[]
+  mutes          AppealMute[]
 }
 
 model AppealAssignee {
-  id       Int   @id @default(autoincrement())
+  id       Int @id @default(autoincrement())
   appealId Int
   userId   Int
 
-  appeal   Appeal @relation(fields: [appealId], references: [id])
-  user     User   @relation(fields: [userId], references: [id])
+  appeal Appeal @relation(fields: [appealId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
 
   @@unique([appealId, userId])
 }
 
 model AppealWatcher {
-  id       Int   @id @default(autoincrement())
+  id       Int @id @default(autoincrement())
   appealId Int
   userId   Int
 
-  appeal   Appeal @relation(fields: [appealId], references: [id])
-  user     User   @relation(fields: [userId], references: [id])
+  appeal Appeal @relation(fields: [appealId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
 
   @@unique([appealId, userId])
 }
 
 model AppealStatusHistory {
-  id         Int          @id @default(autoincrement())
-  appealId   Int
-  oldStatus  AppealStatus
-  newStatus  AppealStatus
+  id          Int          @id @default(autoincrement())
+  appealId    Int
+  oldStatus   AppealStatus
+  newStatus   AppealStatus
   changedById Int
-  changedAt  DateTime      @default(now())
+  changedAt   DateTime     @default(now())
 
-  appeal     Appeal        @relation(fields: [appealId], references: [id])
-  changedBy  User          @relation(fields: [changedById], references: [id])
+  appeal    Appeal @relation(fields: [appealId], references: [id])
+  changedBy User   @relation(fields: [changedById], references: [id])
 }
 
 model AppealMessage {
-  id        Int      @id @default(autoincrement())
-  appealId  Int
-  senderId  Int
-  text      String?
-  type      AppealMessageType @default(USER)
+  id          Int               @id @default(autoincrement())
+  appealId    Int
+  senderId    Int
+  text        String?
+  type        AppealMessageType @default(USER)
   systemEvent Json?
-  editedAt  DateTime?
-  deleted   Boolean  @default(false)
-  createdAt DateTime @default(now())
+  editedAt    DateTime?
+  deleted     Boolean           @default(false)
+  createdAt   DateTime          @default(now())
 
-  appeal    Appeal   @relation(fields: [appealId], references: [id])
-  sender    User     @relation(fields: [senderId], references: [id])
+  appeal      Appeal              @relation(fields: [appealId], references: [id])
+  sender      User                @relation(fields: [senderId], references: [id])
   attachments AppealAttachment[]
-  reads     AppealMessageRead[]
+  reads       AppealMessageRead[]
 
   @@index([appealId, createdAt, id])
 }
 
 model AppealAttachment {
-  id         Int           @id @default(autoincrement())
-  messageId  Int
-  fileUrl    String
-  fileName   String
-  fileType   AttachmentType
-  createdAt  DateTime       @default(now())
+  id        Int            @id @default(autoincrement())
+  messageId Int
+  fileUrl   String
+  fileName  String
+  fileType  AttachmentType
+  createdAt DateTime       @default(now())
 
-  message    AppealMessage  @relation(fields: [messageId], references: [id])
+  message AppealMessage @relation(fields: [messageId], references: [id])
 }
 
 model AppealMessageRead {
-  id        Int            @id @default(autoincrement())
-  message   AppealMessage  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  id        Int           @id @default(autoincrement())
+  message   AppealMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
   messageId Int
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId    Int
-  readAt    DateTime       @default(now())
+  readAt    DateTime      @default(now())
 
   @@unique([messageId, userId])
 }
 
 model AppealLaborEntry {
-  id             Int                      @id @default(autoincrement())
-  appealId       Int
-  assigneeUserId Int
-  hours          Decimal                  @default(0.0) @db.Decimal(8, 2)
-  paidHours      Decimal                  @default(0.0) @db.Decimal(8, 2)
-  effectiveHourlyRateRub Decimal          @default(0.0) @db.Decimal(8, 2)
-  paymentStatus  AppealLaborPaymentStatus @default(UNPAID)
-  paidAt         DateTime?
-  paidById       Int?
-  createdById    Int
-  updatedById    Int
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
+  id                     Int                      @id @default(autoincrement())
+  appealId               Int
+  assigneeUserId         Int
+  hours                  Decimal                  @default(0.0) @db.Decimal(8, 2)
+  paidHours              Decimal                  @default(0.0) @db.Decimal(8, 2)
+  effectiveHourlyRateRub Decimal                  @default(0.0) @db.Decimal(8, 2)
+  paymentStatus          AppealLaborPaymentStatus @default(UNPAID)
+  paidAt                 DateTime?
+  paidById               Int?
+  createdById            Int
+  updatedById            Int
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
 
-  appeal         Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
-  assignee       User   @relation("AppealLaborEntryAssignee", fields: [assigneeUserId], references: [id], onDelete: Cascade)
-  paidBy         User?  @relation("AppealLaborEntryPaidBy", fields: [paidById], references: [id], onDelete: SetNull)
-  createdBy      User   @relation("AppealLaborEntryCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
-  updatedBy      User   @relation("AppealLaborEntryUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  appeal    Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  assignee  User   @relation("AppealLaborEntryAssignee", fields: [assigneeUserId], references: [id], onDelete: Cascade)
+  paidBy    User?  @relation("AppealLaborEntryPaidBy", fields: [paidById], references: [id], onDelete: SetNull)
+  createdBy User   @relation("AppealLaborEntryCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy User   @relation("AppealLaborEntryUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
 
   @@unique([appealId, assigneeUserId])
   @@index([assigneeUserId, paymentStatus])
@@ -952,21 +953,21 @@ model AppealLaborEntry {
 }
 
 model AppealLaborAuditLog {
-  id               Int                      @id @default(autoincrement())
+  id               Int                       @id @default(autoincrement())
   appealId         Int
   assigneeUserId   Int
   changedById      Int
-  oldHours         Decimal?                 @db.Decimal(8, 2)
-  newHours         Decimal                  @db.Decimal(8, 2)
-  oldPaidHours     Decimal?                 @db.Decimal(8, 2)
-  newPaidHours     Decimal?                 @db.Decimal(8, 2)
+  oldHours         Decimal?                  @db.Decimal(8, 2)
+  newHours         Decimal                   @db.Decimal(8, 2)
+  oldPaidHours     Decimal?                  @db.Decimal(8, 2)
+  newPaidHours     Decimal?                  @db.Decimal(8, 2)
   oldPaymentStatus AppealLaborPaymentStatus?
   newPaymentStatus AppealLaborPaymentStatus
-  changedAt        DateTime                 @default(now())
+  changedAt        DateTime                  @default(now())
 
-  appeal           Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
-  assignee         User   @relation(fields: [assigneeUserId], references: [id], onDelete: Cascade)
-  changedBy        User   @relation("AppealLaborAuditChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+  appeal    Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  assignee  User   @relation(fields: [assigneeUserId], references: [id], onDelete: Cascade)
+  changedBy User   @relation("AppealLaborAuditChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
 
   @@index([appealId, changedAt])
   @@index([assigneeUserId, changedAt])
@@ -981,7 +982,7 @@ model AppealAnalyticsThreshold {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
-  department           Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
 
   @@unique([departmentId])
 }
@@ -1050,17 +1051,15 @@ model UserTransportTaskSettings {
 }
 
 model AppealMute {
-  id       Int    @id @default(autoincrement())
-  userId   Int
-  appealId Int
-  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  appeal   Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  appealId  Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appeal    Appeal   @relation(fields: [appealId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 
   @@unique([userId, appealId])
   @@index([appealId])
 }
 
-
 // 1C integration models moved to prisma/schema.onec.prisma
-

@@ -249,6 +249,7 @@ export type LiveClientOrder = {
     quantity: number | null;
     quantityBase: number | null;
     basePrice: number | null;
+    receiptPrice: number | null;
     price: number | null;
     isManualPrice: boolean;
     manualPrice: number | null;
@@ -363,6 +364,7 @@ function normalizeQuery(query: {
   contractGuid?: string;
   warehouseGuid?: string;
   priceTypeGuid?: string;
+  receiptPriceAt?: string;
   inStockOnly?: boolean;
   managerGuid?: string;
   status?: string;
@@ -394,6 +396,7 @@ function normalizeQuery(query: {
     contractGuid: query.contractGuid,
     warehouseGuid: query.warehouseGuid,
     priceTypeGuid: query.priceTypeGuid,
+    receiptPriceAt: query.receiptPriceAt,
     inStockOnly: query.inStockOnly,
     managerGuid: query.managerGuid,
     status: query.status,
@@ -1117,6 +1120,7 @@ function mapOrderItem(record: AnyRecord, index: number): LiveClientOrder['items'
     quantity: numberValue(record, ['quantity', 'Количество'], 0),
     quantityBase: numberValue(record, ['quantityBase', 'baseQuantity', 'КоличествоБаза'], null),
     basePrice: numberValue(record, ['basePrice', 'price', 'Цена'], null),
+    receiptPrice: numberValue(record, ['receiptPrice', 'costPrice', 'Себестоимость'], null),
     price: numberValue(record, ['price', 'basePrice', 'Цена'], null),
     isManualPrice: bool(record, ['isManualPrice', 'manualPriceEnabled'], false),
     manualPrice: numberValue(record, ['manualPrice'], null),
@@ -1419,6 +1423,7 @@ export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody
     agreementGuid: body.agreementGuid,
     warehouseGuid: body.warehouseGuid,
     priceTypeGuid: body.priceTypeGuid,
+    receiptPriceAt: body.receiptPriceAt,
     managerGuid: body.managerGuid ?? undefined,
   });
   const listPayload = await getOnecLpAppNomenclature({ ...query, guids: uniqueGuids.join(',') });

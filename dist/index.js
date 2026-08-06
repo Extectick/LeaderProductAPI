@@ -38,6 +38,7 @@ const marketplace_routes_1 = __importDefault(require("./modules/marketplace/mark
 const clientOrders_routes_1 = __importDefault(require("./modules/clientOrders/clientOrders.routes"));
 const scheduledJobsService_1 = require("./services/scheduledJobsService");
 const clientOrdersExportWorker_1 = require("./services/clientOrdersExportWorker");
+const clientOrderInvoiceWorker_1 = require("./services/clientOrderInvoiceWorker");
 const redis_1 = require("./lib/redis");
 const cache_1 = require("./middleware/cache");
 const presenceService_1 = require("./services/presenceService");
@@ -424,6 +425,7 @@ if (ENV !== 'test') {
         // 4) Запускаем фоновые задачи приложения
         (0, scheduledJobsService_1.startScheduledJobs)();
         (0, clientOrdersExportWorker_1.startClientOrdersExportWorker)();
+        (0, clientOrderInvoiceWorker_1.startClientOrderInvoiceWorker)();
         // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
         if ((0, telegramBotService_1.isTelegramBotConfigured)()) {
             void (async () => {
@@ -479,6 +481,7 @@ process.on('SIGINT', async () => {
     console.log('SIGINT received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
     (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
+    (0, clientOrderInvoiceWorker_1.stopClientOrderInvoiceWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });
     await client_1.default.$disconnect().catch(() => { });
@@ -490,6 +493,7 @@ process.on('SIGTERM', async () => {
     console.log('SIGTERM received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
     (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
+    (0, clientOrderInvoiceWorker_1.stopClientOrderInvoiceWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });
     await client_1.default.$disconnect().catch(() => { });

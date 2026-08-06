@@ -3,10 +3,14 @@ import request from 'supertest';
 import updatesRouter from '../src/routes/updates';
 
 const createMock = jest.fn();
+const findFirstMock = jest.fn();
 
 jest.mock('../src/prisma/client', () => ({
   __esModule: true,
   default: {
+    appUpdate: {
+      findFirst: (...args: unknown[]) => findFirstMock(...args),
+    },
     appUpdateEvent: {
       create: (...args: unknown[]) => createMock(...args),
     },
@@ -31,6 +35,7 @@ describe('updates events route', () => {
   beforeEach(() => {
     createMock.mockReset();
     createMock.mockResolvedValue({ id: 101 });
+    findFirstMock.mockReset();
   });
 
   it('accepts APK and OTA update lifecycle events', async () => {
@@ -70,5 +75,35 @@ describe('updates events route', () => {
 
     expect(res.status).toBe(400);
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('reuses the latest update lookup for repeated device checks', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 501,
+      platform: 'ANDROID',
+      channel: 'cache-test',
+      versionCode: 20,
+      versionName: '2.0.0',
+      minSupportedVersionCode: 1,
+      isMandatory: false,
+      rolloutPercent: 100,
+      isActive: true,
+      releaseNotes: null,
+      storeUrl: 'https://example.test/app.apk',
+      apkKey: null,
+      fileSize: 123,
+      checksum: null,
+      checksumMd5: null,
+    });
+
+    for (const deviceId of ['device-a', 'device-b']) {
+      const res = await request(app)
+        .get('/updates/check')
+        .query({ platform: 'android', channel: 'cache-test', versionCode: 10, deviceId });
+      expect(res.status).toBe(200);
+      expect(res.body.data.updateAvailable).toBe(true);
+    }
+
+    expect(findFirstMock).toHaveBeenCalledTimes(1);
   });
 });

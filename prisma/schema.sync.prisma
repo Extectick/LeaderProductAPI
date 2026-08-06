@@ -52,37 +52,37 @@ enum SyncEntityType {
 }
 
 model SyncRun {
-  id           String        @id @default(cuid())
-  requestId    String        @unique
-  entity       SyncEntityType
-  direction    SyncDirection
-  status       SyncStatus    @default(STARTED)
+  id        String         @id @default(cuid())
+  requestId String         @unique
+  entity    SyncEntityType
+  direction SyncDirection
+  status    SyncStatus     @default(STARTED)
 
-  totalCount   Int           @default(0)
-  successCount Int           @default(0)
-  errorCount   Int           @default(0)
+  totalCount   Int @default(0)
+  successCount Int @default(0)
+  errorCount   Int @default(0)
 
-  startedAt    DateTime      @default(now())
-  finishedAt   DateTime?
-  notes        String?
-  meta         Json?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  notes      String?
+  meta       Json?
 
-  items        SyncRunItem[]
+  items SyncRunItem[]
 
   @@index([entity, direction, startedAt])
   @@index([status, startedAt])
 }
 
 model SyncRunItem {
-  id        String       @id @default(cuid())
+  id        String         @id @default(cuid())
   runId     String
   key       String
   status    SyncItemStatus
   error     String?
   payload   Json?
-  createdAt DateTime     @default(now())
+  createdAt DateTime       @default(now())
 
-  run       SyncRun      @relation(fields: [runId], references: [id])
+  run SyncRun @relation(fields: [runId], references: [id])
 
   @@index([runId])
   @@index([key])
@@ -97,31 +97,31 @@ model OnecSyncSession {
   selectedEntities Json?
   notes            String?
 
-  acceptedCount    Int                   @default(0)
-  resolvedCount    Int                   @default(0)
-  blockedCount     Int                   @default(0)
-  errorCount       Int                   @default(0)
+  acceptedCount Int @default(0)
+  resolvedCount Int @default(0)
+  blockedCount  Int @default(0)
+  errorCount    Int @default(0)
 
-  startedAt        DateTime              @default(now())
-  completedAt      DateTime?
-  lastActivityAt   DateTime              @default(now())
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  lastActivityAt DateTime  @default(now())
 
-  nomenclatureItems  OnecStageNomenclature[]
-  organizationItems  OnecStageOrganization[]
-  warehouseItems     OnecStageWarehouse[]
-  counterpartyItems  OnecStageCounterparty[]
-  contractItems      OnecStageContract[]
-  agreementItems     OnecStageAgreement[]
-  productPriceItems  OnecStageProductPrice[]
-  specialPriceItems  OnecStageSpecialPrice[]
-  stockItems         OnecStageStock[]
+  nomenclatureItems OnecStageNomenclature[]
+  organizationItems OnecStageOrganization[]
+  warehouseItems    OnecStageWarehouse[]
+  counterpartyItems OnecStageCounterparty[]
+  contractItems     OnecStageContract[]
+  agreementItems    OnecStageAgreement[]
+  productPriceItems OnecStageProductPrice[]
+  specialPriceItems OnecStageSpecialPrice[]
+  stockItems        OnecStageStock[]
 
   @@index([status, startedAt])
   @@index([lastActivityAt])
 }
 
 model OnecStageNomenclature {
-  id               String                @id @default(cuid())
+  id               String                 @id @default(cuid())
   sessionId        String
   sourceKey        String
   guid             String
@@ -130,12 +130,12 @@ model OnecStageNomenclature {
   payload          Json
   payloadHash      String
   sourceUpdatedAt  DateTime?
-  lastImportedAt   DateTime              @default(now())
+  lastImportedAt   DateTime               @default(now())
   resolveStatus    OnecStageResolveStatus @default(PENDING)
   lastResolveError String?
   resolvedAt       DateTime?
 
-  session          OnecSyncSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -144,19 +144,19 @@ model OnecStageNomenclature {
 }
 
 model OnecStageWarehouse {
-  id               String                @id @default(cuid())
+  id               String                 @id @default(cuid())
   sessionId        String
   sourceKey        String
   guid             String
   payload          Json
   payloadHash      String
   sourceUpdatedAt  DateTime?
-  lastImportedAt   DateTime              @default(now())
+  lastImportedAt   DateTime               @default(now())
   resolveStatus    OnecStageResolveStatus @default(PENDING)
   lastResolveError String?
   resolvedAt       DateTime?
 
-  session          OnecSyncSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -176,7 +176,7 @@ model OnecStageOrganization {
   lastResolveError String?
   resolvedAt       DateTime?
 
-  session          OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -184,19 +184,19 @@ model OnecStageOrganization {
 }
 
 model OnecStageCounterparty {
-  id               String                @id @default(cuid())
+  id               String                 @id @default(cuid())
   sessionId        String
   sourceKey        String
   guid             String
   payload          Json
   payloadHash      String
   sourceUpdatedAt  DateTime?
-  lastImportedAt   DateTime              @default(now())
+  lastImportedAt   DateTime               @default(now())
   resolveStatus    OnecStageResolveStatus @default(PENDING)
   lastResolveError String?
   resolvedAt       DateTime?
 
-  session          OnecSyncSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -204,23 +204,23 @@ model OnecStageCounterparty {
 }
 
 model OnecStageAgreement {
-  id                String                 @id @default(cuid())
-  sessionId         String
-  sourceKey         String
-  agreementGuid     String
-  counterpartyGuid  String?
-  contractGuid      String?
-  warehouseGuid     String?
-  priceTypeGuid     String?
-  payload           Json
-  payloadHash       String
-  sourceUpdatedAt   DateTime?
-  lastImportedAt    DateTime               @default(now())
-  resolveStatus     OnecStageResolveStatus @default(PENDING)
-  lastResolveError  String?
-  resolvedAt        DateTime?
+  id               String                 @id @default(cuid())
+  sessionId        String
+  sourceKey        String
+  agreementGuid    String
+  counterpartyGuid String?
+  contractGuid     String?
+  warehouseGuid    String?
+  priceTypeGuid    String?
+  payload          Json
+  payloadHash      String
+  sourceUpdatedAt  DateTime?
+  lastImportedAt   DateTime               @default(now())
+  resolveStatus    OnecStageResolveStatus @default(PENDING)
+  lastResolveError String?
+  resolvedAt       DateTime?
 
-  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -232,21 +232,21 @@ model OnecStageAgreement {
 }
 
 model OnecStageContract {
-  id                String                 @id @default(cuid())
-  sessionId         String
-  sourceKey         String
-  guid              String
-  counterpartyGuid  String?
-  organizationGuid  String?
-  payload           Json
-  payloadHash       String
-  sourceUpdatedAt   DateTime?
-  lastImportedAt    DateTime               @default(now())
-  resolveStatus     OnecStageResolveStatus @default(PENDING)
-  lastResolveError  String?
-  resolvedAt        DateTime?
+  id               String                 @id @default(cuid())
+  sessionId        String
+  sourceKey        String
+  guid             String
+  counterpartyGuid String?
+  organizationGuid String?
+  payload          Json
+  payloadHash      String
+  sourceUpdatedAt  DateTime?
+  lastImportedAt   DateTime               @default(now())
+  resolveStatus    OnecStageResolveStatus @default(PENDING)
+  lastResolveError String?
+  resolvedAt       DateTime?
 
-  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -256,22 +256,22 @@ model OnecStageContract {
 }
 
 model OnecStageProductPrice {
-  id                String                 @id @default(cuid())
-  sessionId         String
-  sourceKey         String
-  guid              String?
-  productGuid       String
-  priceTypeGuid     String?
-  startDate         DateTime?
-  payload           Json
-  payloadHash       String
-  sourceUpdatedAt   DateTime?
-  lastImportedAt    DateTime               @default(now())
-  resolveStatus     OnecStageResolveStatus @default(PENDING)
-  lastResolveError  String?
-  resolvedAt        DateTime?
+  id               String                 @id @default(cuid())
+  sessionId        String
+  sourceKey        String
+  guid             String?
+  productGuid      String
+  priceTypeGuid    String?
+  startDate        DateTime?
+  payload          Json
+  payloadHash      String
+  sourceUpdatedAt  DateTime?
+  lastImportedAt   DateTime               @default(now())
+  resolveStatus    OnecStageResolveStatus @default(PENDING)
+  lastResolveError String?
+  resolvedAt       DateTime?
 
-  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -281,24 +281,24 @@ model OnecStageProductPrice {
 }
 
 model OnecStageSpecialPrice {
-  id                String                 @id @default(cuid())
-  sessionId         String
-  sourceKey         String
-  guid              String?
-  productGuid       String
-  counterpartyGuid  String?
-  agreementGuid     String?
-  priceTypeGuid     String?
-  startDate         DateTime?
-  payload           Json
-  payloadHash       String
-  sourceUpdatedAt   DateTime?
-  lastImportedAt    DateTime               @default(now())
-  resolveStatus     OnecStageResolveStatus @default(PENDING)
-  lastResolveError  String?
-  resolvedAt        DateTime?
+  id               String                 @id @default(cuid())
+  sessionId        String
+  sourceKey        String
+  guid             String?
+  productGuid      String
+  counterpartyGuid String?
+  agreementGuid    String?
+  priceTypeGuid    String?
+  startDate        DateTime?
+  payload          Json
+  payloadHash      String
+  sourceUpdatedAt  DateTime?
+  lastImportedAt   DateTime               @default(now())
+  resolveStatus    OnecStageResolveStatus @default(PENDING)
+  lastResolveError String?
+  resolvedAt       DateTime?
 
-  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -310,26 +310,26 @@ model OnecStageSpecialPrice {
 }
 
 model OnecStageStock {
-  id                String                 @id @default(cuid())
-  sessionId         String
-  sourceKey         String
-  productGuid       String
-  warehouseGuid     String
-  organizationGuid  String?
-  seriesGuid        String?
-  seriesNumber      String?
+  id                   String                 @id @default(cuid())
+  sessionId            String
+  sourceKey            String
+  productGuid          String
+  warehouseGuid        String
+  organizationGuid     String?
+  seriesGuid           String?
+  seriesNumber         String?
   seriesProductionDate DateTime?
-  seriesExpiresAt   DateTime?
-  updatedAt         DateTime?
-  payload           Json
-  payloadHash       String
-  sourceUpdatedAt   DateTime?
-  lastImportedAt    DateTime               @default(now())
-  resolveStatus     OnecStageResolveStatus @default(PENDING)
-  lastResolveError  String?
-  resolvedAt        DateTime?
+  seriesExpiresAt      DateTime?
+  updatedAt            DateTime?
+  payload              Json
+  payloadHash          String
+  sourceUpdatedAt      DateTime?
+  lastImportedAt       DateTime               @default(now())
+  resolveStatus        OnecStageResolveStatus @default(PENDING)
+  lastResolveError     String?
+  resolvedAt           DateTime?
 
-  session           OnecSyncSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session OnecSyncSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, sourceKey])
   @@index([sessionId, resolveStatus])
@@ -338,4 +338,3 @@ model OnecStageStock {
   @@index([organizationGuid])
   @@index([seriesGuid])
 }
-

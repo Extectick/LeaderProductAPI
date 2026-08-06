@@ -492,6 +492,28 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12, weight: 10.8 });
   });
 
+  it('forwards one historical receipt-price moment for the whole product batch', async () => {
+    nomenclatureMock.mockResolvedValueOnce(paged([{
+      guid: 'product-guid',
+      name: 'Товар',
+      costPrice: 664.8,
+      isActive: true,
+    }]));
+
+    const items = await getLiveProductsByGuids({
+      productGuids: ['product-guid'],
+      organizationGuid: 'organization-guid',
+      receiptPriceAt: '2026-07-10T14:30:00',
+    });
+
+    expect(nomenclatureMock).toHaveBeenCalledTimes(1);
+    expect(nomenclatureMock).toHaveBeenCalledWith(expect.objectContaining({
+      guids: 'product-guid',
+      receiptPriceAt: '2026-07-10T14:30:00',
+    }));
+    expect(items[0].receiptPrice).toBe(664.8);
+  });
+
   it('filters 1/1 base-unit packages even when package unit guid differs from base unit guid', async () => {
     nomenclatureMock.mockResolvedValueOnce(
       paged([

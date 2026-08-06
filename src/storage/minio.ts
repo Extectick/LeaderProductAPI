@@ -338,6 +338,19 @@ export async function uploadBuffer(
   return { bucket: S3_BUCKET!, key, url, contentType };
 }
 
+export async function downloadBuffer(key: string) {
+  const result = await s3.send(
+    new GetObjectCommand({ Bucket: S3_BUCKET!, Key: key })
+  );
+  if (!result.Body) throw new Error(`S3 object has no body: ${key}`);
+  const bytes = await result.Body.transformToByteArray();
+  return {
+    body: Buffer.from(bytes),
+    contentType: result.ContentType || 'application/octet-stream',
+    contentLength: Number(result.ContentLength ?? bytes.length),
+  };
+}
+
 /** Удаление объекта в MinIO */
 export async function deleteObject(key: string) {
   await s3.send(
@@ -425,6 +438,7 @@ export default {
   presignPut,
   presignGet,
   uploadBuffer,
+  downloadBuffer,
   deleteObject,
   uploadMulterFile,
   saveAppealAttachment,

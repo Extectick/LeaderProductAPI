@@ -68,6 +68,22 @@ async function reconcileAppealsAnalyticsRbac(pool) {
   );
 }
 
+async function ensureClientOrdersSearchExtensions(pool) {
+  try {
+    await pool.query('CREATE EXTENSION IF NOT EXISTS pg_trgm;');
+    await pool.query('CREATE EXTENSION IF NOT EXISTS unaccent;');
+    console.log('[init] client-orders search extensions are ready (pg_trgm, unaccent)');
+  } catch (error) {
+    // The API still has a regular substring-search fallback for managed databases
+    // where the application role is not allowed to create extensions.
+    if (error && error.code === '42501') {
+      console.warn('[init] client-orders fuzzy search extensions skipped: insufficient database privileges');
+      return;
+    }
+    throw error;
+  }
+}
+
 async function main() {
   const initMode = process.env.DB_INIT_MODE || 'push'; // push | migrate
   const autoSeed = process.env.DB_AUTO_SEED !== '0';
@@ -147,6 +163,10 @@ async function main() {
       : 'npx prisma db push --schema ./prisma';
     run(pushCmd);
   }
+
+  // `prisma db push` does not execute raw SQL from migrations. Keep fuzzy
+  // search available after a clean database creation or backup restoration.
+  await ensureClientOrdersSearchExtensions(pool);
 
   async function tableHasRows(tableName) {
     try {

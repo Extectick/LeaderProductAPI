@@ -36,8 +36,17 @@ describe('client order 1C queue payload', () => {
       sourceUpdatedAt: new Date('2026-06-27T10:06:00.000Z'),
       organization: { guid: 'organization-guid', name: 'Организация', code: 'ORG', isActive: true },
       counterparty: { guid: 'counterparty-guid', name: 'Контрагент', inn: '5400000000', kpp: '540001001', isActive: true },
-      agreement: { guid: 'agreement-guid', name: 'Соглашение', isActive: true },
-      contract: { guid: 'contract-guid', number: 'Д-1', date: null, isActive: true },
+      agreement: { guid: 'agreement-guid', name: 'Соглашение', isActive: true, priceIncludesVat: true },
+      contract: {
+        guid: 'contract-guid',
+        number: 'Д-1',
+        date: null,
+        isActive: true,
+        vatTaxation: 'Продажа облагается НДС',
+        vatRate: '20%',
+        vatDefinedInDocument: false,
+        activityDirectionGuid: 'activity-direction-guid',
+      },
       warehouse: { guid: 'warehouse-guid', name: 'Склад', isActive: true, isDefault: true, isPickup: false },
       deliveryAddress: { guid: 'address-guid', name: 'Адрес', fullAddress: 'Новосибирск', isActive: true },
       createdByUser: {
@@ -134,6 +143,17 @@ describe('client order 1C queue payload', () => {
         guid: 'manager-guid',
         physicalPersonGuid: 'physical-person-guid',
         name: 'Борховецкий Алексей',
+      },
+      agreement: {
+        guid: 'agreement-guid',
+        priceIncludesVat: true,
+      },
+      contract: {
+        guid: 'contract-guid',
+        vatTaxation: 'Продажа облагается НДС',
+        vatRate: '20%',
+        vatDefinedInDocument: false,
+        activityDirectionGuid: 'activity-direction-guid',
       },
       items: [
         {

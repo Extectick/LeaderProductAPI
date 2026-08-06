@@ -822,6 +822,9 @@ export const handleOrderAck = async (req: Request, res: Response) => {
     }
 
     const nextStatus = parsed.status ?? OrderStatus.SENT_TO_1C;
+    const postingError = parsed.isPostedIn1c === false
+      ? parsed.last1cError?.trim() || 'Документ сохранен в 1С, но не проведен.'
+      : null;
     await prisma.$transaction(async (tx) => {
       const nextRevision = order.revision + 1;
       await tx.order.update({
@@ -836,7 +839,13 @@ export const handleOrderAck = async (req: Request, res: Response) => {
           lastStatusSyncAt: syncedAt,
           exportAttempts: { increment: 1 },
           lastExportError: null,
-          last1cError: null,
+          last1cError: postingError,
+          isPostedIn1c: parsed.isPostedIn1c ?? undefined,
+          postedAt1c: parsed.isPostedIn1c === true
+            ? parsed.postedAt1c ?? syncedAt
+            : parsed.isPostedIn1c === false
+              ? null
+              : undefined,
           lastSyncedAt: syncedAt,
           sourceUpdatedAt: parsed.sourceUpdatedAt ?? syncedAt,
         },
@@ -845,12 +854,19 @@ export const handleOrderAck = async (req: Request, res: Response) => {
         orderId: order.id,
         revision: nextRevision,
         source: OrderEventSource.ONEC_ACK,
-        eventType: 'ONEC_ORDER_ACK_OK',
+        eventType: postingError ? 'ONEC_ORDER_ACK_SAVED_NOT_POSTED' : 'ONEC_ORDER_ACK_OK',
         payload: {
           status: nextStatus,
           number1c: parsed.number1c ?? null,
           date1c: parsed.date1c?.toISOString?.() ?? null,
           sentTo1cAt: (parsed.sentTo1cAt ?? syncedAt).toISOString(),
+          isPostedIn1c: parsed.isPostedIn1c ?? null,
+          postedAt1c: parsed.postedAt1c?.toISOString?.() ?? null,
+          saveResult: parsed.saveResult ?? null,
+          postingError,
+          vatTaxation: parsed.vatTaxation ?? null,
+          vatCalculationSource: parsed.vatCalculationSource ?? null,
+          priceIncludesVat: parsed.priceIncludesVat ?? null,
         },
       });
     });
@@ -863,7 +879,7 @@ export const handleOrderAck = async (req: Request, res: Response) => {
       number1c: parsed.number1c ?? null,
     });
 
-    return res.json({ success: true, acknowledged: true, status: nextStatus });
+    return res.json({ success: true, acknowledged: true, status: nextStatus, isPostedIn1c: parsed.isPostedIn1c, postingError });
   } catch (error) {
     if (error instanceof ZodError) {
       await safeFailSyncRun(runId, error, baseMeta);

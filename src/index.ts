@@ -35,6 +35,10 @@ import {
   startClientOrdersExportWorker,
   stopClientOrdersExportWorker,
 } from './services/clientOrdersExportWorker';
+import {
+  startClientOrderInvoiceWorker,
+  stopClientOrderInvoiceWorker,
+} from './services/clientOrderInvoiceWorker';
 import { connectRedis, disconnectRedis, getRedis } from './lib/redis';
 import { cacheByUrl } from './middleware/cache';
 import { markUserOffline, markUserOnline } from './services/presenceService';
@@ -474,6 +478,7 @@ if (ENV !== 'test') {
     // 4) Запускаем фоновые задачи приложения
     startScheduledJobs();
     startClientOrdersExportWorker();
+    startClientOrderInvoiceWorker();
 
     // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
     if (isTelegramBotConfigured()) {
@@ -526,6 +531,7 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
   stopClientOrdersExportWorker();
+  stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});
@@ -537,6 +543,7 @@ process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
   stopClientOrdersExportWorker();
+  stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});
   await prisma.$disconnect().catch(() => {});

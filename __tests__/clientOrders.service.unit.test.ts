@@ -1,10 +1,62 @@
-import { OrderStatus, OrderSyncState } from '@prisma/client';
+import { OrderStatus, OrderSyncState, Prisma } from '@prisma/client';
 
 import {
+  buildStoredClientOrderCopyItemData,
   normalizeClientOrderPublicError,
   resolveActiveTrackingOrderSnapshot,
   resolveUpdatedOrderQueueState,
 } from '../src/modules/clientOrders/clientOrders.service';
+
+describe('clientOrders copy preparation', () => {
+  const copiedAt = new Date('2026-08-03T06:00:00.000Z');
+  const sourceLine = {
+    lineGuid: 'old-line-guid',
+    productId: 'product-1',
+    packageId: 'package-1',
+    unitId: 'unit-1',
+    priceTypeId: 'price-type-1',
+    quantity: new Prisma.Decimal(5),
+    quantityBase: new Prisma.Decimal(5),
+    basePrice: new Prisma.Decimal(120),
+    price: new Prisma.Decimal(120),
+    isManualPrice: false,
+    manualPrice: null,
+    priceSource: 'product-prices:Special',
+    isCancelled: true,
+    discountPercent: null,
+    appliedDiscountPercent: null,
+    lineAmount: new Prisma.Decimal(600),
+    comment: 'copy me',
+  };
+
+  it('creates an independent active line and leaves automatic price empty for repricing', () => {
+    const copy = buildStoredClientOrderCopyItemData(sourceLine, copiedAt);
+
+    expect(copy.lineGuid).not.toBe(sourceLine.lineGuid);
+    expect(copy.productId).toBe(sourceLine.productId);
+    expect(copy.priceTypeId).toBe(sourceLine.priceTypeId);
+    expect(copy.basePrice).toBeNull();
+    expect(copy.price.toString()).toBe('0');
+    expect(copy.priceSource).toBeNull();
+    expect(copy.isCancelled).toBe(false);
+    expect(copy.cancelReason).toBeNull();
+  });
+
+  it('preserves an explicitly entered manual price without requiring a price type', () => {
+    const copy = buildStoredClientOrderCopyItemData({
+      ...sourceLine,
+      isManualPrice: true,
+      manualPrice: new Prisma.Decimal(135.5),
+      price: new Prisma.Decimal(135.5),
+      lineAmount: new Prisma.Decimal(677.5),
+    }, copiedAt);
+
+    expect(copy.priceTypeId).toBeNull();
+    expect(copy.isManualPrice).toBe(true);
+    expect(copy.manualPrice?.toString()).toBe('135.5');
+    expect(copy.price.toString()).toBe('135.5');
+  });
+});
 
 describe('clientOrders service state machine helpers', () => {
   it('queues already exported orders with both status and syncState', () => {

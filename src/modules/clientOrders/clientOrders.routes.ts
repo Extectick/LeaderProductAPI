@@ -28,7 +28,13 @@ import {
   clientOrdersReferenceDataQuerySchema,
   clientOrdersWarehousesQuerySchema,
   orderGuidParamsSchema,
+  orderInvoiceParamsSchema,
 } from './clientOrders.schemas';
+import {
+  downloadClientOrderInvoice,
+  listClientOrderInvoices,
+  requestClientOrderInvoice,
+} from './clientOrderInvoices.service';
 import {
   cancelClientOrder,
   ClientOrdersError,
@@ -387,6 +393,52 @@ router.post('/product-images/cleanup', authorizePermissions(['manage_client_orde
     return res.json(successResponse(result, 'Очистка старых фотографий номенклатуры выполнена'));
   } catch (err) {
     return handleError(res, err, 'Ошибка очистки старых фотографий номенклатуры');
+  }
+});
+
+router.get('/:guid/invoices', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await listClientOrderInvoices(params.data.guid, req.user!.userId);
+    return res.json(successResponse(result, 'Счета заказа клиента'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения счетов заказа клиента');
+  }
+});
+
+router.post('/:guid/invoices/request', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderGuidParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await requestClientOrderInvoice(params.data.guid, req.user!.userId);
+    return res.status(202).json(successResponse(result, result.message));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка запроса счёта заказа клиента');
+  }
+});
+
+router.get('/:guid/invoices/:invoiceId/download', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = orderInvoiceParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const file = await downloadClientOrderInvoice(params.data.guid, params.data.invoiceId, req.user!.userId);
+    const asciiFallback = file.fileName.replace(/[^\x20-\x7E]+/g, '_').replace(/["\\]/g, '_');
+    res.setHeader('Content-Type', file.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(file.fileName)}`
+    );
+    res.setHeader('Content-Length', String(file.body.length));
+    return res.send(file.body);
+  } catch (err) {
+    return handleError(res, err, 'Ошибка скачивания счёта заказа клиента');
   }
 });
 

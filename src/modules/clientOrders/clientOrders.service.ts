@@ -200,6 +200,8 @@ const clientOrderSummarySelect = {
   last1cError: true,
   isPostedIn1c: true,
   hasRealization: true,
+  invoiceRequested: true,
+  createdByUserId: true,
   realizationDetectedAt: true,
   cancelRequestedAt: true,
   createdAt: true,
@@ -208,6 +210,10 @@ const clientOrderSummarySelect = {
   organization: { select: { guid: true, name: true, code: true, isActive: true } },
   warehouse: { select: { guid: true, name: true, code: true } },
   priceType: { select: { guid: true, name: true } },
+  invoices: {
+    orderBy: [{ updatedAt: 'desc' as const }, { version: 'desc' as const }],
+    select: { state: true, waitReason: true, lastError: true, version: true, s3Key: true },
+  },
   items: { where: { isCancelled: false }, select: { id: true } },
   _count: { select: { items: true } },
 } satisfies Prisma.OrderSelect;
@@ -409,7 +415,30 @@ function resolveQueuePosition(
   return queuePositions?.get(queueMapKey(order.guid)) ?? null;
 }
 
+function mapInvoiceArtifactSummary(order: Pick<ClientOrderSummaryRecord, 'invoices'>, invoiceRequested: boolean) {
+  const activeInvoices = order.invoices.filter((invoice) => !['SUPERSEDED', 'CANCELLED'].includes(invoice.state));
+  const latestInvoice = activeInvoices[0] ?? null;
+  const latestInvoiceVersion = activeInvoices.reduce((max, invoice) => Math.max(max, invoice.version), 0) || null;
+  const invoiceDownloadAvailable = activeInvoices.some((invoice) => Boolean(invoice.s3Key));
+  let invoiceState = invoiceRequested ? (latestInvoice?.state ?? 'WAITING') : 'NOT_REQUESTED';
+  if (invoiceDownloadAvailable && !invoiceRequested) {
+    invoiceState = 'AVAILABLE';
+  } else if (latestInvoice && !invoiceRequested) {
+    // Ручной запрос не включает авторассылку, но его ожидание должно быть
+    // видно независимо от персональной настройки менеджера.
+    invoiceState = latestInvoice.state;
+  }
+  return {
+    invoiceState,
+    invoiceWaitReason: latestInvoice?.waitReason ?? latestInvoice?.lastError ?? null,
+    latestInvoiceVersion,
+    invoiceCount: activeInvoices.length,
+    invoiceDownloadAvailable,
+  };
+}
+
 function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?: Map<string, number>) {
+  const invoiceSummary = mapInvoiceArtifactSummary(order, order.invoiceRequested);
   return {
     guid: order.guid,
     appGuid: order.guid,
@@ -437,6 +466,8 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     last1cError: normalizeClientOrderPublicError(order.last1cError),
     isPostedIn1c: order.isPostedIn1c,
     hasRealization: order.hasRealization,
+    invoiceRequested: order.invoiceRequested,
+    ...invoiceSummary,
     realizationDetectedAt: order.realizationDetectedAt,
     cancelRequestedAt: order.cancelRequestedAt,
     counterparty: order.counterparty,
@@ -525,6 +556,7 @@ function shouldOpenClientOrdersOnecCircuit(error: unknown) {
 
 const DEFAULT_ORDER_CURRENCY = 'RUB';
 const SMART_SEARCH_TRIGRAM_THRESHOLD = 0.18;
+const SMART_SEARCH_WORD_THRESHOLD = 0.4;
 const ACTIVE_AGREEMENT_STATUS = 'Действует';
 const ACTIVE_CONTRACT_STATUS = 'Действует';
 const CLOSED_CONTRACT_STATUS = 'Закрыт';
@@ -2992,15 +3024,33 @@ function liveOrderKey(order: Pick<LiveClientOrder, 'appGuid' | 'number1c'>) {
   };
 }
 
-function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRecord | null, queuePositions?: Map<string, number>) {
-  if (!local) {
+function mapMergedLiveOrder(
+  order: LiveClientOrder,
+  local?: ClientOrderSummaryRecord | null,
+  queuePositions?: Map<string, number>,
+  invoiceSource?: ClientOrderSummaryRecord | null
+) {
+  if (!local && !invoiceSource) {
     return {
       ...order,
       readOnly: true,
       readOnlyReason: order.readOnlyReason || 'Документ 1С открыт только для просмотра в приложении.',
     };
   }
+  const sharedInvoiceSummary = invoiceSource
+    ? mapInvoiceArtifactSummary(invoiceSource, local?.invoiceRequested ?? false)
+    : null;
+  if (!local) {
+    return {
+      ...order,
+      invoiceRequested: false,
+      ...(sharedInvoiceSummary ?? {}),
+      readOnly: true,
+      readOnlyReason: order.readOnlyReason || 'Документ 1С открыт только для просмотра в приложении.',
+    };
+  }
   const hasRealization = order.hasRealization || local.hasRealization;
+  const localSummary = mapClientOrderSummary(local, queuePositions);
   return {
     ...order,
     guid: local.guid,
@@ -3019,6 +3069,12 @@ function mapMergedLiveOrder(order: LiveClientOrder, local?: ClientOrderSummaryRe
     deliveryMethod: local.deliveryMethod ?? order.deliveryMethod,
     cancelRequestedAt: local.cancelRequestedAt,
     hasRealization,
+    invoiceRequested: local.invoiceRequested,
+    invoiceState: sharedInvoiceSummary?.invoiceState ?? localSummary.invoiceState,
+    invoiceWaitReason: sharedInvoiceSummary?.invoiceWaitReason ?? localSummary.invoiceWaitReason,
+    latestInvoiceVersion: sharedInvoiceSummary?.latestInvoiceVersion ?? localSummary.latestInvoiceVersion,
+    invoiceCount: sharedInvoiceSummary?.invoiceCount ?? localSummary.invoiceCount,
+    invoiceDownloadAvailable: sharedInvoiceSummary?.invoiceDownloadAvailable ?? localSummary.invoiceDownloadAvailable,
     realizationDetectedAt: local.realizationDetectedAt ?? null,
     readOnly: hasRealization,
     readOnlyReason: hasRealization
@@ -3219,6 +3275,24 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
         select: clientOrderSummarySelect,
       })
     : [];
+  // PDF относится к документу 1С, а не к пользователю, который когда-то
+  // создал локальную запись. Загружаем артефакт у любой связанной записи,
+  // но только для уже разрешённых текущему менеджеру live-документов.
+  // Персональный признак авторассылки при этом не наследуется.
+  const matchingInvoiceLocals = liveAppGuids.length || liveNumbers.length
+    ? await prisma.order.findMany({
+        where: {
+          source: OrderSource.MANAGER_APP,
+          invoices: { some: { state: { notIn: ['SUPERSEDED', 'CANCELLED'] } } },
+          OR: [
+            ...(liveAppGuids.length ? [{ guid: { in: liveAppGuids } }] : []),
+            ...(liveNumbers.length ? [{ number1c: { in: liveNumbers } }] : []),
+          ],
+        },
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        select: clientOrderSummarySelect,
+      })
+    : [];
   const localByAppGuid = new Map(matchingLocals.map((item) => [localOrderKey(item).appGuid, item]));
   const localByNumber = new Map(
     matchingLocals.flatMap((item) => {
@@ -3226,6 +3300,13 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
       return number1c ? [[number1c, item] as const] : [];
     })
   );
+  const invoiceLocalByAppGuid = new Map<string, ClientOrderSummaryRecord>();
+  const invoiceLocalByNumber = new Map<string, ClientOrderSummaryRecord>();
+  for (const item of matchingInvoiceLocals) {
+    const key = localOrderKey(item);
+    if (key.appGuid && !invoiceLocalByAppGuid.has(key.appGuid)) invoiceLocalByAppGuid.set(key.appGuid, item);
+    if (key.number1c && !invoiceLocalByNumber.has(key.number1c)) invoiceLocalByNumber.set(key.number1c, item);
+  }
 
   const mappedPinned = query.offset === 0 ? pinnedItems.map((item) => mapClientOrderSummary(item, queuePositions)) : [];
   const mappedLive = liveItems.flatMap((item) => {
@@ -3234,7 +3315,10 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
       return [];
     }
     const local = (key.appGuid ? localByAppGuid.get(key.appGuid) : undefined) ?? (key.number1c ? localByNumber.get(key.number1c) : undefined) ?? null;
-    return [mapMergedLiveOrder(item, local, queuePositions)];
+    const invoiceSource = (key.appGuid ? invoiceLocalByAppGuid.get(key.appGuid) : undefined)
+      ?? (key.number1c ? invoiceLocalByNumber.get(key.number1c) : undefined)
+      ?? local;
+    return [mapMergedLiveOrder(item, local, queuePositions, invoiceSource)];
   });
   const filteredLive = mappedLive.filter((item) => orderMatchesListQuery(item as LiveClientOrder & {
     origin?: string | null;
@@ -3352,6 +3436,13 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             lastExportError: normalizeClientOrderPublicError(order.lastExportError),
             last1cError: normalizeClientOrderPublicError(order.last1cError),
             exportValidation,
+            invoiceRequested: mapped.invoiceRequested,
+            invoiceState: mapped.invoiceState,
+            invoiceWaitReason: mapped.invoiceWaitReason,
+            latestInvoiceVersion: mapped.latestInvoiceVersion,
+            invoiceCount: mapped.invoiceCount,
+            invoiceDownloadAvailable: mapped.invoiceDownloadAvailable,
+            invoices: mapped.invoices,
             hasRealization: liveDetail.hasRealization || order.hasRealization,
             realizationDetectedAt: order.realizationDetectedAt,
             readOnly: liveDetail.hasRealization || order.hasRealization,
@@ -3816,7 +3907,7 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
 }
 
 async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDefaultsQuery) {
-  const [settings, organization, counterparty, rememberedDefaults, defaultWarehouse] = await Promise.all([
+  const [settings, organization, counterparty, rememberedDefaults, defaultWarehouse, invoiceRequested] = await Promise.all([
     getRawClientOrderSettings(userId),
     prisma.organization.findFirst({
       where: { guid: query.organizationGuid, isActive: true },
@@ -3899,6 +3990,7 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
       orderBy: [{ name: 'asc' }],
       select: { guid: true, name: true, code: true, isDefault: true, isPickup: true, isActive: true },
     }),
+    getInvoicePreference(userId, query.counterpartyGuid),
   ]);
 
   if (!organization) {
@@ -3984,6 +4076,7 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
     deliveryDateIssue: deliveryDateResolution.issue,
     deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
     discountsEnabled: false,
+    invoiceRequested,
   };
 }
 
@@ -4036,7 +4129,10 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
     } catch {
       // Defaults are still useful to the app even if local snapshot caching failed.
     }
-    return mapLiveDefaults(defaults, deliveryDateResolution);
+    return {
+      ...mapLiveDefaults(defaults, deliveryDateResolution),
+      invoiceRequested: await getInvoicePreference(userId, query.counterpartyGuid),
+    };
   } catch (error) {
     if (isOnecLpAppError(error) || (error instanceof ClientOrdersError && error.status === 502)) {
       try {
@@ -4404,6 +4500,7 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
           OR lower(coalesce(p.sku, '')) LIKE ${patterns.contains} ESCAPE '\\'
           OR lower(coalesce(p.name, '')) LIKE ${patterns.contains} ESCAPE '\\'
           OR similarity(lower(unaccent(coalesce(p.name, ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
+          OR word_similarity(lower(unaccent(${search})), lower(unaccent(coalesce(p.name, '')))) >= ${SMART_SEARCH_WORD_THRESHOLD}
         )
       ORDER BY
         CASE
@@ -4420,6 +4517,7 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
         END ASC,
         GREATEST(
           similarity(lower(unaccent(coalesce(p.name, ''))), lower(unaccent(${search}))),
+          word_similarity(lower(unaccent(${search})), lower(unaccent(coalesce(p.name, '')))),
           similarity(lower(coalesce(p.code, '')), ${patterns.exact}),
           similarity(lower(coalesce(p.article, '')), ${patterns.exact}),
           similarity(lower(coalesce(p.sku, '')), ${patterns.exact})
@@ -4441,6 +4539,7 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
           OR lower(coalesce(p.sku, '')) LIKE ${patterns.contains} ESCAPE '\\'
           OR lower(coalesce(p.name, '')) LIKE ${patterns.contains} ESCAPE '\\'
           OR similarity(lower(unaccent(coalesce(p.name, ''))), lower(unaccent(${search}))) >= ${SMART_SEARCH_TRIGRAM_THRESHOLD}
+          OR word_similarity(lower(unaccent(${search})), lower(unaccent(coalesce(p.name, '')))) >= ${SMART_SEARCH_WORD_THRESHOLD}
         )
     `);
 
@@ -4454,6 +4553,64 @@ async function getRankedProducts(query: ClientOrdersProductsQuery, search: strin
     if (!isSmartSearchExtensionError(error)) throw error;
     return getProductsFallback(query, search);
   }
+}
+
+function liveProductHasAvailableStock(product: LiveProduct) {
+  const rawAvailable = product.stock?.available
+    ?? product.stock?.freeAvailable
+    ?? product.stock?.quantity;
+  return rawAvailable !== null && rawAvailable !== undefined && Number(rawAvailable) > 0;
+}
+
+async function getFuzzyLiveProducts(
+  query: ClientOrdersProductsQuery,
+  search: string,
+  managerGuid?: string | null
+): Promise<{ items: LiveProduct[]; total: number; hasMore: boolean }> {
+  // Search candidates in the synchronized catalog, but always re-read commercial
+  // data from 1C so that typo tolerance cannot make prices or stock stale.
+  const candidateLimit = Math.min(200, Math.max(query.limit * 4, 50));
+  const ranked = await getRankedProducts(
+    { ...query, inStockOnly: false, limit: candidateLimit },
+    search
+  );
+  if (!ranked.items.length) {
+    return { items: [], total: ranked.total, hasMore: false };
+  }
+
+  const body: ManagerAwareBatchProductsBody = {
+    productGuids: ranked.items.map((item) => item.guid),
+    organizationGuid: query.organizationGuid,
+    counterpartyGuid: query.counterpartyGuid,
+    agreementGuid: query.agreementGuid,
+    warehouseGuid: query.warehouseGuid,
+    priceTypeGuid: query.priceTypeGuid,
+    ...(managerGuid ? { managerGuid } : {}),
+  };
+  const liveItems = await onecLive(
+    () => readThroughClientOrdersCache(
+      'products:fuzzy-batch',
+      { ...body, productGuids: [...body.productGuids].sort() },
+      CLIENT_ORDERS_CACHE_TTL.productsBatch,
+      () => getLiveProductsByGuids(body),
+      { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
+    ),
+    'Ошибка получения найденной номенклатуры из 1С',
+    { allowCachedWhenCircuitOpen: true }
+  );
+  const liveByGuid = new Map(liveItems.map((item) => [item.guid.toLocaleLowerCase('ru'), item]));
+  const orderedItems = ranked.items.flatMap((candidate) => {
+    const item = liveByGuid.get(candidate.guid.toLocaleLowerCase('ru'));
+    if (!item || item.isActive === false) return [];
+    if (query.inStockOnly && !liveProductHasAvailableStock(item)) return [];
+    return [item];
+  });
+
+  return {
+    items: orderedItems,
+    total: ranked.total,
+    hasMore: ranked.total > ranked.offset + ranked.items.length,
+  };
 }
 
 export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, userId?: number | null) {
@@ -4470,6 +4627,34 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
     'Ошибка получения номенклатуры из 1С',
     { allowCachedWhenCircuitOpen: true }
   );
+
+  const search = normalizeSearch(query.search);
+  if (search && search.length >= 3 && result.items.length < query.limit) {
+    try {
+      const fuzzy = await getFuzzyLiveProducts(query, search, managerGuid);
+      const knownGuids = new Set(result.items.map((item) => item.guid.toLocaleLowerCase('ru')));
+      const mergedItems = [
+        ...result.items,
+        ...fuzzy.items.filter((item) => !knownGuids.has(item.guid.toLocaleLowerCase('ru'))),
+      ].slice(0, query.limit);
+      const primaryHasMore = result.total > query.offset + result.items.length || result.hasMore === true;
+      const hasMore = primaryHasMore || fuzzy.hasMore;
+
+      return {
+        ...result,
+        items: await enrichProductsWithImages(mergedItems),
+        total: Math.max(
+          result.total,
+          query.offset + mergedItems.length + (hasMore ? 1 : 0)
+        ),
+        hasMore,
+      };
+    } catch (error) {
+      // Smart search is an enhancement. A missing extension, stale local catalog,
+      // or a failed batch hydration must not break the regular 1C search.
+      console.warn('[client-orders] Fuzzy product search fallback failed:', error instanceof Error ? error.message : error);
+    }
+  }
 
   return {
     ...result,
@@ -4788,6 +4973,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        invoiceRequested: body.invoiceRequested,
         trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
         trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
         currency: DEFAULT_ORDER_CURRENCY,
@@ -4819,11 +5005,14 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        invoiceRequested: body.invoiceRequested,
         trackingSnapshot: trackingSnapshot?.snapshot ?? null,
         generalDiscountPercent: body.generalDiscountPercent ?? null,
         items: prepared.items.map((item) => item.snapshot),
       } as Prisma.InputJsonValue,
     });
+
+    await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
 
     return order.guid!;
   });
@@ -4864,6 +5053,7 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
     currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
     saveReason: 'manual',
     generalDiscountPercent: source.generalDiscountPercent ?? null,
+    invoiceRequested: source.invoiceRequested ?? false,
     items: items.map((item: any) => {
       const productGuid = getCopyEntityGuid(item.product, 'товар');
       const isManualPrice = !!item.isManualPrice || item.manualPrice !== null && item.manualPrice !== undefined;
@@ -4881,6 +5071,156 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
       };
     }),
   };
+}
+
+export function buildStoredClientOrderCopyItemData(item: any, sourceUpdatedAt: Date) {
+  const keepsManualPrice = item.isManualPrice === true && item.manualPrice !== null && item.manualPrice !== undefined;
+  return {
+    lineGuid: randomUUID(),
+    productId: item.productId,
+    packageId: item.packageId ?? null,
+    unitId: item.unitId ?? null,
+    priceTypeId: keepsManualPrice ? null : item.priceTypeId ?? null,
+    quantity: item.quantity,
+    quantityBase: item.quantityBase ?? null,
+    // Automatic commercial data belongs to the old document. A copy must be
+    // created even when that data is no longer valid and then priced afresh.
+    basePrice: keepsManualPrice ? item.basePrice ?? item.manualPrice : null,
+    price: keepsManualPrice ? item.price : new Prisma.Decimal(0),
+    isManualPrice: keepsManualPrice,
+    manualPrice: keepsManualPrice ? item.manualPrice : null,
+    priceSource: keepsManualPrice ? item.priceSource ?? 'manual' : null,
+    isCancelled: false,
+    cancelReasonGuid: null,
+    cancelReasonName: null,
+    cancelReason: null,
+    cancelledAmount: null,
+    discountPercent: item.discountPercent ?? null,
+    appliedDiscountPercent: keepsManualPrice ? item.appliedDiscountPercent ?? null : null,
+    lineAmount: keepsManualPrice ? item.lineAmount ?? null : new Prisma.Decimal(0),
+    comment: item.comment ?? null,
+    sourceUpdatedAt,
+  };
+}
+
+async function copyStoredClientOrder(guid: string, userId: number) {
+  return prisma.$transaction(async (tx) => {
+    const source = await tx.order.findFirst({
+      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
+      select: {
+        guid: true,
+        revision: true,
+        counterpartyId: true,
+        agreementId: true,
+        contractId: true,
+        warehouseId: true,
+        deliveryAddressId: true,
+        organizationId: true,
+        priceTypeId: true,
+        comment: true,
+        deliveryDate: true,
+        paymentForm: true,
+        deliveryMethod: true,
+        currency: true,
+        generalDiscountPercent: true,
+        invoiceRequested: true,
+        items: {
+          orderBy: [{ createdAt: 'asc' }],
+          select: {
+            productId: true,
+            packageId: true,
+            unitId: true,
+            priceTypeId: true,
+            quantity: true,
+            quantityBase: true,
+            basePrice: true,
+            price: true,
+            isManualPrice: true,
+            manualPrice: true,
+            priceSource: true,
+            discountPercent: true,
+            appliedDiscountPercent: true,
+            lineAmount: true,
+            comment: true,
+          },
+        },
+      },
+    });
+    if (!source) return null;
+    const copiedAt = now();
+    const copiedGuid = randomUUID();
+    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
+    const copyItems = source.items.map((item) => buildStoredClientOrderCopyItemData(item, copiedAt));
+    const copied = await tx.order.create({
+      data: {
+        guid: copiedGuid,
+        source: OrderSource.MANAGER_APP,
+        revision: 1,
+        status: OrderStatus.DRAFT,
+        syncState: OrderSyncState.DRAFT,
+        counterpartyId: source.counterpartyId,
+        agreementId: source.agreementId,
+        contractId: source.contractId,
+        warehouseId: source.warehouseId,
+        deliveryAddressId: source.deliveryAddressId,
+        organizationId: source.organizationId,
+        priceTypeId: source.priceTypeId,
+        createdByUserId: userId,
+        comment: source.comment,
+        deliveryDate: source.deliveryDate,
+        paymentForm: source.paymentForm,
+        deliveryMethod: source.deliveryMethod,
+        currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
+        totalAmount: new Prisma.Decimal(0),
+        generalDiscountPercent: source.generalDiscountPercent,
+        invoiceRequested: source.invoiceRequested,
+        generalDiscountAmount: new Prisma.Decimal(0),
+        trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
+        trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
+        sourceUpdatedAt: copiedAt,
+        ...(copyItems.length ? { items: { create: copyItems } } : {}),
+      },
+      select: { id: true, guid: true, revision: true },
+    });
+
+    await appendOrderEvent(tx, {
+      orderId: copied.id,
+      revision: copied.revision,
+      source: OrderEventSource.APP_MANAGER,
+      eventType: 'CLIENT_ORDER_COPIED',
+      actorUserId: userId,
+      payload: {
+        copiedFromGuid: source.guid,
+        itemCount: copyItems.length,
+        automaticPricesReset: true,
+      },
+    });
+
+    await saveInvoicePreference(tx, userId, source.counterpartyId, source.invoiceRequested);
+
+    return copied.guid!;
+  });
+}
+
+async function saveInvoicePreference(
+  tx: Tx,
+  userId: number,
+  counterpartyId: string,
+  invoiceRequested: boolean
+) {
+  await tx.clientOrderInvoicePreference.upsert({
+    where: { userId_counterpartyId: { userId, counterpartyId } },
+    create: { userId, counterpartyId, invoiceRequested },
+    update: { invoiceRequested },
+  });
+}
+
+async function getInvoicePreference(userId: number, counterpartyGuid: string) {
+  const preference = await prisma.clientOrderInvoicePreference.findFirst({
+    where: { userId, counterparty: { guid: counterpartyGuid } },
+    select: { invoiceRequested: true },
+  });
+  return preference?.invoiceRequested ?? false;
 }
 
 export function resolveUpdatedOrderQueueState(currentStatus: OrderStatus) {
@@ -4948,6 +5288,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
+        invoiceRequested: body.invoiceRequested,
         ...(trackingSnapshot
           ? {
               trackingRoutePointId: trackingSnapshot.routePointId,
@@ -4985,12 +5326,15 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
           paymentForm: body.paymentForm ?? null,
           deliveryMethod: body.deliveryMethod ?? null,
+          invoiceRequested: body.invoiceRequested,
           trackingSnapshot: trackingSnapshot?.snapshot ?? null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,
           items: prepared.items.map((item) => item.snapshot),
         } as Prisma.InputJsonValue,
       });
     }
+
+    await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
   });
 
   return getClientOrderByGuid(guid, userId);
@@ -5403,15 +5747,12 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
   return getClientOrderByGuid(guid, userId);
 }
 
-export async function copyClientOrder(guid: string, userId: number, body: ClientOrderCopyBody = {}) {
-  if (body.revision !== undefined) {
-    const local = await prisma.order.findFirst({
-      where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
-      select: { revision: true },
-    });
-    if (local) assertRevision(local.revision, body.revision);
-  }
+export async function copyClientOrder(guid: string, userId: number, _body: ClientOrderCopyBody = {}) {
+  const storedCopyGuid = await copyStoredClientOrder(guid, userId);
+  if (storedCopyGuid) return getClientOrderByGuid(storedCopyGuid, userId);
 
+  // Orders that only exist in 1C still use live materialization because the API
+  // does not have local relation ids that can be cloned safely.
   const source = await getClientOrderByGuid(guid, userId);
   const payload = buildClientOrderCopyPayload(source);
   return createClientOrder(userId, payload);

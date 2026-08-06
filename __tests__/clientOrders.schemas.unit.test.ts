@@ -1,5 +1,6 @@
 import {
   clientOrderCreateSchema,
+  clientOrdersBatchProductsSchema,
   clientOrdersListQuerySchema,
   clientOrdersProductsQuerySchema,
 } from '../src/modules/clientOrders/clientOrders.schemas';
@@ -96,5 +97,38 @@ describe('client orders query schemas', () => {
 
     expect(parsed.status).toBe('CANCELLED');
     expect(parsed.number1c).toBe('НОУТ-073955');
+  });
+
+  it('accepts a historical receipt-price moment and rejects an invalid one', () => {
+    expect(clientOrdersBatchProductsSchema.parse({
+      productGuids: ['product-guid'],
+      receiptPriceAt: '2026-07-10T14:30:00',
+    }).receiptPriceAt).toBe('2026-07-10T14:30:00');
+
+    expect(clientOrdersBatchProductsSchema.safeParse({
+      productGuids: ['product-guid'],
+      receiptPriceAt: 'not-a-date',
+    }).success).toBe(false);
+  });
+
+  it('accepts saved but unposted 1C ack with VAT diagnostics', () => {
+    const parsed = orderAckSchema.parse({
+      secret: 'secret',
+      status: 'SENT_TO_1C',
+      number1c: 'НОУТ-086847',
+      isPostedIn1c: false,
+      saveResult: 'SAVED_NOT_POSTED',
+      last1cError: 'Документ сохранен, но проверка НДС не пройдена.',
+      vatTaxation: 'Продажа облагается НДС',
+      vatCalculationSource: 'ORGANIZATION',
+      priceIncludesVat: true,
+    });
+
+    expect(parsed).toMatchObject({
+      isPostedIn1c: false,
+      saveResult: 'SAVED_NOT_POSTED',
+      vatCalculationSource: 'ORGANIZATION',
+      priceIncludesVat: true,
+    });
   });
 });

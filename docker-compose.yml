@@ -7,10 +7,10 @@ services:
     env_file:
       - .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
       REDIS_URL: redis://redis:6379
-      DEBUG_REQUESTS: "1"
-      ALLOW_DEBUG_IN_PROD: "1"
+      DEBUG_REQUESTS: ${DEBUG_REQUESTS:-0}
+      ALLOW_DEBUG_IN_PROD: ${ALLOW_DEBUG_IN_PROD:-0}
     ports:
       - "3000:3000"
     depends_on:
@@ -123,7 +123,7 @@ services:
     env_file:
       - .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
     command: >
       sh -c "export DATABASE_URL=$$(node -e \"const u = new URL(process.env.DATABASE_URL); u.searchParams.delete('uselibpqcompat'); console.log(u.toString())\") &&
       npx prisma studio --port 5555 --browser none"
@@ -141,7 +141,7 @@ services:
     env_file:
       - .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
     command: sh -c "node dist/prisma/seed.js"
 
 volumes:

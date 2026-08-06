@@ -1,0 +1,11 @@
+[Unit]
+Description=Upload LeaderProduct PostgreSQL backups to S3 after scheduled dumps
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00
+Persistent=true
+RandomizedDelaySec=2min
+Unit=leader-db-backup-s3.service
+
+[Install]
+WantedBy=timers.target

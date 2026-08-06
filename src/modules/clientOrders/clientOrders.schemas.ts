@@ -135,6 +135,10 @@ export const orderGuidParamsSchema = z.object({
   guid: z.string().min(1),
 });
 
+export const orderInvoiceParamsSchema = orderGuidParamsSchema.extend({
+  invoiceId: z.string().min(1),
+});
+
 export const clientOrderReferenceDetailsParamsSchema = z.object({
   kind: z.enum(['organization', 'counterparty', 'agreement', 'contract', 'warehouse', 'delivery-address', 'price-type']),
   guid: z.string().trim().min(1),
@@ -189,6 +193,10 @@ export const clientOrdersBatchProductsSchema = z.object({
   agreementGuid: z.string().trim().min(1).optional(),
   warehouseGuid: z.string().trim().min(1).optional(),
   priceTypeGuid: z.string().trim().min(1).optional(),
+  receiptPriceAt: z.string().trim().max(64).refine(
+    (value) => !Number.isNaN(Date.parse(value)),
+    'Некорректная дата расчёта себестоимости'
+  ).optional(),
 });
 
 export const clientOrderProductImagesSyncSchema = z.object({
@@ -255,6 +263,7 @@ export const clientOrderCreateSchema = z.object({
   deliveryDate: nullableDate,
   paymentForm: nullableEnumCode,
   deliveryMethod: nullableEnumCode,
+  invoiceRequested: z.boolean().optional().default(false),
   comment: z.string().trim().max(2000).optional(),
   currency: z.string().trim().min(1).max(16).optional(),
   saveReason: saveReasonSchema,

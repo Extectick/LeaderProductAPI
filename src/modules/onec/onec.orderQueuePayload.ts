@@ -24,6 +24,7 @@ export const queuedOrderSelect = {
   isPostedIn1c: true,
   postedAt1c: true,
   hasRealization: true,
+  invoiceRequested: true,
   realizationDetectedAt: true,
   cancelRequestedAt: true,
   cancelReason: true,
@@ -33,10 +34,19 @@ export const queuedOrderSelect = {
     select: { guid: true, name: true, inn: true, kpp: true, isActive: true },
   },
   agreement: {
-    select: { guid: true, name: true, isActive: true },
+    select: { guid: true, name: true, isActive: true, priceIncludesVat: true },
   },
   contract: {
-    select: { guid: true, number: true, date: true, isActive: true },
+    select: {
+      guid: true,
+      number: true,
+      date: true,
+      isActive: true,
+      vatTaxation: true,
+      vatRate: true,
+      vatDefinedInDocument: true,
+      activityDirectionGuid: true,
+    },
   },
   warehouse: {
     select: { guid: true, name: true, isActive: true, isDefault: true, isPickup: true },
@@ -177,6 +187,7 @@ export function buildQueuedOrderPayload(order: QueuedOrderForExport) {
     isPostedIn1c: order.isPostedIn1c,
     postedAt1c: order.postedAt1c,
     hasRealization: order.hasRealization,
+    invoiceRequested: order.invoiceRequested,
     realizationDetectedAt: order.realizationDetectedAt,
     cancelRequestedAt: order.cancelRequestedAt,
     cancelReason: order.cancelReason,
