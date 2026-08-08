@@ -57,6 +57,19 @@ function getWriteTimeoutMs() {
   return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_WRITE_TIMEOUT_MS;
 }
 
+function slowRequestThresholdMs() {
+  const raw = Number(process.env.ONEC_LP_APP_SLOW_REQUEST_MS);
+  return Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : 3_000;
+}
+
+function reportSlowRequest(path: string, method: string, startedAt: number, timeoutMs: number) {
+  const elapsedMs = Date.now() - startedAt;
+  const thresholdMs = slowRequestThresholdMs();
+  if (thresholdMs > 0 && elapsedMs >= thresholdMs) {
+    console.warn('[onec-lp-app] slow request', { method, path, elapsedMs, timeoutMs });
+  }
+}
+
 function buildUrl(path: string, query?: OnecLpAppQuery) {
   const baseUrl = getRequiredEnv('ONEC_LP_APP_BASE_URL').replace(/\/+$/, '');
   const normalizedPath = path.replace(/^\/+/, '');
@@ -113,6 +126,7 @@ async function readResponsePayload(response: Response) {
 
 async function callOnecLpApp(path: string, options: { method?: string; query?: OnecLpAppQuery; body?: unknown; timeoutMs?: number } = {}) {
   const method = options.method ?? 'GET';
+  const startedAt = Date.now();
   const controller = new AbortController();
   const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
     ? Math.trunc(Number(options.timeoutMs))
@@ -151,6 +165,7 @@ async function callOnecLpApp(path: string, options: { method?: string; query?: O
     throw new OnecLpAppNetworkError(message);
   } finally {
     clearTimeout(timeout);
+    reportSlowRequest(path, method, startedAt, timeoutMs);
   }
 }
 
@@ -170,6 +185,7 @@ function buildBinaryHeaders(): Record<string, string> {
 }
 
 async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeoutMs = getTimeoutMs()) {
+  const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -212,6 +228,7 @@ async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeout
     throw new OnecLpAppNetworkError(message);
   } finally {
     clearTimeout(timeout);
+    reportSlowRequest(path, 'GET', startedAt, timeoutMs);
   }
 }
 
@@ -287,6 +304,10 @@ export function getOnecLpAppClientOrders(query: OnecLpAppQuery) {
   return callOnecLpApp('/client-orders', { query });
 }
 
+export function getOnecLpAppClientOrdersTodaySummary(query: OnecLpAppQuery) {
+  return callOnecLpApp('/client-orders/today-summary', { query });
+}
+
 export function getOnecLpAppClientOrder(documentGuid: string, query: OnecLpAppQuery = {}) {
   return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, { query });
 }
@@ -317,6 +338,7 @@ export type OnecClientOrderInvoiceQueueItem = {
   realizationGuid: string;
   realizationNumber?: string | null;
   realizationDate?: string | null;
+  paymentDueDate?: string | null;
   invoiceAmount?: number | string | null;
   currency?: string | null;
   counterpartyName?: string | null;

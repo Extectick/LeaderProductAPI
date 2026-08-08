@@ -6,6 +6,7 @@ import {
   getLiveContracts,
   getLiveCounterparties,
   getLiveClientOrders,
+  getLiveClientOrdersTodaySummary,
   getLiveDeliveryAddresses,
   getLiveOrganizations,
   getLivePriceTypes,
@@ -19,6 +20,7 @@ import {
   getOnecLpAppClientOrderDefaults,
   getOnecLpAppClientOrder,
   getOnecLpAppClientOrders,
+  getOnecLpAppClientOrdersTodaySummary,
   getOnecLpAppContracts,
   getOnecLpAppCounterparties,
   getOnecLpAppDeliveryAddresses,
@@ -34,6 +36,7 @@ jest.mock('../src/modules/onec/onec.lpApp.client', () => ({
   getOnecLpAppClientOrderDefaults: jest.fn(),
   getOnecLpAppClientOrder: jest.fn(),
   getOnecLpAppClientOrders: jest.fn(),
+  getOnecLpAppClientOrdersTodaySummary: jest.fn(),
   getOnecLpAppContracts: jest.fn(),
   getOnecLpAppCounterparties: jest.fn(),
   getOnecLpAppDeliveryAddresses: jest.fn(),
@@ -52,6 +55,7 @@ const agreementsMock = jest.mocked(getOnecLpAppAgreements);
 const clientOrderDefaultsMock = jest.mocked(getOnecLpAppClientOrderDefaults);
 const clientOrderMock = jest.mocked(getOnecLpAppClientOrder);
 const clientOrdersMock = jest.mocked(getOnecLpAppClientOrders);
+const clientOrdersTodaySummaryMock = jest.mocked(getOnecLpAppClientOrdersTodaySummary);
 const deliveryAddressesMock = jest.mocked(getOnecLpAppDeliveryAddresses);
 const priceTypesMock = jest.mocked(getOnecLpAppPriceTypes);
 const nomenclatureMock = jest.mocked(getOnecLpAppNomenclature);
@@ -129,6 +133,7 @@ describe('clientOrders 1C live adapter', () => {
       warehouseGuid: undefined,
       priceTypeGuid: undefined,
       inStockOnly: undefined,
+      debtStatus: 'all',
     });
     expect(result.limit).toBe(2);
     expect(result.offset).toBe(4);
@@ -368,6 +373,9 @@ describe('clientOrders 1C live adapter', () => {
         fullName: 'Контрагент полное',
         inn: '540000000001',
         kpp: '540001001',
+        hasDebt: true,
+        shipmentProhibited: true,
+        debtReason: 'Контрагент имеет просроченную задолженность',
       },
       agreement: {
         guid: 'agreement-guid',
@@ -408,7 +416,18 @@ describe('clientOrders 1C live adapter', () => {
       limit: 1,
       offset: 0,
     }));
-    expect(result.counterparty).toMatchObject({ inn: '540000000001', kpp: '540001001' });
+    expect(result.counterparty).toMatchObject({
+      inn: '540000000001',
+      kpp: '540001001',
+      hasDebt: true,
+      shipmentProhibited: true,
+      debtReason: 'Контрагент имеет просроченную задолженность',
+    });
+    expect(result).toMatchObject({
+      hasDebt: true,
+      shipmentProhibited: true,
+      debtReason: 'Контрагент имеет просроченную задолженность',
+    });
     expect(result.agreement).toMatchObject({
       guid: 'agreement-guid',
       organization: { guid: 'org-guid', name: 'Организация' },
@@ -490,6 +509,67 @@ describe('clientOrders 1C live adapter', () => {
       stock: { quantity: 37, reserved: 2, available: 35, freeAvailable: 15, myReserved: 20 },
     });
     expect(result.items[0].packages[0]).toMatchObject({ guid: 'package-guid', name: 'кор', multiplier: 12, weight: 10.8 });
+  });
+
+  it('forwards debtStatus in the single counterparty list request', async () => {
+    counterpartiesMock.mockResolvedValueOnce(paged([
+      { guid: 'counterparty-debt', name: 'Контрагент с задолженностью', hasDebt: true },
+    ]));
+
+    const result = await getLiveCounterparties({
+      limit: 25,
+      offset: 0,
+      includeInactive: false,
+      debtStatus: 'with_debt',
+    });
+
+    expect(counterpartiesMock).toHaveBeenCalledTimes(1);
+    expect(counterpartiesMock).toHaveBeenCalledWith(expect.objectContaining({ debtStatus: 'with_debt' }));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].hasDebt).toBe(true);
+  });
+
+  it('normalizes the daily manager summary returned by 1C', async () => {
+    clientOrdersTodaySummaryMock.mockResolvedValueOnce({
+      date: '2026-08-07',
+      ordersCount: '5',
+      clientsCount: 3,
+      totalAmount: '12 345,67',
+      profit: '2 100,50',
+      profitAvailable: true,
+      missingReceiptPriceCount: 0,
+      currency: 'RUB',
+      calculatedAt: '2026-08-07T12:00:00',
+    });
+
+    await expect(getLiveClientOrdersTodaySummary({ managerGuid: 'manager-guid', date: '2026-08-07' })).resolves.toEqual({
+      date: '2026-08-07',
+      ordersCount: 5,
+      clientsCount: 3,
+      totalAmount: 12_345.67,
+      profit: 2_100.5,
+      profitAvailable: true,
+      missingReceiptPriceCount: 0,
+      currency: 'RUB',
+      calculatedAt: '2026-08-07T12:00:00',
+    });
+    expect(clientOrdersTodaySummaryMock).toHaveBeenCalledWith({ managerGuid: 'manager-guid', date: '2026-08-07' });
+  });
+
+  it('does not expose partial profit when 1C reports missing receipt prices', async () => {
+    clientOrdersTodaySummaryMock.mockResolvedValueOnce({
+      ordersCount: 2,
+      clientsCount: 1,
+      totalAmount: 900,
+      profit: 900,
+      profitAvailable: false,
+      missingReceiptPriceCount: 1,
+    });
+
+    const result = await getLiveClientOrdersTodaySummary({ managerGuid: 'manager-guid', date: '2026-08-07' });
+    expect(result.profit).toBeNull();
+    expect(result.profitAvailable).toBe(false);
+    expect(result.missingReceiptPriceCount).toBe(1);
   });
 
   it('forwards one historical receipt-price moment for the whole product batch', async () => {
@@ -690,7 +770,13 @@ describe('clientOrders 1C live adapter', () => {
             paymentForm: 'Безналичная',
             deliveryMethod: 'Самовывоз',
             last1cError: 'Не удалось провести документ: недостаточно остатка.',
-            counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
+            counterparty: {
+              guid: 'counterparty-guid',
+              name: 'Контрагент',
+              hasDebt: true,
+              shipmentProhibited: true,
+              debtReason: 'Контрагент имеет просроченную задолженность',
+            },
             organization: { guid: 'org-guid', name: 'Организация' },
             warehouse: { guid: 'warehouse-guid', name: 'Склад' },
             totalAmount: 1250,
@@ -723,11 +809,20 @@ describe('clientOrders 1C live adapter', () => {
       number1c: '00-000123',
       paymentForm: 'Безналичная',
       deliveryMethod: 'Самовывоз',
+      hasDebt: true,
+      shipmentProhibited: true,
+      debtReason: 'Контрагент имеет просроченную задолженность',
       last1cError: 'Не удалось провести документ: недостаточно остатка.',
       syncState: 'SYNCED',
       status: 'CONFIRMED',
       readOnly: false,
-      counterparty: { guid: 'counterparty-guid', name: 'Контрагент' },
+      counterparty: {
+        guid: 'counterparty-guid',
+        name: 'Контрагент',
+        hasDebt: true,
+        shipmentProhibited: true,
+        debtReason: 'Контрагент имеет просроченную задолженность',
+      },
       itemsCount: 2,
     });
   });

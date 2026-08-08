@@ -9,6 +9,7 @@ import {
   clientOrderCopySchema,
   clientOrderCreateSchema,
   clientOrderDefaultsQuerySchema,
+  clientOrderInvoiceStatusesSchema,
   clientOrderProductImagesCleanupSchema,
   clientOrderProductImagesSyncSchema,
   clientOrderReferenceDetailsParamsSchema,
@@ -32,6 +33,7 @@ import {
 } from './clientOrders.schemas';
 import {
   downloadClientOrderInvoice,
+  listClientOrderInvoiceStatuses,
   listClientOrderInvoices,
   requestClientOrderInvoice,
 } from './clientOrderInvoices.service';
@@ -48,6 +50,7 @@ import {
   getClientOrderProductImagesStatus,
   getClientOrderReferenceDetails,
   getClientOrderSettings,
+  getClientOrdersTodaySummary,
   getClientOrdersAgreements,
   getClientOrdersContracts,
   getClientOrdersCounterparties,
@@ -122,6 +125,15 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
     );
   } catch (err) {
     return handleError(res, err, 'Ошибка получения списка заказов клиентов');
+  }
+});
+
+router.get('/today-summary', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  try {
+    const result = await getClientOrdersTodaySummary(req.user!.userId);
+    return res.json(successResponse(result, 'Дневная статистика заказов клиентов'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения дневной статистики заказов клиентов');
   }
 });
 
@@ -393,6 +405,19 @@ router.post('/product-images/cleanup', authorizePermissions(['manage_client_orde
     return res.json(successResponse(result, 'Очистка старых фотографий номенклатуры выполнена'));
   } catch (err) {
     return handleError(res, err, 'Ошибка очистки старых фотографий номенклатуры');
+  }
+});
+
+router.post('/invoice-statuses', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = clientOrderInvoiceStatusesSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await listClientOrderInvoiceStatuses(parsed.data.identifiers, req.user!.userId);
+    return res.json(successResponse(result, 'Статусы счетов заказов клиентов'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения статусов счетов заказов клиентов');
   }
 });
 

@@ -139,6 +139,11 @@ export const orderInvoiceParamsSchema = orderGuidParamsSchema.extend({
   invoiceId: z.string().min(1),
 });
 
+export const clientOrderInvoiceStatusesSchema = z.object({
+  identifiers: z.array(z.string().trim().min(1).max(160)).min(1).max(100)
+    .transform((values) => Array.from(new Set(values.map((value) => value.toLowerCase())))),
+});
+
 export const clientOrderReferenceDetailsParamsSchema = z.object({
   kind: z.enum(['organization', 'counterparty', 'agreement', 'contract', 'warehouse', 'delivery-address', 'price-type']),
   guid: z.string().trim().min(1),
@@ -152,6 +157,8 @@ export const clientOrdersReferenceDataQuerySchema = z.object({
 
 export const clientOrdersCounterpartiesQuerySchema = pagedSearchQuerySchema.extend({
   managerOnly: optionalBooleanFromQuery,
+  organizationGuid: z.string().trim().min(1).optional(),
+  debtStatus: z.enum(['all', 'with_debt', 'without_debt']).default('all'),
 });
 
 export const clientOrdersAgreementsQuerySchema = pagedSearchQuerySchema.extend({

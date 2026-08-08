@@ -39,6 +39,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     getClientOrderDefaults: jest.fn(),
     getClientOrderReferenceDetails: jest.fn(),
     getClientOrderSettings: jest.fn(),
+    getClientOrdersTodaySummary: jest.fn(),
     getClientOrdersAgreements: jest.fn(),
     getClientOrdersContracts: jest.fn(),
     getClientOrdersCounterparties: jest.fn(),
@@ -129,6 +130,36 @@ describe('/api/client-orders live reference routes', () => {
     });
   });
 
+  it('returns manager daily summary before the dynamic order route', async () => {
+    jest.mocked(service.getClientOrdersTodaySummary).mockResolvedValueOnce({
+      date: '2026-08-07',
+      ordersCount: 4,
+      clientsCount: 3,
+      totalAmount: 12_345.67,
+      profit: 2_100,
+      profitAvailable: true,
+      missingReceiptPriceCount: 0,
+      currency: 'RUB',
+      calculatedAt: '2026-08-07T12:00:00',
+      stale: false,
+    });
+
+    const response = await request(app).get('/api/client-orders/today-summary');
+
+    expect(response.status).toBe(200);
+    expect(service.getClientOrdersTodaySummary).toHaveBeenCalledWith(1);
+    expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
+    expect(response.body.data).toMatchObject({
+      date: '2026-08-07',
+      ordersCount: 4,
+      clientsCount: 3,
+      totalAmount: 12_345.67,
+      profit: 2_100,
+      profitAvailable: true,
+      stale: false,
+    });
+  });
+
   it('accepts multi-status order filters with legacy status compatibility', async () => {
     jest.mocked(service.listClientOrders).mockResolvedValueOnce({
       items: [],
@@ -179,6 +210,7 @@ describe('/api/client-orders live reference routes', () => {
       offset: 4,
       search: 'Абдулаева',
       includeInactive: false,
+      debtStatus: 'all',
     }, 1);
     expectPagedResponse(response.body, 1, { total: 9, limit: 2, offset: 4 });
     expect(response.body.data.items[0]).toMatchObject({

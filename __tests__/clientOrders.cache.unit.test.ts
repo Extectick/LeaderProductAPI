@@ -1,5 +1,6 @@
 import {
   ClientOrdersOnecCircuitOpenError,
+  clientOrdersCacheKey,
   clearClientOrdersOnecCircuit,
   readThroughClientOrdersCache,
 } from '../src/modules/clientOrders/clientOrders.cache';
@@ -53,5 +54,15 @@ describe('clientOrders cache circuit', () => {
     expect(loader).not.toHaveBeenCalled();
 
     clearClientOrdersOnecCircuit(`onec-live:${scope}`);
+  });
+
+  it('separates counterparty cache entries by debt filter', () => {
+    const common = { managerGuid: 'manager-guid', search: '', limit: 25, offset: 0 };
+    expect(clientOrdersCacheKey('counterparties', { ...common, debtStatus: 'all' })).not.toBe(
+      clientOrdersCacheKey('counterparties', { ...common, debtStatus: 'with_debt' })
+    );
+    expect(clientOrdersCacheKey('counterparties', { ...common, debtStatus: 'with_debt' })).not.toBe(
+      clientOrdersCacheKey('counterparties', { ...common, debtStatus: 'without_debt' })
+    );
   });
 });

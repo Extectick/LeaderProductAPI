@@ -14,8 +14,16 @@ import {
   type OnecClientOrderInvoiceQueueItem,
 } from '../modules/onec/onec.lpApp.client';
 import { buildStoragePrefix, uploadBuffer } from '../storage/minio';
-import { sendTelegramDocument } from './telegramBotService';
-import { sendMaxDocument } from './maxBotService';
+import {
+  buildTelegramMiniAppLink,
+  sendTelegramDocument,
+  sendTelegramInfoMessage,
+} from './telegramBotService';
+import {
+  buildMaxMiniAppLink,
+  sendMaxDocument,
+  sendMaxInfoMessage,
+} from './maxBotService';
 
 const LOCK_KEY = 'client-orders:invoice-worker:lock';
 const ACTIVE_STATES: ClientOrderInvoiceState[] = [
@@ -52,6 +60,10 @@ function intervalMs() {
 
 function batchSize() {
   return envInt('CLIENT_ORDER_INVOICE_WORKER_BATCH_SIZE', 10, 1);
+}
+
+function workerConcurrency() {
+  return Math.min(8, envInt('CLIENT_ORDER_INVOICE_WORKER_CONCURRENCY', 3, 1));
 }
 
 function leaseMs() {
@@ -140,7 +152,18 @@ async function acquireLock() {
     if (redis.isOpen) {
       const result = await redis.set(LOCK_KEY, lockId, { NX: true, PX: leaseMs() });
       if (result !== 'OK') return null;
+      const heartbeat = setInterval(async () => {
+        try {
+          if (redis.isOpen && await redis.get(LOCK_KEY) === lockId) {
+            await redis.pExpire(LOCK_KEY, leaseMs());
+          }
+        } catch {
+          // The original TTL still prevents a permanent lock.
+        }
+      }, Math.max(1_000, Math.floor(leaseMs() / 3)));
+      heartbeat.unref?.();
       return async () => {
+        clearInterval(heartbeat);
         try {
           if (await redis.get(LOCK_KEY) === lockId) await redis.del(LOCK_KEY);
         } catch {
@@ -157,6 +180,23 @@ async function acquireLock() {
   return async () => {
     inMemoryLock = false;
   };
+}
+
+async function forEachConcurrent<T>(items: T[], concurrency: number, task: (item: T) => Promise<void>) {
+  let cursor = 0;
+  const errors: unknown[] = [];
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      try {
+        await task(item);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (errors.length) throw errors[0];
 }
 
 export async function syncQueueItem(
@@ -187,6 +227,7 @@ export async function syncQueueItem(
       ? new Date(Math.min(incomingReadyAt?.getTime() ?? Date.now(), Date.now()))
       : incomingReadyAt;
     const incomingRealizationDate = parseDate(item.realizationDate);
+    const incomingPaymentDueDate = parseDate(item.paymentDueDate);
     if (!current) {
       await tx.clientOrderInvoice.updateMany({
         where: {
@@ -212,6 +253,7 @@ export async function syncQueueItem(
         realizationGuid: item.realizationGuid,
         realizationNumber: item.realizationNumber ?? null,
         realizationDate: incomingRealizationDate,
+        paymentDueDate: incomingPaymentDueDate,
         invoiceAmount: invoiceAmount(item.invoiceAmount),
         currency: optionalText(item.currency),
         counterpartyName: optionalText(item.counterpartyName),
@@ -231,6 +273,7 @@ export async function syncQueueItem(
       update: {
         realizationNumber: item.realizationNumber ?? null,
         realizationDate: incomingRealizationDate,
+        paymentDueDate: incomingPaymentDueDate,
         invoiceAmount: invoiceAmount(item.invoiceAmount),
         currency: optionalText(item.currency),
         counterpartyName: optionalText(item.counterpartyName),
@@ -276,9 +319,11 @@ async function syncOnecQueue() {
       latestByRealization.set(key, item);
     }
   }
-  for (const item of latestByRealization.values()) {
-    await syncQueueItem(item);
-  }
+  await forEachConcurrent(
+    [...latestByRealization.values()],
+    Math.min(4, workerConcurrency()),
+    (item) => syncQueueItem(item)
+  );
 }
 
 function safeDocumentPart(value: string | null | undefined) {
@@ -318,6 +363,7 @@ export function buildInvoiceMessage(params: {
   realizationNumber: string | null;
   realizationGuid: string;
   realizationDate: Date | string | null;
+  paymentDueDate?: Date | string | null;
   version: number;
   invoiceAmount: unknown;
   currency: string | null;
@@ -332,6 +378,39 @@ export function buildInvoiceMessage(params: {
     `Направляем счёт на оплату ${number} от ${formatInvoiceDate(params.realizationDate)}.`,
   ];
   if (amount) lines.push(`Сумма к оплате: ${amount}.`);
+  if (params.paymentDueDate) lines.push(`Срок оплаты: до ${formatInvoiceDate(params.paymentDueDate)}.`);
+  return lines.join('\n');
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export function buildInvoiceManagerMessage(params: {
+  counterpartyName: string | null;
+  orderNumber: string | null;
+  orderLink?: string | null;
+  version: number;
+}) {
+  const counterpartyName = optionalText(params.counterpartyName) || 'Не указан';
+  const orderNumber = optionalText(params.orderNumber) || 'Без номера';
+  const orderLink = optionalText(params.orderLink);
+  const orderPresentation = orderLink
+    ? `<a href="${escapeHtml(orderLink)}">${escapeHtml(orderNumber)}</a>`
+    : escapeHtml(orderNumber);
+  const lines = [
+    '⬆️ Счёт для клиента:',
+    `<b>${escapeHtml(counterpartyName)}</b>`,
+    `Заказ: ${orderPresentation}`,
+  ];
+  if (params.version > 1) {
+    lines.push(`Версия: ${Math.trunc(params.version)} ⚠️ Предыдущую версию не использовать!`);
+  }
   return lines.join('\n');
 }
 
@@ -404,6 +483,7 @@ async function deliverChannel(params: {
   buffer: Buffer;
   fileName: string;
   caption: string;
+  managerMessage: string;
 }) {
   const existing = await prisma.clientOrderInvoiceDelivery.upsert({
     where: { invoiceId_channel: { invoiceId: params.invoiceId, channel: params.channel.channel } },
@@ -432,20 +512,47 @@ async function deliverChannel(params: {
     data: { state: ClientOrderInvoiceDeliveryState.SENDING, attempts: { increment: 1 }, lastError: null },
   });
   try {
+    // sentAt is persisted immediately after the PDF is accepted by the bot.
+    // If the following employee note fails, a retry sends only that note and
+    // never duplicates the document itself.
+    if (!existing.sentAt) {
+      if (params.channel.channel === ClientOrderInvoiceDeliveryChannel.TELEGRAM) {
+        const sent = await sendTelegramDocument({
+          chatId: params.channel.recipient,
+          buffer: params.buffer,
+          fileName: params.fileName,
+          caption: params.caption,
+        });
+        if (!sent) throw new Error('Telegram bot is not configured');
+      } else {
+        const sent = await sendMaxDocument({
+          chatId: params.channel.recipient,
+          buffer: params.buffer,
+          fileName: params.fileName,
+          caption: params.caption,
+        });
+        if (!sent) throw new Error('MAX bot is not configured');
+      }
+      await prisma.clientOrderInvoiceDelivery.update({
+        where: { id: existing.id },
+        data: { sentAt: new Date(), nextAttemptAt: null, lastError: null },
+      });
+    }
+
     if (params.channel.channel === ClientOrderInvoiceDeliveryChannel.TELEGRAM) {
-      const sent = await sendTelegramDocument({
+      const sent = await sendTelegramInfoMessage({
         chatId: params.channel.recipient,
-        buffer: params.buffer,
-        fileName: params.fileName,
-        caption: params.caption,
+        text: params.managerMessage,
+        parseMode: 'HTML',
+        disableLinkPreview: true,
       });
       if (!sent) throw new Error('Telegram bot is not configured');
     } else {
-      const sent = await sendMaxDocument({
+      const sent = await sendMaxInfoMessage({
         chatId: params.channel.recipient,
-        buffer: params.buffer,
-        fileName: params.fileName,
-        caption: params.caption,
+        text: params.managerMessage,
+        parseMode: 'HTML',
+        disableLinkPreview: true,
       });
       if (!sent) throw new Error('MAX bot is not configured');
     }
@@ -485,6 +592,7 @@ export async function processInvoice(invoiceId: string) {
     include: {
       order: {
         select: {
+          guid: true,
           invoiceRequested: true,
           number1c: true,
           date1c: true,
@@ -557,6 +665,7 @@ export async function processInvoice(invoiceId: string) {
       realizationNumber: invoice.realizationNumber,
       realizationGuid: invoice.realizationGuid,
       realizationDate: invoice.realizationDate ?? invoice.order.date1c,
+      paymentDueDate: invoice.paymentDueDate,
       version: invoice.version,
       invoiceAmount: invoice.invoiceAmount ?? invoice.order.totalAmount,
       currency: invoice.currency ?? invoice.order.currency,
@@ -566,6 +675,16 @@ export async function processInvoice(invoiceId: string) {
     });
     const results: string[] = [];
     for (const channel of channels) {
+      const orderStartParam = `client_order_${invoice.order.guid}`;
+      const orderLink = channel.channel === ClientOrderInvoiceDeliveryChannel.TELEGRAM
+        ? buildTelegramMiniAppLink(orderStartParam)
+        : buildMaxMiniAppLink(orderStartParam);
+      const managerMessage = buildInvoiceManagerMessage({
+        counterpartyName: invoice.counterpartyName,
+        orderNumber: invoice.orderNumber ?? invoice.order.number1c,
+        orderLink,
+        version: invoice.version,
+      });
       results.push(await deliverChannel({
         invoiceId: invoice.id,
         invoiceToken: invoice.token,
@@ -574,6 +693,7 @@ export async function processInvoice(invoiceId: string) {
         buffer: pdf.body,
         fileName: refreshed.fileName,
         caption,
+        managerMessage,
       }));
       if (results.includes('SUPERSEDED')) return;
     }
@@ -643,7 +763,13 @@ async function runOnce() {
   const release = await acquireLock();
   if (!release) return;
   try {
-    await syncOnecQueue();
+    try {
+      await syncOnecQueue();
+    } catch (error) {
+      // Existing local candidates must keep moving even when the 1C queue read
+      // is temporarily unavailable or one malformed queue row cannot sync.
+      console.error('[client-order-invoice-worker] queue sync failed:', errorMessage(error));
+    }
     const now = new Date();
     const candidates = await prisma.clientOrderInvoice.findMany({
       where: {
@@ -663,7 +789,7 @@ async function runOnce() {
       take: batchSize(),
       select: { id: true },
     });
-    for (const candidate of candidates) await processInvoice(candidate.id);
+    await forEachConcurrent(candidates, workerConcurrency(), (candidate) => processInvoice(candidate.id));
   } catch (error) {
     console.error('[client-order-invoice-worker] run failed:', errorMessage(error));
   } finally {
@@ -682,7 +808,11 @@ function schedule() {
 export function startClientOrderInvoiceWorker() {
   if (running || process.env.CLIENT_ORDER_INVOICE_WORKER_DISABLED === '1') return;
   running = true;
-  console.log('[client-order-invoice-worker] started', { intervalMs: intervalMs(), batchSize: batchSize() });
+  console.log('[client-order-invoice-worker] started', {
+    intervalMs: intervalMs(),
+    batchSize: batchSize(),
+    concurrency: workerConcurrency(),
+  });
   void runOnce();
   schedule();
 }

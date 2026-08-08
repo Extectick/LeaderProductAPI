@@ -3,6 +3,7 @@ import { OrderStatus, OrderSyncState, Prisma } from '@prisma/client';
 import {
   buildStoredClientOrderCopyItemData,
   normalizeClientOrderPublicError,
+  resolveMergedClientOrderLast1cError,
   resolveActiveTrackingOrderSnapshot,
   resolveUpdatedOrderQueueState,
 } from '../src/modules/clientOrders/clientOrders.service';
@@ -99,6 +100,22 @@ describe('clientOrders public error formatting', () => {
     expect(normalizeClientOrderPublicError('Недостаточно доступного остатка по товару Ананас')).toBe(
       'Недостаточно остатка по одной или нескольким позициям.'
     );
+  });
+});
+
+describe('clientOrders merged 1C error state', () => {
+  it('keeps the current technical 1C posting error instead of a stale local error', () => {
+    expect(resolveMergedClientOrderLast1cError(
+      { isPostedIn1c: false, last1cError: 'Текущая ошибка проведения из 1С' },
+      'Старая локальная ошибка'
+    )).toBe('Текущая ошибка проведения из 1С');
+  });
+
+  it('clears a stale local error after 1C reports that the document is posted', () => {
+    expect(resolveMergedClientOrderLast1cError(
+      { isPostedIn1c: true, last1cError: null },
+      'Старая локальная ошибка'
+    )).toBeNull();
   });
 });
 

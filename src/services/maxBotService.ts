@@ -28,7 +28,7 @@ function getWelcomeLogoUrl() {
   return String(process.env.BOT_WELCOME_LOGO_URL || '').trim();
 }
 
-function buildMaxMiniAppLink(startParam = 'home') {
+export function buildMaxMiniAppLink(startParam = 'home') {
   const botUsername = getBotUsername().replace(/^@+/, '');
   if (!botUsername) return '';
   return `https://max.ru/${botUsername}?startapp=${encodeURIComponent(startParam)}`;

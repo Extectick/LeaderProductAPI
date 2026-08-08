@@ -29,7 +29,7 @@ function getWelcomeLogoUrl() {
   return String(process.env.BOT_WELCOME_LOGO_URL || '').trim();
 }
 
-function buildTelegramMiniAppLink(startParam = 'home') {
+export function buildTelegramMiniAppLink(startParam = 'home') {
   const botUsername = getBotUsername().replace(/^@+/, '');
   if (!botUsername) return '';
   const shortName = getMiniAppShortName().replace(/^\/+|\/+$/g, '');

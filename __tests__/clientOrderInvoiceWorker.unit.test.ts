@@ -22,8 +22,16 @@ jest.mock('../src/storage/minio', () => ({
   uploadBuffer: jest.fn(),
   downloadBuffer: jest.fn(),
 }));
-jest.mock('../src/services/telegramBotService', () => ({ sendTelegramDocument: jest.fn() }));
-jest.mock('../src/services/maxBotService', () => ({ sendMaxDocument: jest.fn() }));
+jest.mock('../src/services/telegramBotService', () => ({
+  buildTelegramMiniAppLink: jest.fn((startParam: string) => `https://t.me/test_bot/app?startapp=${startParam}`),
+  sendTelegramDocument: jest.fn(),
+  sendTelegramInfoMessage: jest.fn(),
+}));
+jest.mock('../src/services/maxBotService', () => ({
+  buildMaxMiniAppLink: jest.fn((startParam: string) => `https://max.ru/test_bot?startapp=${startParam}`),
+  sendMaxDocument: jest.fn(),
+  sendMaxInfoMessage: jest.fn(),
+}));
 
 import prisma from '../src/prisma/client';
 import {
@@ -34,6 +42,7 @@ import {
 import { buildStoragePrefix, uploadBuffer } from '../src/storage/minio';
 import {
   buildInvoiceFileName,
+  buildInvoiceManagerMessage,
   buildInvoiceMessage,
   processInvoice,
   syncQueueItem,
@@ -184,6 +193,7 @@ describe('clientOrderInvoiceWorker queue synchronization', () => {
       realizationNumber: 'НОУТ-H04002',
       realizationGuid: 'realization-guid',
       realizationDate: '2026-08-04',
+      paymentDueDate: '2026-08-09',
       version: 3,
       invoiceAmount: 5628,
       currency: 'RUB',
@@ -195,7 +205,29 @@ describe('clientOrderInvoiceWorker queue synchronization', () => {
     expect(message).toBe(
       'Добрый день!\n' +
         'Направляем счёт на оплату НОУТ-H04002 от 04.08.2026.\n' +
-        'Сумма к оплате: 5 628,00 ₽.'
+        'Сумма к оплате: 5 628,00 ₽.\n' +
+        'Срок оплаты: до 09.08.2026.'
     );
+  });
+
+  it('builds a separate employee note with a link to the client order', () => {
+    expect(buildInvoiceManagerMessage({
+      counterpartyName: 'Колмогоров Андрей Викторович ИП',
+      orderNumber: 'НОУТ-086849',
+      orderLink: 'https://t.me/test_bot/app?startapp=client_order_8340b815-88f3-4e73-8b2b-5efc13fdb702',
+      version: 3,
+    })).toBe(
+      '⬆️ Счёт для клиента:\n' +
+      '<b>Колмогоров Андрей Викторович ИП</b>\n' +
+      'Заказ: <a href="https://t.me/test_bot/app?startapp=client_order_8340b815-88f3-4e73-8b2b-5efc13fdb702">НОУТ-086849</a>\n' +
+      'Версия: 3 ⚠️ Предыдущую версию не использовать!'
+    );
+
+    expect(buildInvoiceManagerMessage({
+      counterpartyName: null,
+      orderNumber: 'НОУТ-086849',
+      orderLink: null,
+      version: 1,
+    })).toBe('⬆️ Счёт для клиента:\n<b>Не указан</b>\nЗаказ: НОУТ-086849');
   });
 });

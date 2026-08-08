@@ -7,6 +7,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { cacheGet, cacheSet } from '../../lib/redis';
 import prisma from '../../prisma/client';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
@@ -20,6 +21,7 @@ import {
 } from '../onec/onec.lpApp.client';
 import {
   CLIENT_ORDERS_CACHE_TTL,
+  clientOrdersCacheKey,
   ClientOrdersOnecCircuitOpenError,
   readThroughClientOrdersCache,
 } from './clientOrders.cache';
@@ -45,6 +47,7 @@ import {
   findLiveClientOrder,
   getLiveClientOrder,
   getLiveClientOrders,
+  getLiveClientOrdersTodaySummary,
   getLiveClientOrderDefaults,
   getLiveOrganizations,
   getLivePriceTypes,
@@ -58,6 +61,7 @@ import {
   type LiveCounterparty,
   type LiveDeliveryAddress,
   type LiveClientOrder,
+  type LiveClientOrdersTodaySummary,
   type LiveClientOrderDefaults,
   type LiveOrganization,
   type LivePriceType,
@@ -211,11 +215,11 @@ const clientOrderSummarySelect = {
   warehouse: { select: { guid: true, name: true, code: true } },
   priceType: { select: { guid: true, name: true } },
   invoices: {
+    where: { state: { notIn: ['SUPERSEDED' as const, 'CANCELLED' as const] } },
     orderBy: [{ updatedAt: 'desc' as const }, { version: 'desc' as const }],
     select: { state: true, waitReason: true, lastError: true, version: true, s3Key: true },
   },
-  items: { where: { isCancelled: false }, select: { id: true } },
-  _count: { select: { items: true } },
+  _count: { select: { items: { where: { isCancelled: false } } } },
 } satisfies Prisma.OrderSelect;
 
 type ClientOrderSummaryRecord = Prisma.OrderGetPayload<{ select: typeof clientOrderSummarySelect }>;
@@ -337,6 +341,14 @@ export function normalizeClientOrderPublicError(value: unknown) {
   }
 
   return message.length > 300 ? `${message.slice(0, 297).trimEnd()}...` : message;
+}
+
+export function resolveMergedClientOrderLast1cError(
+  live: { isPostedIn1c: boolean; last1cError?: unknown },
+  localLast1cError?: unknown
+) {
+  if (live.isPostedIn1c) return null;
+  return normalizeClientOrderPublicError(live.last1cError ?? localLast1cError);
 }
 
 function latestExportValidationFromEvents(events: Array<{ eventType: string; payload: unknown }>) {
@@ -474,7 +486,7 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
     organization: order.organization,
     warehouse: order.warehouse,
     priceType: order.priceType,
-    itemsCount: order.items.length,
+    itemsCount: order._count.items,
     items: [],
     events: [],
     createdAt: order.createdAt,
@@ -563,6 +575,65 @@ const CLOSED_CONTRACT_STATUS = 'Закрыт';
 const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const RECEIPT_PRICE_TYPE_TOKEN = '\u0446\u0435\u043d\u0430\u043f\u043e\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044f';
 const now = () => new Date();
+const CLIENT_ORDERS_TODAY_SUMMARY_STALE_TTL_SECONDS = 15 * 60;
+const CLIENT_ORDERS_TODAY_SUMMARY_TIME_ZONE = 'Asia/Omsk';
+type ClientOrdersTodaySummaryCacheEntry = {
+  value: LiveClientOrdersTodaySummary;
+  fetchedAt: string;
+};
+
+export type ClientOrdersTodaySummary = LiveClientOrdersTodaySummary & { stale: boolean };
+
+const clientOrdersTodaySummaryMemory = new Map<string, ClientOrdersTodaySummaryCacheEntry>();
+
+function currentClientOrdersDate() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CLIENT_ORDERS_TODAY_SUMMARY_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now());
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function clientOrdersTodaySummaryCacheEntryIsUsable(entry: ClientOrdersTodaySummaryCacheEntry | null | undefined) {
+  if (!entry?.value) return false;
+  const fetchedAt = Date.parse(entry.fetchedAt);
+  return Number.isFinite(fetchedAt) && Date.now() - fetchedAt <= CLIENT_ORDERS_TODAY_SUMMARY_STALE_TTL_SECONDS * 1000;
+}
+
+function rememberClientOrdersTodaySummary(key: string, entry: ClientOrdersTodaySummaryCacheEntry) {
+  if (clientOrdersTodaySummaryMemory.size >= 750) {
+    const firstKey = clientOrdersTodaySummaryMemory.keys().next().value;
+    if (firstKey) clientOrdersTodaySummaryMemory.delete(firstKey);
+  }
+  clientOrdersTodaySummaryMemory.set(key, entry);
+}
+
+async function loadStaleClientOrdersTodaySummary(key: string) {
+  const memoryEntry = clientOrdersTodaySummaryMemory.get(key);
+  if (clientOrdersTodaySummaryCacheEntryIsUsable(memoryEntry)) return memoryEntry!;
+  if (memoryEntry) clientOrdersTodaySummaryMemory.delete(key);
+
+  try {
+    const redisEntry = await cacheGet<ClientOrdersTodaySummaryCacheEntry>(key);
+    if (!clientOrdersTodaySummaryCacheEntryIsUsable(redisEntry)) return null;
+    rememberClientOrdersTodaySummary(key, redisEntry!);
+    return redisEntry!;
+  } catch {
+    return null;
+  }
+}
+
+async function persistStaleClientOrdersTodaySummary(key: string, entry: ClientOrdersTodaySummaryCacheEntry) {
+  rememberClientOrdersTodaySummary(key, entry);
+  try {
+    await cacheSet(key, entry, CLIENT_ORDERS_TODAY_SUMMARY_STALE_TTL_SECONDS);
+  } catch {
+    // The in-process fallback still protects the list when Redis is unavailable.
+  }
+}
 
 const contractSelectableWhere = (): Prisma.ClientContractWhereInput => {
   const today = new Date();
@@ -1858,6 +1929,9 @@ async function findCachedCounterparty(guid: string): Promise<LiveCounterparty | 
         phone: item.phone,
         email: item.email,
         isActive: item.isActive,
+        hasDebt: false,
+        shipmentProhibited: false,
+        debtReason: null,
       }
     : null;
 }
@@ -2712,20 +2786,6 @@ async function saveUserCounterpartyDefaults(tx: Tx, userId: number, guid: string
   });
 }
 
-const PINNED_LOCAL_STATUSES: OrderStatus[] = [
-  OrderStatus.DRAFT,
-  OrderStatus.QUEUED,
-  OrderStatus.REJECTED,
-];
-
-const PINNED_LOCAL_SYNC_STATES: OrderSyncState[] = [
-  OrderSyncState.DRAFT,
-  OrderSyncState.QUEUED,
-  OrderSyncState.ERROR,
-  OrderSyncState.CONFLICT,
-  OrderSyncState.CANCEL_REQUESTED,
-];
-
 const LOCAL_ORDER_STATUS_VALUES = new Set<string>(Object.values(OrderStatus));
 const LIVE_STATUS_FILTER_SCAN_LIMIT = 300;
 
@@ -3003,11 +3063,7 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery, userId: numbe
 }
 
 function isPinnedLocalOrder(order: Pick<ClientOrderSummaryRecord, 'status' | 'syncState' | 'number1c'>) {
-  return (
-    PINNED_LOCAL_STATUSES.includes(order.status) ||
-    PINNED_LOCAL_SYNC_STATES.includes(order.syncState) ||
-    !order.number1c
-  );
+  return !order.number1c;
 }
 
 function localOrderKey(order: Pick<ClientOrderSummaryRecord, 'guid' | 'number1c'>) {
@@ -3051,6 +3107,7 @@ function mapMergedLiveOrder(
   }
   const hasRealization = order.hasRealization || local.hasRealization;
   const localSummary = mapClientOrderSummary(local, queuePositions);
+  const last1cError = resolveMergedClientOrderLast1cError(order, local.last1cError);
   return {
     ...order,
     guid: local.guid,
@@ -3064,7 +3121,7 @@ function mapMergedLiveOrder(
     sentTo1cAt: local.sentTo1cAt ?? order.sentTo1cAt,
     lastStatusSyncAt: local.lastStatusSyncAt ?? order.lastStatusSyncAt,
     lastExportError: normalizeClientOrderPublicError(local.lastExportError),
-    last1cError: normalizeClientOrderPublicError(local.last1cError),
+    last1cError,
     paymentForm: local.paymentForm ?? order.paymentForm,
     deliveryMethod: local.deliveryMethod ?? order.deliveryMethod,
     cancelRequestedAt: local.cancelRequestedAt,
@@ -3149,13 +3206,7 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
   const pinnedWhere: Prisma.OrderWhereInput = {
     AND: [
       where,
-      {
-        OR: [
-          { status: { in: PINNED_LOCAL_STATUSES } },
-          { syncState: { in: PINNED_LOCAL_SYNC_STATES } },
-          { number1c: null },
-        ],
-      },
+      { number1c: null },
     ],
   };
 
@@ -3163,6 +3214,8 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     prisma.order.findMany({
       where: pinnedWhere,
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+      skip: query.offset,
+      take: query.limit,
       select: clientOrderSummarySelect,
     }),
     prisma.order.count({ where: pinnedWhere }),
@@ -3199,6 +3252,8 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
   let liveTotal = 0;
   let liveHasMore = false;
   const liveOffset = Math.max(0, query.offset - pinnedTotal);
+  const livePageCapacity = Math.max(0, query.limit - pinnedItems.length);
+  const hasMorePinnedWindow = query.offset + pinnedItems.length < pinnedTotal;
   const liveStatusForOnec = statusFilters.length === 1 ? statusFilters[0] : undefined;
   const livePostFilterActive = statusFilters.length > 1 ||
     Boolean(
@@ -3217,10 +3272,10 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     );
   const liveQueryOffset = livePostFilterActive ? 0 : liveOffset;
   const liveQueryLimit = livePostFilterActive
-    ? Math.min(LIVE_STATUS_FILTER_SCAN_LIMIT, Math.max(liveOffset + query.limit, query.limit * 5))
-    : query.limit;
+    ? Math.min(LIVE_STATUS_FILTER_SCAN_LIMIT, Math.max(liveOffset + livePageCapacity, Math.max(1, livePageCapacity) * 5))
+    : Math.max(1, livePageCapacity);
 
-  if (managerGuid) {
+  if (managerGuid && !(livePageCapacity === 0 && hasMorePinnedWindow)) {
     try {
       const liveQuery = {
         ...query,
@@ -3249,6 +3304,34 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
       liveTotal = 0;
       liveHasMore = false;
     }
+  }
+
+  // Live-список является основным источником проведённых заказов, но его
+  // недоступность не должна превращать экран в пустой. В обычном режиме ниже
+  // объединяются только закреплённые локальные записи и документы 1С. При
+  // ошибке 1С возвращаем полноценную страницу локальных снимков, включая уже
+  // отправленные и подтверждённые заказы, которые иначе не входят в pinnedItems.
+  if (liveMeta.status !== 'ok') {
+    const [fallbackItems, fallbackTotal] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        skip: query.offset,
+        take: query.limit,
+        select: clientOrderSummarySelect,
+      }),
+      prisma.order.count({ where }),
+    ]);
+
+    return {
+      items: fallbackItems.map((item) => mapClientOrderSummary(item, queuePositions)),
+      total: fallbackTotal,
+      statusCounts: localStatusCounts,
+      limit: query.limit,
+      offset: query.offset,
+      hasMore: query.offset + fallbackItems.length < fallbackTotal,
+      liveSource: liveMeta,
+    };
   }
 
   const liveAppGuids = liveItems.flatMap((item) => {
@@ -3308,7 +3391,7 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     if (key.number1c && !invoiceLocalByNumber.has(key.number1c)) invoiceLocalByNumber.set(key.number1c, item);
   }
 
-  const mappedPinned = query.offset === 0 ? pinnedItems.map((item) => mapClientOrderSummary(item, queuePositions)) : [];
+  const mappedPinned = pinnedItems.map((item) => mapClientOrderSummary(item, queuePositions));
   const mappedLive = liveItems.flatMap((item) => {
     const key = liveOrderKey(item);
     if ((key.appGuid && localPinnedAppGuids.has(key.appGuid)) || (key.number1c && localPinnedNumbers.has(key.number1c))) {
@@ -3328,14 +3411,16 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     cancelRequestedAt?: Date | string | null;
   }, query, statusFilters));
   const visibleLive = livePostFilterActive
-    ? filteredLive.slice(liveOffset, liveOffset + query.limit)
-    : filteredLive;
+    ? filteredLive.slice(liveOffset, liveOffset + livePageCapacity)
+    : filteredLive.slice(0, livePageCapacity);
   const postFilterScanMayHaveMore = livePostFilterActive
     ? liveHasMore || liveItems.length >= liveQueryLimit
     : false;
-  const hasMore = livePostFilterActive
+  const hasMorePinned = hasMorePinnedWindow;
+  const hasMoreLive = livePostFilterActive
     ? visibleLive.length > 0 && (liveOffset + visibleLive.length < filteredLive.length || postFilterScanMayHaveMore)
     : liveHasMore;
+  const hasMore = hasMorePinned || hasMoreLive || (livePageCapacity === 0 && liveTotal > 0);
 
   return {
     items: [...mappedPinned, ...visibleLive],
@@ -3350,6 +3435,47 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     hasMore,
     liveSource: liveMeta,
   };
+}
+
+export async function getClientOrdersTodaySummary(userId: number): Promise<ClientOrdersTodaySummary> {
+  const managerGuid = await getManagerGuidForUser(userId);
+  if (!managerGuid) {
+    throw new ClientOrdersError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'В профиле сотрудника не заполнен GUID пользователя 1С.'
+    );
+  }
+
+  const date = currentClientOrdersDate();
+  const cachePayload = { managerGuid, date };
+  const staleKey = clientOrdersCacheKey('today-summary:stale', cachePayload);
+
+  try {
+    const entry = await onecLive(
+      () => readThroughClientOrdersCache(
+        'today-summary',
+        cachePayload,
+        CLIENT_ORDERS_CACHE_TTL.todaySummary,
+        async () => ({
+          value: await getLiveClientOrdersTodaySummary(cachePayload),
+          fetchedAt: now().toISOString(),
+        }),
+        { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
+      ),
+      'Ошибка получения дневной статистики заказов клиентов из 1С',
+      { allowCachedWhenCircuitOpen: true }
+    );
+
+    const fetchedAt = Date.parse(entry.fetchedAt);
+    const stale = !Number.isFinite(fetchedAt) || Date.now() - fetchedAt > CLIENT_ORDERS_CACHE_TTL.todaySummary * 1000;
+    if (!stale) await persistStaleClientOrdersTodaySummary(staleKey, entry);
+    return { ...entry.value, stale };
+  } catch (error) {
+    const fallback = await loadStaleClientOrdersTodaySummary(staleKey);
+    if (fallback) return { ...fallback.value, stale: true };
+    throw error;
+  }
 }
 
 export async function getClientOrderByGuid(guid: string, userId?: number) {
@@ -3434,7 +3560,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             revision: order.revision,
             queuePosition: null,
             lastExportError: normalizeClientOrderPublicError(order.lastExportError),
-            last1cError: normalizeClientOrderPublicError(order.last1cError),
+            last1cError: resolveMergedClientOrderLast1cError(liveDetail, order.last1cError),
             exportValidation,
             invoiceRequested: mapped.invoiceRequested,
             invoiceState: mapped.invoiceState,
@@ -4062,6 +4188,9 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
       name: counterparty.name,
       fullName: counterparty.fullName ?? null,
       inn: counterparty.inn ?? null,
+      hasDebt: false,
+      shipmentProhibited: false,
+      debtReason: null,
     },
     agreement,
     contract,
@@ -4077,6 +4206,9 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
     deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
     discountsEnabled: false,
     invoiceRequested,
+    hasDebt: false,
+    shipmentProhibited: false,
+    debtReason: null,
   };
 }
 
@@ -4086,6 +4218,9 @@ function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResoluti
   const warehouse = mapWarehouseSummary(defaults.warehouse ?? defaults.agreement?.warehouse ?? null);
   const deliveryAddress = mapDeliveryAddressSummary(defaults.deliveryAddress);
   const priceType = defaults.priceType ?? defaults.agreement?.priceType ?? null;
+  const hasDebt = defaults.hasDebt || Boolean(defaults.counterparty?.hasDebt);
+  const shipmentProhibited = defaults.shipmentProhibited || Boolean(defaults.counterparty?.shipmentProhibited);
+  const debtReason = defaults.debtReason || defaults.counterparty?.debtReason || null;
   return {
     organization: mapOrganizationSummary(defaults.organization),
     counterparty: defaults.counterparty
@@ -4095,6 +4230,9 @@ function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResoluti
           fullName: defaults.counterparty.fullName ?? null,
           inn: defaults.counterparty.inn ?? null,
           kpp: defaults.counterparty.kpp ?? null,
+          hasDebt,
+          shipmentProhibited,
+          debtReason,
         }
       : null,
     agreement,
@@ -4112,6 +4250,9 @@ function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResoluti
     deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
     discountsEnabled: false,
     warnings: defaults.warnings,
+    hasDebt,
+    shipmentProhibited,
+    debtReason,
   };
 }
 
@@ -4156,6 +4297,9 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
           deliveryDateIssueMessage: formatDeliveryDateIssue(deliveryDateResolution.issue),
           discountsEnabled: false,
           warnings: ['1С временно недоступна, подсказки по умолчанию не загружены.'],
+          hasDebt: false,
+          shipmentProhibited: false,
+          debtReason: null,
         };
       }
     }
@@ -4188,6 +4332,9 @@ type ClientOrdersCounterpartySearchItem = {
   managerGuid?: string | null;
   managerName?: string | null;
   manager?: { guid?: string | null; name?: string | null } | null;
+  hasDebt: boolean;
+  shipmentProhibited: boolean;
+  debtReason: string | null;
 };
 
 async function getCounterpartiesFallback(
@@ -4195,6 +4342,12 @@ async function getCounterpartiesFallback(
   search: string,
   managerGuid?: string | null
 ): Promise<PagedResult<ClientOrdersCounterpartySearchItem>> {
+  // Локальный снимок не хранит актуальную задолженность. Не выдаём его как
+  // «с задолженностью», чтобы fallback не создавал ложноположительные записи.
+  if (query.debtStatus === 'with_debt') {
+    return { items: [], total: 0, limit: query.limit, offset: query.offset };
+  }
+
   const and: Prisma.CounterpartyWhereInput[] = [];
 
   if (search) {
@@ -4234,7 +4387,13 @@ async function getCounterpartiesFallback(
   ]);
 
   return {
-    items: items.map((item) => (managerGuid ? { ...item, managerGuid } : item)),
+    items: items.map((item) => ({
+      ...item,
+      ...(managerGuid ? { managerGuid } : {}),
+      hasDebt: false,
+      shipmentProhibited: false,
+      debtReason: null,
+    })),
     total,
     limit: query.limit,
     offset: query.offset,

@@ -22,6 +22,7 @@ export class ClientOrdersOnecCircuitOpenError extends Error {
 
 export const CLIENT_ORDERS_CACHE_TTL = {
   ordersList: 20,
+  todaySummary: 30,
   orderDetail: 30,
   defaults: 120,
   counterparties: 180,

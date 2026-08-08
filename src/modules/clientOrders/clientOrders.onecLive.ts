@@ -3,6 +3,7 @@ import {
   getOnecLpAppClientOrder,
   getOnecLpAppClientOrderDefaults,
   getOnecLpAppClientOrders,
+  getOnecLpAppClientOrdersTodaySummary,
   getOnecLpAppContracts,
   getOnecLpAppCounterparties,
   getOnecLpAppDeliveryAddresses,
@@ -36,6 +37,18 @@ export type LivePagedResult<T> = {
   hasMore?: boolean;
 };
 
+export type LiveClientOrdersTodaySummary = {
+  date: string;
+  ordersCount: number;
+  clientsCount: number;
+  totalAmount: number;
+  profit: number | null;
+  profitAvailable: boolean;
+  missingReceiptPriceCount: number;
+  currency: string;
+  calculatedAt: string;
+};
+
 export type LiveOrganization = {
   guid: string;
   name: string;
@@ -52,6 +65,9 @@ export type LiveCounterparty = {
   phone?: string | null;
   email?: string | null;
   isActive: boolean;
+  hasDebt: boolean;
+  shipmentProhibited: boolean;
+  debtReason: string | null;
   managerGuid?: string | null;
   managerName?: string | null;
   manager?: { guid?: string | null; name?: string | null } | null;
@@ -203,6 +219,9 @@ export type LiveClientOrderDefaults = {
   deliveryMethods: LiveClientOrderOption[];
   currency: string | null;
   warnings: string[];
+  hasDebt: boolean;
+  shipmentProhibited: boolean;
+  debtReason: string | null;
 };
 
 export type LiveClientOrder = {
@@ -234,9 +253,12 @@ export type LiveClientOrder = {
   lastStatusSyncAt: string | Date | null;
   lastExportError: string | null;
   last1cError: string | null;
+  hasDebt: boolean;
+  shipmentProhibited: boolean;
+  debtReason: string | null;
   isPostedIn1c: boolean;
   cancelRequestedAt: null;
-  counterparty: { guid: string; name: string; fullName?: string | null; inn?: string | null; kpp?: string | null } | null;
+  counterparty: { guid: string; name: string; fullName?: string | null; inn?: string | null; kpp?: string | null; hasDebt: boolean; shipmentProhibited: boolean; debtReason: string | null } | null;
   organization: { guid: string; name: string; code?: string | null; isActive?: boolean } | null;
   warehouse: { guid: string; name: string; code?: string | null } | null;
   agreement: LiveAgreement | null;
@@ -384,6 +406,7 @@ function normalizeQuery(query: {
   number1c?: string;
   includeItems?: boolean;
   deliveryAddressNumber?: string;
+  debtStatus?: 'all' | 'with_debt' | 'without_debt';
 }): OnecLpAppQuery {
   return {
     limit: query.limit ?? DEFAULT_LIMIT,
@@ -418,6 +441,7 @@ function normalizeQuery(query: {
     number1c: query.number1c,
     includeItems: query.includeItems,
     deliveryAddressNumber: query.deliveryAddressNumber,
+    debtStatus: query.debtStatus,
   };
 }
 
@@ -540,7 +564,14 @@ function smartDedupeKey(item: unknown, index: number) {
 }
 
 async function liveSmartPaged<T extends { isActive?: boolean }>(
-  query: { limit?: number; offset?: number; search?: string; includeInactive?: boolean; deliveryAddressNumber?: string },
+  query: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    includeInactive?: boolean;
+    deliveryAddressNumber?: string;
+    debtStatus?: 'all' | 'with_debt' | 'without_debt';
+  },
   loader: (query: OnecLpAppQuery) => Promise<unknown>,
   keys: string[],
   mapper: (item: AnyRecord) => T | null
@@ -730,6 +761,9 @@ function mapCounterparty(record: AnyRecord): LiveCounterparty | null {
     phone: text(record, ['phone', 'Телефон'], null),
     email: text(record, ['email', 'Email'], null),
     isActive: isEntityActive(record),
+    hasDebt: bool(record, ['hasDebt'], false),
+    shipmentProhibited: bool(record, ['shipmentProhibited'], false),
+    debtReason: text(record, ['debtReason'], null),
     managerGuid,
     managerName,
     manager: managerGuid || managerName ? { guid: managerGuid, name: managerName } : null,
@@ -871,12 +905,18 @@ function mapClientOrderDefaultsPayload(payload: unknown): LiveClientOrderDefault
     readObject(envelope, ['data']) ??
     envelope ??
     {};
+  const counterparty = mapCounterparty(readObject(record, ['counterparty', 'Контрагент']) ?? {});
+  const hasDebt = bool(record, ['hasDebt'], false) || Boolean(counterparty?.hasDebt);
+  const shipmentProhibited = bool(record, ['shipmentProhibited'], false) || Boolean(counterparty?.shipmentProhibited);
+  const debtReason = text(record, ['debtReason'], null) ?? counterparty?.debtReason ?? null;
   const warnings = readArray(record, ['warnings'])
     .map((value) => String(value ?? '').trim())
     .filter(Boolean);
   return {
     organization: mapOrganization(readObject(record, ['organization', 'Организация']) ?? {}),
-    counterparty: mapCounterparty(readObject(record, ['counterparty', 'Контрагент']) ?? {}),
+    counterparty: counterparty
+      ? { ...counterparty, hasDebt, shipmentProhibited, debtReason }
+      : null,
     agreement: mapAgreement(readObject(record, ['agreement', 'Соглашение']) ?? {}),
     contract: mapContract(readObject(record, ['contract', 'Договор']) ?? {}),
     warehouse: mapWarehouse(readObject(record, ['warehouse', 'Склад']) ?? {}),
@@ -888,6 +928,9 @@ function mapClientOrderDefaultsPayload(payload: unknown): LiveClientOrderDefault
     deliveryMethods: DEFAULT_DELIVERY_METHOD_OPTIONS.map((item) => ({ ...item })),
     currency: text(record, ['currency', 'Валюта'], DEFAULT_CURRENCY),
     warnings,
+    hasDebt,
+    shipmentProhibited,
+    debtReason,
   };
 }
 
@@ -1098,6 +1141,9 @@ function mapOrderCounterparty(record: AnyRecord | null | undefined) {
   if (!base) return null;
   return {
     ...base,
+    hasDebt: bool(record, ['hasDebt'], false),
+    shipmentProhibited: bool(record, ['shipmentProhibited'], false),
+    debtReason: text(record, ['debtReason'], null),
     fullName: text(record, ['fullName', 'ПолноеНаименование'], null),
     inn: text(record, ['inn', 'ИНН'], null),
     kpp: text(record, ['kpp', 'КПП'], null),
@@ -1182,6 +1228,10 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
   const currentState1c = text(record, ['currentState1c', 'currentState', 'state1c', 'stateName', 'Состояние'], null);
   const documentStatus1c = text(record, ['documentStatus1c', 'documentStatus', 'СтатусДокумента'], null);
   const status1c = currentState1c ?? text(record, ['status1c', 'Статус'], null);
+  const counterparty = mapOrderCounterparty(readObject(record, ['counterparty', 'Контрагент']));
+  const hasDebt = bool(record, ['hasDebt'], false) || Boolean(counterparty?.hasDebt);
+  const shipmentProhibited = bool(record, ['shipmentProhibited'], false) || Boolean(counterparty?.shipmentProhibited);
+  const debtReason = text(record, ['debtReason'], null) ?? counterparty?.debtReason ?? null;
   return {
     guid: orderGuid!,
     appGuid,
@@ -1213,9 +1263,14 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     lastStatusSyncAt: text(record, ['lastStatusSyncAt', 'updatedAt'], null),
     lastExportError: text(record, ['lastExportError'], null),
     last1cError: text(record, ['last1cError', 'lastError'], null),
+    hasDebt,
+    shipmentProhibited,
+    debtReason,
     isPostedIn1c: isPosted,
     cancelRequestedAt: null,
-    counterparty: mapOrderCounterparty(readObject(record, ['counterparty', 'Контрагент'])),
+    counterparty: counterparty
+      ? { ...counterparty, hasDebt, shipmentProhibited, debtReason }
+      : null,
     organization: mapOrganization(readObject(record, ['organization', 'Организация']) ?? {}) as LiveClientOrder['organization'],
     warehouse: mapOrderWarehouse(record),
     agreement: mapAgreement(readObject(record, ['agreement', 'Соглашение']) ?? {}),
@@ -1276,8 +1331,18 @@ export async function findLiveOrganization(guid: string) {
   return findOneFromList(guid, {}, getOnecLpAppOrganizations, ['organizations'], mapOrganization);
 }
 
-export async function getLiveCounterparties(query: ClientOrdersCounterpartiesQuery & { managerGuid?: string | null }) {
-  return liveSmartPaged(query, getOnecLpAppCounterparties, ['counterparties'], mapCounterparty);
+export async function getLiveCounterparties(
+  query: Omit<ClientOrdersCounterpartiesQuery, 'debtStatus'> & {
+    debtStatus?: ClientOrdersCounterpartiesQuery['debtStatus'];
+    managerGuid?: string | null;
+  }
+) {
+  return liveSmartPaged(
+    { ...query, debtStatus: query.debtStatus ?? 'all' },
+    getOnecLpAppCounterparties,
+    ['counterparties'],
+    mapCounterparty
+  );
 }
 
 export async function findLiveCounterparty(guid: string) {
@@ -1373,6 +1438,24 @@ export async function getLiveClientOrders(query: ClientOrdersListQuery & { manag
     limit,
     offset,
   });
+}
+
+export async function getLiveClientOrdersTodaySummary(query: { managerGuid: string; date: string }): Promise<LiveClientOrdersTodaySummary> {
+  const payload = await getOnecLpAppClientOrdersTodaySummary(query);
+  const record = asRecord(payload);
+  const profitAvailable = bool(record, ['profitAvailable'], false);
+  const profit = profitAvailable ? numberValue(record, ['profit'], null) : null;
+  return {
+    date: text(record, ['date'], query.date) ?? query.date,
+    ordersCount: Math.max(0, Math.trunc(numberValue(record, ['ordersCount'], 0) ?? 0)),
+    clientsCount: Math.max(0, Math.trunc(numberValue(record, ['clientsCount'], 0) ?? 0)),
+    totalAmount: numberValue(record, ['totalAmount'], 0) ?? 0,
+    profit,
+    profitAvailable: profitAvailable && profit !== null,
+    missingReceiptPriceCount: Math.max(0, Math.trunc(numberValue(record, ['missingReceiptPriceCount'], 0) ?? 0)),
+    currency: text(record, ['currency'], 'RUB') ?? 'RUB',
+    calculatedAt: text(record, ['calculatedAt'], new Date().toISOString()) ?? new Date().toISOString(),
+  };
 }
 
 export async function findLiveClientOrder(params: { managerGuid: string; appGuid?: string | null; number1c?: string | null }) {

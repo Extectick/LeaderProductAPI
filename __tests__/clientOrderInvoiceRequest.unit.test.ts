@@ -1,4 +1,5 @@
 const mockOrderFindFirst = jest.fn();
+const mockOrderFindMany = jest.fn();
 const mockInvoiceFindMany = jest.fn();
 const mockRequestOnecInvoice = jest.fn();
 const mockSyncQueueItem = jest.fn();
@@ -15,7 +16,7 @@ const mockOrganizationUpsert = jest.fn();
 jest.mock('../src/prisma/client', () => ({
   __esModule: true,
   default: {
-    order: { findFirst: mockOrderFindFirst },
+    order: { findFirst: mockOrderFindFirst, findMany: mockOrderFindMany },
     clientOrderInvoice: { findMany: mockInvoiceFindMany },
     employeeProfile: { findUnique: mockEmployeeProfileFindUnique },
     $transaction: mockTransaction,
@@ -40,13 +41,17 @@ jest.mock('../src/services/clientOrderInvoiceWorker', () => ({
   processInvoice: mockProcessInvoice,
 }));
 
-import { requestClientOrderInvoice } from '../src/modules/clientOrders/clientOrderInvoices.service';
+import {
+  listClientOrderInvoiceStatuses,
+  requestClientOrderInvoice,
+} from '../src/modules/clientOrders/clientOrderInvoices.service';
 
 describe('manual client order invoice request', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockEmployeeProfileFindUnique.mockResolvedValue(null);
     mockFindLiveClientOrder.mockResolvedValue(null);
+    mockOrderFindMany.mockResolvedValue([]);
     mockTransaction.mockImplementation((callback) => callback({
       order: { findFirst: mockTxOrderFindFirst, create: mockTxOrderCreate },
       counterparty: { upsert: mockCounterpartyUpsert },
@@ -204,5 +209,40 @@ describe('manual client order invoice request', () => {
         createdByUserId: 37,
       }),
     }));
+  });
+
+  it('polls owned invoice statuses from PostgreSQL without reading the 1C manager profile', async () => {
+    mockOrderFindMany.mockResolvedValueOnce([{
+      guid: 'order-guid',
+      number1c: 'НОУТ-1',
+      last1cSnapshot: null,
+      invoices: [{
+        id: 'invoice-id',
+        realizationGuid: 'realization-guid',
+        realizationNumber: 'НОУТ-H1',
+        realizationDate: new Date('2026-08-04T00:00:00.000Z'),
+        version: 2,
+        state: 'AVAILABLE',
+        waitReason: null,
+        lastError: null,
+        s3Key: 'invoices/file.pdf',
+        fileName: 'Счет.pdf',
+        sentAt: null,
+      }],
+    }]);
+
+    await expect(listClientOrderInvoiceStatuses(['ORDER-GUID'], 37)).resolves.toEqual({
+      items: [{
+        identifier: 'order-guid',
+        invoices: [expect.objectContaining({
+          id: 'invoice-id',
+          state: 'AVAILABLE',
+          version: 2,
+          downloadAvailable: true,
+        })],
+      }],
+    });
+    expect(mockEmployeeProfileFindUnique).not.toHaveBeenCalled();
+    expect(mockOrderFindMany).toHaveBeenCalledTimes(1);
   });
 });

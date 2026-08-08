@@ -1,4 +1,5 @@
 import prisma from '../../prisma/client';
+import { ClientOrderInvoiceState, Prisma } from '@prisma/client';
 import {
   OnecLpAppHttpError,
   requestOnecLpAppClientOrderInvoice,
@@ -22,6 +23,25 @@ const publicInvoiceSelect = {
   fileName: true,
   sentAt: true,
 } as const;
+
+const invoiceStatusOrderSelect = {
+  guid: true,
+  number1c: true,
+  last1cSnapshot: true,
+  invoices: {
+    where: {
+      state: {
+        notIn: [ClientOrderInvoiceState.SUPERSEDED, ClientOrderInvoiceState.CANCELLED],
+      },
+    },
+    orderBy: [
+      { realizationGuid: 'asc' as const },
+      { version: 'desc' as const },
+      { updatedAt: 'desc' as const },
+    ],
+    select: publicInvoiceSelect,
+  },
+} satisfies Prisma.OrderSelect;
 
 const accessibleOrderSelect = {
   id: true,
@@ -302,6 +322,70 @@ export async function listClientOrderInvoices(guid: string, userId: number) {
   return { items: invoices.map(mapInvoice) };
 }
 
+/**
+ * Lightweight polling projection for the mobile order list. It intentionally
+ * reads only PostgreSQL: the invoice worker is the single writer of this read
+ * model, so polling must not reload the heavy 1C orders list every five seconds.
+ */
+export async function listClientOrderInvoiceStatuses(identifiers: string[], userId: number) {
+  const normalizedIdentifiers = Array.from(new Set(
+    identifiers.map((value) => normalizedString(value)).filter(Boolean)
+  )).slice(0, 100);
+  if (!normalizedIdentifiers.length) return { items: [] };
+
+  const identityFilter = (values: string[]) => ({
+    OR: [
+      { guid: { in: values } },
+      { number1c: { in: values } },
+    ],
+  });
+  const ownedOrders = await prisma.order.findMany({
+    where: {
+      AND: [identityFilter(normalizedIdentifiers), { createdByUserId: userId }],
+    },
+    select: invoiceStatusOrderSelect,
+  });
+
+  const byIdentifier = new Map<string, (typeof ownedOrders)[number]>();
+  const addOrderIdentifiers = (order: (typeof ownedOrders)[number]) => {
+    const snapshot = snapshotIdentity(order.last1cSnapshot);
+    for (const key of [order.guid, order.number1c, snapshot.appGuid, snapshot.documentGuid, snapshot.number1c]) {
+      const normalized = normalizedString(key);
+      if (normalized) byIdentifier.set(normalized, order);
+    }
+  };
+  ownedOrders.forEach(addOrderIdentifiers);
+
+  const unresolvedIdentifiers = normalizedIdentifiers.filter((identifier) => !byIdentifier.has(identifier));
+  if (unresolvedIdentifiers.length) {
+    const managerGuid = await managerGuidForUser(userId);
+    if (managerGuid) {
+      const visibleOrders = await prisma.order.findMany({
+        where: {
+          AND: [
+            identityFilter(unresolvedIdentifiers),
+            {
+              OR: [
+                { last1cSnapshot: { path: ['item', 'managerGuid'], equals: managerGuid } },
+                { last1cSnapshot: { path: ['managerGuid'], equals: managerGuid } },
+              ],
+            },
+          ],
+        },
+        select: invoiceStatusOrderSelect,
+      });
+      visibleOrders.forEach(addOrderIdentifiers);
+    }
+  }
+
+  return {
+    items: normalizedIdentifiers.map((identifier) => ({
+      identifier,
+      invoices: (byIdentifier.get(identifier)?.invoices ?? []).map(mapInvoice),
+    })),
+  };
+}
+
 export async function requestClientOrderInvoice(guid: string, userId: number) {
   const startedAt = Date.now();
   const order = await resolveAccessibleOrder(guid, userId);
@@ -310,10 +394,10 @@ export async function requestClientOrderInvoice(guid: string, userId: number) {
   }
 
   try {
-    const requested = await requestOnecLpAppClientOrderInvoice(order.guid);
-    const queueItems = requested.items ?? [];
-    const immediateProtocol = requested.protocolVersion === '2026-08-05-immediate-invoice-v2';
-    for (const item of queueItems) await syncQueueItem(item, { immediate: immediateProtocol });
+      const requested = await requestOnecLpAppClientOrderInvoice(order.guid);
+      const queueItems = requested.items ?? [];
+      const immediateProtocol = requested.protocolVersion === '2026-08-05-immediate-invoice-v2';
+      await Promise.all(queueItems.map((item) => syncQueueItem(item, { immediate: immediateProtocol })));
 
     // A manual request is an explicit user action, so it must not wait for the
     // periodic worker tick. The regular worker remains a recovery mechanism for
@@ -330,7 +414,18 @@ export async function requestClientOrderInvoice(guid: string, userId: number) {
         },
         select: { id: true },
       });
-      for (const candidate of candidates) await processInvoice(candidate.id);
+      // Start immediately, but do not keep the user's HTTP request open while
+      // 1C renders PDF, S3 uploads it and messengers accept the document. The
+      // regular worker will safely recover the same leased/idempotent candidate
+      // after a process restart or a transient failure.
+      for (const candidate of candidates) {
+        void Promise.resolve(processInvoice(candidate.id)).catch((error) => {
+          console.error('[client-order-invoice] immediate processing failed', {
+            invoiceId: candidate.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       processedImmediately = candidates.length;
     }
 

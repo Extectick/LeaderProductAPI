@@ -704,6 +704,9 @@ model Order {
   @@index([source])
   @@index([source, updatedAt])
   @@index([source, status, updatedAt])
+  @@index([number1c])
+  @@index([source, createdByUserId, updatedAt, id])
+  @@index([source, createdByUserId, status, updatedAt, id])
   @@index([syncState])
   @@index([revision])
   @@index([queuedAt])
@@ -732,6 +735,7 @@ model ClientOrderInvoice {
   realizationGuid   String
   realizationNumber String?
   realizationDate   DateTime?                    @db.Date
+  paymentDueDate    DateTime?                    @db.Date
   invoiceAmount     Decimal?                     @db.Decimal(18, 2)
   currency          String?
   counterpartyName  String?
@@ -761,7 +765,9 @@ model ClientOrderInvoice {
 
   @@unique([orderId, realizationGuid, token])
   @@index([orderId, realizationGuid, version])
+  @@index([orderId, state, updatedAt, version])
   @@index([state, nextAttemptAt])
+  @@index([state, readyAt, nextAttemptAt, leaseUntil, updatedAt])
   @@index([realizationGuid, businessHash])
 }
 

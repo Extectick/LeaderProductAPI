@@ -1,6 +1,7 @@
 import {
   clientOrderCreateSchema,
   clientOrdersBatchProductsSchema,
+  clientOrdersCounterpartiesQuerySchema,
   clientOrdersListQuerySchema,
   clientOrdersProductsQuerySchema,
 } from '../src/modules/clientOrders/clientOrders.schemas';
@@ -97,6 +98,13 @@ describe('client orders query schemas', () => {
 
     expect(parsed.status).toBe('CANCELLED');
     expect(parsed.number1c).toBe('НОУТ-073955');
+  });
+
+  it('defaults counterparty debt filtering to all and validates explicit modes', () => {
+    expect(clientOrdersCounterpartiesQuerySchema.parse({}).debtStatus).toBe('all');
+    expect(clientOrdersCounterpartiesQuerySchema.parse({ debtStatus: 'with_debt' }).debtStatus).toBe('with_debt');
+    expect(clientOrdersCounterpartiesQuerySchema.parse({ debtStatus: 'without_debt' }).debtStatus).toBe('without_debt');
+    expect(clientOrdersCounterpartiesQuerySchema.safeParse({ debtStatus: 'invalid' }).success).toBe(false);
   });
 
   it('accepts a historical receipt-price moment and rejects an invalid one', () => {
