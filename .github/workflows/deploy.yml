@@ -123,5 +123,14 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
           script: |
-            git -C /opt/leader-api/LeaderProductAPI reset --hard
-            /opt/leader-deploy/deploy.sh api "$IMAGE_TAG" "$GIT_REF"
+            set -euo pipefail
+            cd /opt/leader-api
+
+            git fetch origin "$GIT_REF"
+            git checkout -B "$GIT_REF" "origin/$GIT_REF"
+
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+            export IMAGE_TAG
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps api
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps api
