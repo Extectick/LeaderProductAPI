@@ -3,8 +3,10 @@ import { Bot } from '@maxhub/max-bot-api';
 type MaxUpdateHandler = (update: unknown) => Promise<void> | void;
 type MaxUpdatesMode = 'auto' | 'webhook' | 'polling';
 
-const MAX_API_BASE = 'https://platform-api.max.ru';
+const MAX_API_BASE = 'https://platform-api2.max.ru';
 const DEFAULT_UPDATE_TYPES = ['message_created', 'bot_started'];
+const MAX_FILE_UPLOAD_TIMEOUT_MS = 30_000;
+const MAX_ATTACHMENT_READY_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000];
 
 let cachedBot: Bot | null = null;
 let cachedToken = '';
@@ -381,6 +383,85 @@ export async function sendMaxInfoMessage(params: {
   return true;
 }
 
+function normalizeMaxDocumentFileName(fileName: string) {
+  const leafName = String(fileName || '')
+    .trim()
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim();
+  const normalized = leafName || 'invoice.pdf';
+  return /\.pdf$/i.test(normalized) ? normalized : `${normalized}.pdf`;
+}
+
+async function readMaxUploadResponse(response: Response) {
+  const raw = await response.text();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { raw };
+  }
+}
+
+function maxUploadError(operation: string, status: number, payload: any) {
+  const detail = extractLastError(payload) || payload?.code || payload?.raw || `HTTP ${status}`;
+  return new Error(`MAX ${operation} failed: ${detail}`);
+}
+
+async function uploadMaxDocument(buffer: Buffer, fileName: string) {
+  const uploadTarget = await callMaxApi('/uploads?type=file', { method: 'POST' });
+  if (!uploadTarget.ok) {
+    throw maxUploadError('upload URL request', uploadTarget.status, uploadTarget.data);
+  }
+
+  const uploadUrl = String(uploadTarget.data?.url || '').trim();
+  if (!uploadUrl) throw new Error('MAX upload URL response does not contain url');
+
+  const normalizedFileName = normalizeMaxDocumentFileName(fileName);
+  const form = new FormData();
+  form.append(
+    'data',
+    new Blob([new Uint8Array(buffer)], { type: 'application/pdf' }),
+    normalizedFileName
+  );
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MAX_FILE_UPLOAD_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(uploadUrl, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const payload = await readMaxUploadResponse(response);
+  if (!response.ok) throw maxUploadError('file upload', response.status, payload);
+
+  const token = String(payload?.token || uploadTarget.data?.token || '').trim();
+  if (!token) throw new Error('MAX file upload response does not contain token');
+
+  return {
+    fileName: normalizedFileName,
+    attachment: { type: 'file' as const, payload: { token } },
+  };
+}
+
+function isMaxAttachmentNotReady(error: unknown) {
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  const code = String(candidate?.code || '').toLowerCase();
+  const message = String(candidate?.message || '').toLowerCase();
+  return code === 'attachment.not.ready' || message.includes('attachment.not.ready');
+}
+
+async function waitFor(ms: number) {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 export async function sendMaxDocument(params: {
   chatId: string | number | bigint;
   buffer: Buffer;
@@ -390,12 +471,20 @@ export async function sendMaxDocument(params: {
   const bot = getBot();
   if (!bot) return false;
 
-  const attachment = await bot.api.uploadFile({ source: params.buffer });
-  await bot.api.sendMessageToUser(
-    toIntId(params.chatId),
-    params.caption || params.fileName,
-    { attachments: [attachment.toJson()] }
-  );
+  const uploaded = await uploadMaxDocument(params.buffer, params.fileName);
+  const userId = toIntId(params.chatId);
+  const text = params.caption || uploaded.fileName;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await bot.api.sendMessageToUser(userId, text, { attachments: [uploaded.attachment] });
+      break;
+    } catch (error) {
+      const retryDelay = MAX_ATTACHMENT_READY_RETRY_DELAYS_MS[attempt];
+      if (!isMaxAttachmentNotReady(error) || retryDelay === undefined) throw error;
+      await waitFor(retryDelay);
+    }
+  }
   return true;
 }
 
