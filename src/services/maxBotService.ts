@@ -3,7 +3,7 @@ import { Bot } from '@maxhub/max-bot-api';
 type MaxUpdateHandler = (update: unknown) => Promise<void> | void;
 type MaxUpdatesMode = 'auto' | 'webhook' | 'polling';
 
-const MAX_API_BASE = 'https://platform-api2.max.ru';
+const MAX_API_BASE = 'https://platform-api.max.ru';
 const DEFAULT_UPDATE_TYPES = ['message_created', 'bot_started'];
 const MAX_FILE_UPLOAD_TIMEOUT_MS = 30_000;
 const MAX_ATTACHMENT_READY_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000];

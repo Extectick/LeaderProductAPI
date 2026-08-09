@@ -55,7 +55,7 @@ describe('MAX document delivery', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://platform-api2.max.ru/uploads?type=file',
+      'https://platform-api.max.ru/uploads?type=file',
       expect.objectContaining({ method: 'POST' })
     );
     const uploadOptions = fetchMock.mock.calls[1][1] as RequestInit;
