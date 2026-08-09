@@ -123,11 +123,16 @@ function invoiceAmount(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function mapOnecState(state: OnecClientOrderInvoiceQueueItem['state']): ClientOrderInvoiceState {
-  if (state === 'CANCELLED') return ClientOrderInvoiceState.CANCELLED;
-  if (state === 'READY') return ClientOrderInvoiceState.QUEUED;
-  if (state === 'STORED') return ClientOrderInvoiceState.AVAILABLE;
-  return state as ClientOrderInvoiceState;
+function mapOnecState(item: OnecClientOrderInvoiceQueueItem): ClientOrderInvoiceState {
+  // 1C keeps invalidated queue rows visible as WAITING so the API can observe
+  // the transition. A deleted realization is terminal for its invoice even if
+  // another realization for the same order is created afterwards.
+  if (item.state === 'CANCELLED' || item.waitReason === 'REALIZATION_DELETED') {
+    return ClientOrderInvoiceState.CANCELLED;
+  }
+  if (item.state === 'READY') return ClientOrderInvoiceState.QUEUED;
+  if (item.state === 'STORED') return ClientOrderInvoiceState.AVAILABLE;
+  return item.state as ClientOrderInvoiceState;
 }
 
 function unwrapValidation(value: unknown): OnecClientOrderInvoiceQueueItem | null {
@@ -217,7 +222,7 @@ export async function syncQueueItem(
     // отправленной версией не является дублем: после v1 -> v2 -> v3 содержимое
     // v3 может снова совпасть с v1, но относительно v2 это новое изменение,
     // которое должно получить новый PDF и отдельную доставку.
-    const onecState = mapOnecState(item.state);
+    const onecState = mapOnecState(item);
     const incomingReadyAt = parseDate(item.readyAt);
     // The old 1C extension exposed an artificial +30 second readyAt. The
     // business hash and token already protect us from an unstable/stale PDF,
@@ -288,7 +293,14 @@ export async function syncQueueItem(
             ? { readyAt: new Date(Date.now() + stabilityMs()) }
             : {}),
         onecUpdatedAt: incomingUpdate,
-        ...(current?.state === ClientOrderInvoiceState.SENT
+        ...(onecState === ClientOrderInvoiceState.CANCELLED
+          ? {
+              state: ClientOrderInvoiceState.CANCELLED,
+              supersededAt: current?.supersededAt ?? new Date(),
+              leaseUntil: null,
+              nextAttemptAt: null,
+            }
+          : current?.state === ClientOrderInvoiceState.SENT
           ? {}
           : current?.state === ClientOrderInvoiceState.SENDING && current.leaseUntil && current.leaseUntil > new Date()
             ? {}

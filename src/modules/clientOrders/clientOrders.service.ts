@@ -3140,6 +3140,64 @@ function mapMergedLiveOrder(
   };
 }
 
+function reconcilePostedLiveOrdersInBackground(
+  liveItems: LiveClientOrder[],
+  localByAppGuid: Map<string, ClientOrderSummaryRecord>,
+  localByNumber: Map<string, ClientOrderSummaryRecord>
+) {
+  const localIds = new Set<string>();
+
+  for (const live of liveItems) {
+    if (!live.isPostedIn1c) continue;
+    const key = liveOrderKey(live);
+    const local = (key.appGuid ? localByAppGuid.get(key.appGuid) : undefined)
+      ?? (key.number1c ? localByNumber.get(key.number1c) : undefined);
+    if (!local) continue;
+    if (
+      local.isPostedIn1c !== true
+      || local.status !== OrderStatus.CONFIRMED
+      || local.syncState !== OrderSyncState.SYNCED
+      || Boolean(local.last1cError)
+      || Boolean(local.lastExportError)
+    ) {
+      localIds.add(local.id);
+    }
+  }
+
+  if (!localIds.size) return;
+  const syncedAt = new Date();
+  void prisma.order.updateMany({
+    where: {
+      id: { in: [...localIds] },
+      source: OrderSource.MANAGER_APP,
+      OR: [
+        { isPostedIn1c: false },
+        { status: { not: OrderStatus.CONFIRMED } },
+        { syncState: { not: OrderSyncState.SYNCED } },
+        { last1cError: { not: null } },
+        { lastExportError: { not: null } },
+      ],
+    },
+    data: {
+      isPostedIn1c: true,
+      status: OrderStatus.CONFIRMED,
+      syncState: OrderSyncState.SYNCED,
+      last1cError: null,
+      lastExportError: null,
+      lastStatusSyncAt: syncedAt,
+      lastSyncedAt: syncedAt,
+    },
+  }).then((result) => {
+    if (result.count) {
+      console.info('[client-orders] reconciled posted live orders', { count: result.count });
+    }
+  }).catch((error) => {
+    // Live data is already returned to the user. Persistence is best-effort
+    // and must never delay or break the documents list.
+    console.warn('[client-orders] failed to reconcile posted live orders', error);
+  });
+}
+
 function liveUnavailableMeta(error: unknown) {
   if (error instanceof ClientOrdersError && error.status === 502) {
     return { status: 'unavailable', message: error.message || '1С временно недоступна. Показаны локальные черновики.' };
@@ -3390,6 +3448,11 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
     if (key.appGuid && !invoiceLocalByAppGuid.has(key.appGuid)) invoiceLocalByAppGuid.set(key.appGuid, item);
     if (key.number1c && !invoiceLocalByNumber.has(key.number1c)) invoiceLocalByNumber.set(key.number1c, item);
   }
+
+  // The live list is the source of truth for posting. Persist a successful
+  // manual posting in the background so a later 1C outage cannot resurrect an
+  // old SAVED_NOT_POSTED error from the local API snapshot.
+  reconcilePostedLiveOrdersInBackground(liveItems, localByAppGuid, localByNumber);
 
   const mappedPinned = pinnedItems.map((item) => mapClientOrderSummary(item, queuePositions));
   const mappedLive = liveItems.flatMap((item) => {

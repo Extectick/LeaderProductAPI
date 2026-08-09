@@ -100,6 +100,50 @@ describe('clientOrderInvoiceWorker queue synchronization', () => {
     expect(createData.readyAt.getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  it('cancels a previously sent invoice when its realization is deleted in 1C', async () => {
+    const current = {
+      id: 'invoice-old-realization',
+      state: 'SENT',
+      supersededAt: null,
+      leaseUntil: null,
+    };
+    const tx = {
+      order: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'order-1' }),
+      },
+      clientOrderInvoice: {
+        findUnique: jest.fn().mockResolvedValue(current),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        upsert: jest.fn().mockResolvedValue({ id: current.id }),
+      },
+    };
+    (prisma.$transaction as jest.Mock).mockImplementation(async (callback: (client: typeof tx) => unknown) => callback(tx));
+
+    await syncQueueItem({
+      appOrderGuid: 'app-order-guid',
+      orderGuid: 'onec-order-guid',
+      realizationGuid: 'deleted-realization-guid',
+      realizationNumber: 'САУТ-H09001',
+      state: 'WAITING',
+      waitReason: 'REALIZATION_DELETED',
+      businessHash: null,
+      version: 1,
+      token: 'deleted-realization-token',
+      readyAt: null,
+      updatedAt: '2026-08-09T12:41:06',
+    });
+
+    expect(tx.clientOrderInvoice.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { token: 'deleted-realization-token' },
+      update: expect.objectContaining({
+        state: 'CANCELLED',
+        supersededAt: expect.any(Date),
+        leaseUntil: null,
+        nextAttemptAt: null,
+      }),
+    }));
+  });
+
   it('stores a ready PDF without bot delivery when automatic delivery is disabled', async () => {
     const invoice = {
       id: 'invoice-manual',
