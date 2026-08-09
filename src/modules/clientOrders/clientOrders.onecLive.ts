@@ -54,6 +54,7 @@ export type LiveOrganization = {
   name: string;
   code: string | null;
   isActive: boolean;
+  isSelectable?: boolean;
 };
 
 export type LiveCounterparty = {
@@ -96,7 +97,7 @@ export type LiveAgreement = {
   status?: string | null;
   isActive: boolean;
   contract: { guid: string; number: string } | null;
-  warehouse: { guid: string; name: string } | null;
+  warehouse: { guid: string; name: string; isSelectable?: boolean } | null;
   priceType: { guid: string; name: string } | null;
 };
 
@@ -127,6 +128,12 @@ export type LiveWarehouse = {
   isDefault: boolean;
   isPickup: boolean;
   isActive: boolean;
+  parentGuid?: string | null;
+  parentName?: string | null;
+  cityGuid?: string | null;
+  cityName?: string | null;
+  sortOrder?: number | null;
+  isSelectable?: boolean;
 };
 
 export type LivePriceType = {
@@ -644,11 +651,15 @@ function mapOrganization(record: AnyRecord): LiveOrganization | null {
   const guid = entityGuid(record);
   const name = text(record, ['name', 'Наименование'], guid);
   if (!guid || !name) return null;
+  const selectableValue = read(record, ['isSelectable', 'selectable']);
   return {
     guid,
     name,
     code: text(record, ['code', 'Код']),
     isActive: isEntityActive(record),
+    ...(selectableValue === undefined || selectableValue === null
+      ? {}
+      : { isSelectable: bool(record, ['isSelectable', 'selectable'], true) }),
   };
 }
 
@@ -656,6 +667,7 @@ function mapWarehouse(record: AnyRecord): LiveWarehouse | null {
   const guid = entityGuid(record);
   const name = text(record, ['name', 'Наименование'], guid);
   if (!guid || !name) return null;
+  const selectableValue = read(record, ['isSelectable', 'selectable']);
   return {
     guid,
     name,
@@ -664,6 +676,14 @@ function mapWarehouse(record: AnyRecord): LiveWarehouse | null {
     isDefault: bool(record, ['isDefault', 'default'], false),
     isPickup: bool(record, ['isPickup', 'pickup'], false),
     isActive: isEntityActive(record),
+    parentGuid: text(record, ['parentGuid']),
+    parentName: text(record, ['parentName']),
+    cityGuid: text(record, ['cityGuid', 'groupGuid']),
+    cityName: text(record, ['cityName', 'groupName']),
+    sortOrder: numberValue(record, ['sortOrder'], null),
+    ...(selectableValue === undefined || selectableValue === null
+      ? {}
+      : { isSelectable: bool(record, ['isSelectable', 'selectable'], true) }),
   };
 }
 
@@ -854,7 +874,13 @@ function mapAgreement(record: AnyRecord): LiveAgreement | null {
       ? { guid: contractGuid, number: text(contractRecord, ['number', 'name'], contractGuid) ?? contractGuid }
       : null,
     warehouse: warehouseGuid
-      ? { guid: warehouseGuid, name: text(warehouseRecord, ['name'], warehouseGuid) ?? warehouseGuid }
+      ? {
+          guid: warehouseGuid,
+          name: text(warehouseRecord, ['name'], warehouseGuid) ?? warehouseGuid,
+          ...(read(warehouseRecord, ['isSelectable', 'selectable']) == null
+            ? {}
+            : { isSelectable: bool(warehouseRecord, ['isSelectable', 'selectable'], true) }),
+        }
       : null,
     priceType: priceTypeGuid
       ? { guid: priceTypeGuid, name: text(priceTypeRecord, ['name'], priceTypeGuid) ?? priceTypeGuid }

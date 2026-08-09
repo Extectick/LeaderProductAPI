@@ -29,7 +29,9 @@ export const CLIENT_ORDERS_CACHE_TTL = {
   agreements: 120,
   contracts: 120,
   deliveryAddresses: 180,
-  warehouses: 600,
+  // Organizations and warehouses are small allowlisted directories. A short
+  // TTL makes administrator changes visible quickly without adding load to 1C.
+  warehouses: 60,
   priceTypes: 600,
   products: 15,
   productsBatch: 15,

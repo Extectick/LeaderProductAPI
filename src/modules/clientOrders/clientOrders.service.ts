@@ -2209,6 +2209,24 @@ async function loadLiveOrderMaterialization(
       loadLiveProductsForOrderMaterialization(body, productGuids, managerGuid),
     ]);
 
+  // New 1C versions expose isSelectable for exact GUID lookups. Older 1C
+  // versions do not have this field, so undefined deliberately remains valid
+  // during a rolling deployment.
+  if (organization?.isSelectable === false) {
+    throw new ClientOrdersError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'Выбранная организация больше недоступна для новых заказов. Обновите список и выберите организацию заново.'
+    );
+  }
+  if (warehouse?.isSelectable === false) {
+    throw new ClientOrdersError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'Выбранный склад больше недоступен для новых заказов. Обновите список и выберите склад заново.'
+    );
+  }
+
   return {
     organization,
     counterparty,
@@ -3761,7 +3779,12 @@ export async function getClientOrderExportDebug(guid: string, userId: number) {
 
 export async function getClientOrderSettings(userId: number) {
   const [settings, organizations] = await Promise.all([getRawClientOrderSettings(userId), getActiveOrganizations()]);
-  const preferredOrganization = await getValidatedPreferredOrganization(settings?.preferredOrganizationId);
+  const storedPreferredOrganization = await getValidatedPreferredOrganization(settings?.preferredOrganizationId);
+  const allowedOrganizationGuids = new Set(organizations.map((item) => item.guid.toLowerCase()));
+  const preferredOrganization = storedPreferredOrganization
+    && allowedOrganizationGuids.has(storedPreferredOrganization.guid.toLowerCase())
+    ? storedPreferredOrganization
+    : null;
   return buildSettingsResponse({
     organizations,
     preferredOrganization,
@@ -4064,6 +4087,13 @@ export async function updateClientOrderSettings(userId: number, body: ClientOrde
         'Ошибка получения организации из 1С',
         { allowCachedWhenCircuitOpen: true }
       );
+      if (liveOrganization?.isSelectable === false) {
+        throw new ClientOrdersError(
+          400,
+          ErrorCodes.VALIDATION_ERROR,
+          'Эту организацию нельзя использовать для новых заказов.'
+        );
+      }
       await prisma.$transaction(async (tx) => {
         await upsertLiveOrganization(tx, liveOrganization, now());
       });
@@ -4278,14 +4308,15 @@ async function getLocalClientOrderDefaults(userId: number, query: ClientOrderDef
 function mapLiveDefaults(defaults: LiveClientOrderDefaults, deliveryDateResolution: DeliveryDateResolution) {
   const agreement = mapAgreementSummary(defaults.agreement);
   const contract = mapContractSummary(defaults.contract ?? agreement?.contract ?? null);
-  const warehouse = mapWarehouseSummary(defaults.warehouse ?? defaults.agreement?.warehouse ?? null);
+  const warehouseSource = defaults.warehouse ?? defaults.agreement?.warehouse ?? null;
+  const warehouse = warehouseSource?.isSelectable === false ? null : mapWarehouseSummary(warehouseSource);
   const deliveryAddress = mapDeliveryAddressSummary(defaults.deliveryAddress);
   const priceType = defaults.priceType ?? defaults.agreement?.priceType ?? null;
   const hasDebt = defaults.hasDebt || Boolean(defaults.counterparty?.hasDebt);
   const shipmentProhibited = defaults.shipmentProhibited || Boolean(defaults.counterparty?.shipmentProhibited);
   const debtReason = defaults.debtReason || defaults.counterparty?.debtReason || null;
   return {
-    organization: mapOrganizationSummary(defaults.organization),
+    organization: defaults.organization?.isSelectable === false ? null : mapOrganizationSummary(defaults.organization),
     counterparty: defaults.counterparty
       ? {
           guid: defaults.counterparty.guid,
