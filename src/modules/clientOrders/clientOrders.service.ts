@@ -314,7 +314,12 @@ export function normalizeClientOrderPublicError(value: unknown) {
   if (
     lower.includes('timeout') ||
     lower.includes('network') ||
+    lower.includes('fetch failed') ||
+    lower.includes('failed to connect') ||
+    lower.includes('connectexception') ||
     lower.includes('econnrefused') ||
+    lower.includes('econnreset') ||
+    lower.includes('enotfound') ||
     lower.includes('etimedout') ||
     lower.includes('1с недоступ') ||
     lower.includes('1c недоступ')
@@ -581,6 +586,7 @@ const REALIZATION_CONTRACT_PURPOSE = 'Реализация';
 const RECEIPT_PRICE_TYPE_TOKEN = '\u0446\u0435\u043d\u0430\u043f\u043e\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044f';
 const now = () => new Date();
 const CLIENT_ORDERS_TODAY_SUMMARY_STALE_TTL_SECONDS = 15 * 60;
+const CLIENT_ORDERS_TODAY_SUMMARY_MANUAL_COOLDOWN_MS = 10_000;
 const CLIENT_ORDERS_TODAY_SUMMARY_TIME_ZONE = 'Asia/Omsk';
 type ClientOrdersTodaySummaryCacheEntry = {
   value: LiveClientOrdersTodaySummary;
@@ -590,6 +596,8 @@ type ClientOrdersTodaySummaryCacheEntry = {
 export type ClientOrdersTodaySummary = LiveClientOrdersTodaySummary & { stale: boolean };
 
 const clientOrdersTodaySummaryMemory = new Map<string, ClientOrdersTodaySummaryCacheEntry>();
+const clientOrdersTodaySummaryManualRefreshAt = new Map<string, number>();
+const clientOrdersTodaySummaryManualRefreshes = new Map<string, Promise<ClientOrdersTodaySummary>>();
 
 function currentClientOrdersDate() {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -3223,16 +3231,16 @@ function reconcilePostedLiveOrdersInBackground(
 
 function liveUnavailableMeta(error: unknown) {
   if (error instanceof ClientOrdersError && error.status === 502) {
-    return { status: 'unavailable', message: error.message || '1С временно недоступна. Показаны локальные черновики.' };
+    return { status: 'unavailable', message: 'Нет связи с 1С. Показаны сохранённые данные и локальные черновики.' };
   }
   if (error instanceof OnecLpAppConfigError) {
     return { status: 'not_configured', message: 'Не настроена связь с 1С для live-списка заказов.' };
   }
   if (error instanceof OnecLpAppNetworkError) {
-    return { status: 'unavailable', message: '1С временно недоступна. Показаны локальные черновики.' };
+    return { status: 'unavailable', message: 'Нет связи с 1С. Показаны сохранённые данные и локальные черновики.' };
   }
   if (error instanceof OnecLpAppHttpError) {
-    return { status: 'error', message: `1С вернула ошибку: ${error.message}` };
+    return { status: 'unavailable', message: 'Нет связи с 1С. Показаны сохранённые данные и локальные черновики.' };
   }
   return { status: 'error', message: 'Не удалось загрузить документы из 1С.' };
 }
@@ -3523,7 +3531,10 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
   };
 }
 
-export async function getClientOrdersTodaySummary(userId: number): Promise<ClientOrdersTodaySummary> {
+export async function getClientOrdersTodaySummary(
+  userId: number,
+  options: { forceRefresh?: boolean } = {}
+): Promise<ClientOrdersTodaySummary> {
   const managerGuid = await getManagerGuidForUser(userId);
   if (!managerGuid) {
     throw new ClientOrdersError(
@@ -3537,6 +3548,32 @@ export async function getClientOrdersTodaySummary(userId: number): Promise<Clien
   const cachePayload = { managerGuid, date };
   const staleKey = clientOrdersCacheKey('today-summary:stale', cachePayload);
 
+  if (options.forceRefresh) {
+    const manualKey = `${managerGuid}:${date}`;
+    const pending = clientOrdersTodaySummaryManualRefreshes.get(manualKey);
+    if (pending) return pending;
+
+    const lastRefreshAt = clientOrdersTodaySummaryManualRefreshAt.get(manualKey) ?? 0;
+    if (Date.now() - lastRefreshAt < CLIENT_ORDERS_TODAY_SUMMARY_MANUAL_COOLDOWN_MS) {
+      return getClientOrdersTodaySummary(userId);
+    }
+
+    clientOrdersTodaySummaryManualRefreshAt.set(manualKey, Date.now());
+    const task = getClientOrdersTodaySummaryFresh(cachePayload, staleKey, true)
+      .finally(() => clientOrdersTodaySummaryManualRefreshes.delete(manualKey));
+    clientOrdersTodaySummaryManualRefreshes.set(manualKey, task);
+    return task;
+  }
+
+  return getClientOrdersTodaySummaryFresh(cachePayload, staleKey, false);
+}
+
+async function getClientOrdersTodaySummaryFresh(
+  cachePayload: { managerGuid: string; date: string },
+  staleKey: string,
+  forceRefresh: boolean
+): Promise<ClientOrdersTodaySummary> {
+
   try {
     const entry = await onecLive(
       () => readThroughClientOrdersCache(
@@ -3547,7 +3584,7 @@ export async function getClientOrdersTodaySummary(userId: number): Promise<Clien
           value: await getLiveClientOrdersTodaySummary(cachePayload),
           fetchedAt: now().toISOString(),
         }),
-        { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
+        { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit, forceRefresh }
       ),
       'Ошибка получения дневной статистики заказов клиентов из 1С',
       { allowCachedWhenCircuitOpen: true }
@@ -5296,7 +5333,17 @@ export async function putClientOrderByClientId(
   const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
 
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${userId}:${clientOrderId}`}, 0))`;
+    // Prisma 7 with the pg driver adapter cannot deserialize PostgreSQL's
+    // pseudo-type `void`, which pg_advisory_xact_lock returns. Keep the lock
+    // materialized inside the transaction, but expose only a supported scalar
+    // to the driver.
+    await tx.$queryRaw<Array<{ locked: number }>>`
+      WITH advisory_lock AS MATERIALIZED (
+        SELECT pg_advisory_xact_lock(hashtextextended(${`${userId}:${clientOrderId}`}, 0))
+      )
+      SELECT 1::integer AS locked
+      FROM advisory_lock
+    `;
 
     const existing = await tx.order.findFirst({
       where: { createdByUserId: userId, clientOrderId },

@@ -139,7 +139,10 @@ describe('/api/client-orders live reference routes', () => {
       totalAmount: 12_345.67,
       profit: 2_100,
       profitAvailable: true,
+      profitBasisAmount: 12_345.67,
+      profitabilityPercent: 17.01,
       missingReceiptPriceCount: 0,
+      skippedReceiptPriceCount: 0,
       currency: 'RUB',
       calculatedAt: '2026-08-07T12:00:00',
       stale: false,
@@ -148,7 +151,7 @@ describe('/api/client-orders live reference routes', () => {
     const response = await request(app).get('/api/client-orders/today-summary');
 
     expect(response.status).toBe(200);
-    expect(service.getClientOrdersTodaySummary).toHaveBeenCalledWith(1);
+    expect(service.getClientOrdersTodaySummary).toHaveBeenCalledWith(1, { forceRefresh: false });
     expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
     expect(response.body.data).toMatchObject({
       date: '2026-08-07',

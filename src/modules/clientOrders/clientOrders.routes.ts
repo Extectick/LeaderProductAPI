@@ -133,7 +133,9 @@ router.get('/', authorizePermissions(['view_client_orders']), async (req: AuthRe
 
 router.get('/today-summary', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
   try {
-    const result = await getClientOrdersTodaySummary(req.user!.userId);
+    const forceValue = (req.query as Record<string, unknown>).force;
+    const forceRefresh = forceValue === '1' || forceValue === 'true';
+    const result = await getClientOrdersTodaySummary(req.user!.userId, { forceRefresh });
     return res.json(successResponse(result, 'Дневная статистика заказов клиентов'));
   } catch (err) {
     return handleError(res, err, 'Ошибка получения дневной статистики заказов клиентов');

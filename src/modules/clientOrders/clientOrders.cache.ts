@@ -4,6 +4,7 @@ import { cacheGet, cacheSet } from '../../lib/redis';
 type CacheLoader<T> = () => Promise<T>;
 type CacheOptions = {
   shouldOpenCircuit?: (error: unknown) => boolean;
+  forceRefresh?: boolean;
 };
 
 const pendingReads = new Map<string, Promise<unknown>>();
@@ -106,17 +107,19 @@ export async function readThroughClientOrdersCache<T>(
   if (!cacheEnabled() || ttlSeconds <= 0) return loader();
 
   const key = clientOrdersCacheKey(scope, payload);
-  const memoryFresh = getMemoryValue<T>(key, 'fresh');
-  if (memoryFresh !== null) return memoryFresh;
+  if (!options.forceRefresh) {
+    const memoryFresh = getMemoryValue<T>(key, 'fresh');
+    if (memoryFresh !== null) return memoryFresh;
 
-  try {
-    const cached = await cacheGet<T>(key);
-    if (cached !== null) {
-      rememberMemoryValue(key, cached, ttlSeconds);
-      return cached;
+    try {
+      const cached = await cacheGet<T>(key);
+      if (cached !== null) {
+        rememberMemoryValue(key, cached, ttlSeconds);
+        return cached;
+      }
+    } catch {
+      // Redis cache is best-effort; live read remains the source of truth.
     }
-  } catch {
-    // Redis cache is best-effort; live read remains the source of truth.
   }
 
   const scopedCircuit = cacheCircuitScope(scope);

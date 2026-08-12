@@ -1,0 +1,12 @@
+services:
+  api:
+    build:
+      context: .
+      target: development
+    image: leaderproductapi:dev
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./src:/app/src
+    command: >
+      sh -c "node scripts/init-db.js && npm run dev:docker"

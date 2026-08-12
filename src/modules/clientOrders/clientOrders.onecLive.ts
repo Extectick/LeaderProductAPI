@@ -44,7 +44,10 @@ export type LiveClientOrdersTodaySummary = {
   totalAmount: number;
   profit: number | null;
   profitAvailable: boolean;
+  profitBasisAmount: number;
+  profitabilityPercent: number | null;
   missingReceiptPriceCount: number;
+  skippedReceiptPriceCount: number;
   currency: string;
   calculatedAt: string;
 };
@@ -197,6 +200,11 @@ export type LiveProduct = {
   basePrice: number | null;
   receiptPrice: number | null;
   currency: string | null;
+  profit: number | null;
+  profitAvailable: boolean;
+  profitBasisAmount: number | null;
+  profitabilityPercent: number | null;
+  missingReceiptPriceCount: number;
   priceType: { guid: string; name: string } | null;
   stock: LiveProductStock | null;
   priceMatch: unknown;
@@ -253,6 +261,11 @@ export type LiveClientOrder = {
   paymentForm: string | null;
   deliveryMethod: string | null;
   totalAmount: number | null;
+  profit: number | null;
+  profitAvailable: boolean;
+  profitBasisAmount: number | null;
+  profitabilityPercent: number | null;
+  missingReceiptPriceCount: number;
   currency: string;
   priceType: { guid: string; name: string } | null;
   queuedAt: null;
@@ -1076,6 +1089,11 @@ function mapProduct(record: AnyRecord): LiveProduct | null {
     basePrice,
     receiptPrice: numberValue(record, ['receiptPrice', 'costPrice'], null),
     currency: text(record, ['currency'], DEFAULT_CURRENCY),
+    profit: numberValue(record, ['profit'], null),
+    profitAvailable: bool(record, ['profitAvailable'], false),
+    profitBasisAmount: numberValue(record, ['profitBasisAmount'], null),
+    profitabilityPercent: numberValue(record, ['profitabilityPercent'], null),
+    missingReceiptPriceCount: numberValue(record, ['missingReceiptPriceCount', 'skippedReceiptPriceCount'], 0) ?? 0,
     priceType,
     stock: mapStock(readObject(record, ['stock']) ?? record),
     priceMatch: read(record, ['priceMatch']) ?? (basePrice !== null ? { source: 'onec-live', level: '1c' } : null),
@@ -1258,6 +1276,19 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
   const hasDebt = bool(record, ['hasDebt'], false) || Boolean(counterparty?.hasDebt);
   const shipmentProhibited = bool(record, ['shipmentProhibited'], false) || Boolean(counterparty?.shipmentProhibited);
   const debtReason = text(record, ['debtReason'], null) ?? counterparty?.debtReason ?? null;
+  const totalAmount = numberValue(record, ['totalAmount', 'amount', 'СуммаДокумента'], null);
+  const profitAvailable = bool(record, ['profitAvailable'], false);
+  const profit = profitAvailable ? numberValue(record, ['profit'], null) : null;
+  const profitBasisAmount = numberValue(record, ['profitBasisAmount'], profitAvailable ? totalAmount : null);
+  const profitabilityPercent = profitAvailable
+    ? numberValue(
+        record,
+        ['profitabilityPercent'],
+        profitBasisAmount !== null && profitBasisAmount !== 0 && profit !== null
+          ? profit / profitBasisAmount * 100
+          : null
+      )
+    : null;
   return {
     guid: orderGuid!,
     appGuid,
@@ -1281,7 +1312,15 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
     deliveryDate: text(record, ['deliveryDate', 'shipmentDate', 'ДатаОтгрузки'], null),
     paymentForm: text(record, ['paymentForm', 'ФормаОплаты'], null),
     deliveryMethod: text(record, ['deliveryMethod', 'СпособДоставки'], null),
-    totalAmount: numberValue(record, ['totalAmount', 'amount', 'СуммаДокумента'], null),
+    totalAmount,
+    profit,
+    profitAvailable: profitAvailable && profit !== null,
+    profitBasisAmount,
+    profitabilityPercent,
+    missingReceiptPriceCount: Math.max(
+      0,
+      Math.trunc(numberValue(record, ['missingReceiptPriceCount', 'skippedReceiptPriceCount'], 0) ?? 0)
+    ),
     currency: text(record, ['currency'], DEFAULT_CURRENCY) ?? DEFAULT_CURRENCY,
     priceType,
     queuedAt: null,
@@ -1471,14 +1510,23 @@ export async function getLiveClientOrdersTodaySummary(query: { managerGuid: stri
   const record = asRecord(payload);
   const profitAvailable = bool(record, ['profitAvailable'], false);
   const profit = profitAvailable ? numberValue(record, ['profit'], null) : null;
+  const totalAmount = numberValue(record, ['totalAmount'], 0) ?? 0;
+  const profitBasisAmount = numberValue(record, ['profitBasisAmount'], profitAvailable ? totalAmount : 0) ?? 0;
+  const profitabilityPercent = profitAvailable
+    ? numberValue(record, ['profitabilityPercent'], profitBasisAmount !== 0 && profit !== null ? profit / profitBasisAmount * 100 : null)
+    : null;
+  const missingReceiptPriceCount = Math.max(0, Math.trunc(numberValue(record, ['missingReceiptPriceCount'], 0) ?? 0));
   return {
     date: text(record, ['date'], query.date) ?? query.date,
     ordersCount: Math.max(0, Math.trunc(numberValue(record, ['ordersCount'], 0) ?? 0)),
     clientsCount: Math.max(0, Math.trunc(numberValue(record, ['clientsCount'], 0) ?? 0)),
-    totalAmount: numberValue(record, ['totalAmount'], 0) ?? 0,
+    totalAmount,
     profit,
     profitAvailable: profitAvailable && profit !== null,
-    missingReceiptPriceCount: Math.max(0, Math.trunc(numberValue(record, ['missingReceiptPriceCount'], 0) ?? 0)),
+    profitBasisAmount,
+    profitabilityPercent,
+    missingReceiptPriceCount,
+    skippedReceiptPriceCount: Math.max(0, Math.trunc(numberValue(record, ['skippedReceiptPriceCount'], missingReceiptPriceCount) ?? missingReceiptPriceCount)),
     currency: text(record, ['currency'], 'RUB') ?? 'RUB',
     calculatedAt: text(record, ['calculatedAt'], new Date().toISOString()) ?? new Date().toISOString(),
   };

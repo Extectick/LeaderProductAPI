@@ -43,7 +43,10 @@ const summary = {
   totalAmount: 12_345.67,
   profit: 2_100,
   profitAvailable: true,
+  profitBasisAmount: 12_345.67,
+  profitabilityPercent: 17.01,
   missingReceiptPriceCount: 0,
+  skippedReceiptPriceCount: 0,
   currency: 'RUB',
   calculatedAt: '2026-08-07T12:00:00',
 };

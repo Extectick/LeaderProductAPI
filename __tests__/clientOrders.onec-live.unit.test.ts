@@ -549,7 +549,10 @@ describe('clientOrders 1C live adapter', () => {
       totalAmount: 12_345.67,
       profit: 2_100.5,
       profitAvailable: true,
+      profitBasisAmount: 12_345.67,
+      profitabilityPercent: 2_100.5 / 12_345.67 * 100,
       missingReceiptPriceCount: 0,
+      skippedReceiptPriceCount: 0,
       currency: 'RUB',
       calculatedAt: '2026-08-07T12:00:00',
     });
