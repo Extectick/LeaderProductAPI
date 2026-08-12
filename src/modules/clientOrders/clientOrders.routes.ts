@@ -8,6 +8,8 @@ import {
   clientOrderCancelSchema,
   clientOrderCopySchema,
   clientOrderCreateSchema,
+  clientOrderIdParamsSchema,
+  clientOrderMutationSchema,
   clientOrderDefaultsQuerySchema,
   clientOrderInvoiceStatusesSchema,
   clientOrderProductImagesCleanupSchema,
@@ -43,6 +45,7 @@ import {
   cleanupClientOrderProductImages,
   copyClientOrder,
   createClientOrder,
+  putClientOrderByClientId,
   deleteDraftClientOrder,
   getClientOrderByGuid,
   getClientOrderExportDebug,
@@ -506,6 +509,28 @@ router.post('/', authorizePermissions(['manage_client_orders']), async (req: Aut
     return res.status(201).json(successResponse(result, 'Черновик заказа клиента создан'));
   } catch (err) {
     return handleError(res, err, 'Ошибка создания заказа клиента');
+  }
+});
+
+router.put('/by-client-id/:clientOrderId', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = clientOrderIdParamsSchema.safeParse(req.params);
+  const body = clientOrderMutationSchema.safeParse(req.body);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!body.success) {
+    return res.status(400).json(errorResponse(validationMessage(body.error), ErrorCodes.VALIDATION_ERROR));
+  }
+
+  try {
+    const result = await putClientOrderByClientId(
+      req.user!.userId,
+      params.data.clientOrderId,
+      body.data
+    );
+    return res.json(successResponse(result, 'Заказ клиента сохранён'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка сохранения заказа клиента');
   }
 });
 

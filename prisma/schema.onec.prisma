@@ -630,6 +630,10 @@ model SpecialPrice {
 model Order {
   id        String         @id @default(cuid())
   guid      String?        @unique
+  clientOrderId   String?
+  clientRevision  Int?
+  clientPayloadHash String?
+  submitRequestedAt DateTime?
   number1c  String?
   date1c    DateTime?
   source    OrderSource    @default(MARKETPLACE_CLIENT)
@@ -713,6 +717,7 @@ model Order {
   @@index([sentTo1cAt])
   @@index([hasRealization])
   @@index([sourceUpdatedAt])
+  @@unique([createdByUserId, clientOrderId])
 }
 
 model ClientOrderInvoicePreference {

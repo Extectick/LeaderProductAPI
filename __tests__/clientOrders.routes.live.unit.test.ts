@@ -33,6 +33,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     cancelClientOrder: jest.fn(),
     copyClientOrder: jest.fn(),
     createClientOrder: jest.fn(),
+    putClientOrderByClientId: jest.fn(),
     deleteDraftClientOrder: jest.fn(),
     getClientOrderByGuid: jest.fn(),
     getClientOrderExportDebug: jest.fn(),
@@ -335,6 +336,37 @@ describe('/api/client-orders live reference routes', () => {
     expect(response.status).toBe(200);
     expect(service.unqueueClientOrder).toHaveBeenCalledWith('order-guid', 1, { revision: 7 });
     expect(response.body.data).toMatchObject({ guid: 'order-guid', status: 'DRAFT', syncState: 'DRAFT' });
+  });
+
+  it('routes idempotent client mutations without colliding with the guid route', async () => {
+    jest.mocked(service.putClientOrderByClientId).mockResolvedValueOnce({
+      guid: 'order-guid',
+      clientOrderId: 'client-order-id',
+      clientRevision: 2,
+      status: 'QUEUED',
+      syncState: 'QUEUED',
+      items: [],
+      events: [],
+    } as any);
+
+    const body = {
+      organizationGuid: 'organization-guid',
+      counterpartyGuid: 'counterparty-guid',
+      clientRevision: 2,
+      intent: 'SUBMIT',
+      saveReason: 'manual',
+      items: [{ lineGuid: 'line-guid', productGuid: 'product-guid', quantity: 1, manualPrice: 100 }],
+    };
+    const response = await request(app)
+      .put('/api/client-orders/by-client-id/client-order-id')
+      .send(body);
+
+    expect(response.status).toBe(200);
+    expect(service.putClientOrderByClientId).toHaveBeenCalledWith(1, 'client-order-id', expect.objectContaining({
+      clientRevision: 2,
+      intent: 'SUBMIT',
+    }));
+    expect(response.body.data).toMatchObject({ guid: 'order-guid', clientOrderId: 'client-order-id' });
   });
 
   it('rejects invalid unqueue body before calling service', async () => {

@@ -6,7 +6,7 @@ import {
   OrderSyncState,
   Prisma,
 } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { cacheGet, cacheSet } from '../../lib/redis';
 import prisma from '../../prisma/client';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
@@ -73,6 +73,7 @@ import type {
   ClientOrderCancelBody,
   ClientOrderCopyBody,
   ClientOrderCreateBody,
+  ClientOrderMutationBody,
   ClientOrderDefaultsQuery,
   ClientOrderReferenceDetailsParams,
   ClientOrderRestoreBody,
@@ -185,6 +186,8 @@ type ProductPriceLookupPair = {
 const clientOrderSummarySelect = {
   id: true,
   guid: true,
+  clientOrderId: true,
+  clientRevision: true,
   number1c: true,
   date1c: true,
   source: true,
@@ -453,6 +456,8 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
   const invoiceSummary = mapInvoiceArtifactSummary(order, order.invoiceRequested);
   return {
     guid: order.guid,
+    clientOrderId: order.clientOrderId,
+    clientRevision: order.clientRevision,
     appGuid: order.guid,
     documentGuid: order.guid,
     number1c: order.number1c,
@@ -5195,6 +5200,302 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
   */
 }
 
+function stableJsonValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stableJsonValue(item)])
+    );
+  }
+  return value;
+}
+
+function clientOrderPayloadHash(body: ClientOrderMutationBody) {
+  const { clientRevision: _clientRevision, intent: _intent, ...payload } = body;
+  return createHash('sha256').update(JSON.stringify(stableJsonValue(payload))).digest('hex');
+}
+
+function assertClientOrderCanBeSubmitted(order: {
+  organizationId?: string | null;
+  agreementId?: string | null;
+  contractId?: string | null;
+  warehouseId?: string | null;
+  deliveryAddressId?: string | null;
+  deliveryDate?: Date | null;
+  items: Array<{ quantity: Prisma.Decimal; basePrice: Prisma.Decimal | null; isCancelled: boolean }>;
+}) {
+  const missingFields: string[] = [];
+  if (!order.organizationId) missingFields.push('организацию');
+  if (!order.agreementId) missingFields.push('соглашение');
+  if (!order.contractId) missingFields.push('договор');
+  if (!order.warehouseId) missingFields.push('склад');
+  if (!order.deliveryAddressId) missingFields.push('адрес доставки');
+  if (!order.deliveryDate) missingFields.push('дату отгрузки');
+  if (missingFields.length) {
+    throw new ClientOrdersError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      `Заполните ${missingFields.join(', ')} перед отправкой в 1С`
+    );
+  }
+  const activeItems = order.items.filter((item) => !item.isCancelled);
+  if (!activeItems.length || activeItems.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
+    throw new ClientOrdersError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'Исправьте строки с нулевым количеством или ценой перед отправкой'
+    );
+  }
+}
+
+/**
+ * Idempotent mobile mutation. The client-owned id survives timeouts and process
+ * restarts, while clientRevision prevents an older queued retry from rolling
+ * newer data back. SAVE -> SUBMIT is a monotonic intent escalation.
+ */
+export async function putClientOrderByClientId(
+  userId: number,
+  clientOrderId: string,
+  body: ClientOrderMutationBody
+) {
+  const sourceUpdatedAt = now();
+  const payloadHash = clientOrderPayloadHash(body);
+  const committed = await prisma.order.findFirst({
+    where: { createdByUserId: userId, clientOrderId },
+    select: {
+      guid: true,
+      clientRevision: true,
+      clientPayloadHash: true,
+      submitRequestedAt: true,
+      status: true,
+      syncState: true,
+    },
+  });
+  if (committed) {
+    const committedRevision = committed.clientRevision ?? 0;
+    if (body.clientRevision < committedRevision) {
+      return getClientOrderByGuid(committed.guid!, userId);
+    }
+    if (body.clientRevision === committedRevision) {
+      if (committed.clientPayloadHash && committed.clientPayloadHash !== payloadHash) {
+        throw new ClientOrdersError(
+          409,
+          ErrorCodes.CONFLICT,
+          'Одна версия документа содержит разные данные. Обновите документ и повторите действие.'
+        );
+      }
+      if (body.intent === 'SAVE' || isOrderQueued(committed) || committed.submitRequestedAt) {
+        return getClientOrderByGuid(committed.guid!, userId);
+      }
+    }
+  }
+  const managerGuid = await getManagerGuidForUser(userId);
+  const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
+
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${userId}:${clientOrderId}`}, 0))`;
+
+    const existing = await tx.order.findFirst({
+      where: { createdByUserId: userId, clientOrderId },
+      select: {
+        id: true,
+        guid: true,
+        revision: true,
+        clientRevision: true,
+        clientPayloadHash: true,
+        submitRequestedAt: true,
+        status: true,
+        syncState: true,
+        source: true,
+        hasRealization: true,
+        organizationId: true,
+        agreementId: true,
+        contractId: true,
+        warehouseId: true,
+        deliveryAddressId: true,
+        deliveryDate: true,
+        items: { select: { quantity: true, basePrice: true, isCancelled: true } },
+      },
+    });
+
+    const storedClientRevision = existing?.clientRevision ?? 0;
+    if (existing && body.clientRevision < storedClientRevision) {
+      return { guid: existing.guid!, queued: isOrderQueued(existing) };
+    }
+
+    if (existing && body.clientRevision === storedClientRevision) {
+      if (existing.clientPayloadHash && existing.clientPayloadHash !== payloadHash) {
+        throw new ClientOrdersError(
+          409,
+          ErrorCodes.CONFLICT,
+          'Одна версия документа содержит разные данные. Обновите документ и повторите действие.'
+        );
+      }
+      if (body.intent === 'SAVE' || isOrderQueued(existing) || existing.submitRequestedAt) {
+        return { guid: existing.guid!, queued: isOrderQueued(existing) };
+      }
+
+      ensureEditable(existing);
+      assertClientOrderCanBeSubmitted(existing);
+      const queuedAt = now();
+      const nextRevision = existing.revision + 1;
+      const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
+      await tx.order.update({
+        where: { id: existing.id },
+        data: {
+          revision: nextRevision,
+          status: OrderStatus.QUEUED,
+          syncState: OrderSyncState.QUEUED,
+          queuedAt,
+          submitRequestedAt: queuedAt,
+          exportAttempts: 0,
+          lastExportError: null,
+          last1cError: null,
+          ...(trackingSnapshot
+            ? { trackingRoutePointId: trackingSnapshot.routePointId, trackingSnapshot: trackingSnapshot.snapshot }
+            : {}),
+          sourceUpdatedAt: queuedAt,
+        },
+      });
+      await appendOrderEvent(tx, {
+        orderId: existing.id,
+        revision: nextRevision,
+        source: OrderEventSource.APP_MANAGER,
+        eventType: 'CLIENT_ORDER_SUBMITTED',
+        actorUserId: userId,
+        payload: { queuedAt: queuedAt.toISOString(), clientOrderId, clientRevision: body.clientRevision },
+      });
+      await saveUserCounterpartyDefaults(tx, userId, existing.guid!);
+      return { guid: existing.guid!, queued: true };
+    }
+
+    await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
+    const context = await resolveManagerOrderContext(tx, body);
+    const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
+    const deliveryDate = body.deliveryDate ?? defaultDeliveryDate();
+    const shouldQueue = body.intent === 'SUBMIT'
+      || !!existing?.submitRequestedAt
+      || (!!existing && (existing.status === OrderStatus.QUEUED || existing.status === OrderStatus.SENT_TO_1C));
+    if (shouldQueue) {
+      assertClientOrderCanBeSubmitted({
+        organizationId: context.organization.id,
+        agreementId: context.agreement?.id,
+        contractId: context.contract?.id ?? context.agreement?.contractId,
+        warehouseId: context.warehouse?.id ?? context.agreement?.warehouseId,
+        deliveryAddressId: context.deliveryAddress?.id,
+        deliveryDate,
+        items: prepared.items.map((item) => ({
+          quantity: item.create.quantity as Prisma.Decimal,
+          basePrice: item.create.basePrice as Prisma.Decimal | null,
+          isCancelled: item.create.isCancelled ?? false,
+        })),
+      });
+    }
+    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
+    const queuedAt = shouldQueue ? sourceUpdatedAt : null;
+    const commonData = {
+      clientRevision: body.clientRevision,
+      clientPayloadHash: payloadHash,
+      status: shouldQueue ? OrderStatus.QUEUED : OrderStatus.DRAFT,
+      syncState: shouldQueue ? OrderSyncState.QUEUED : OrderSyncState.DRAFT,
+      queuedAt,
+      submitRequestedAt: shouldQueue ? (existing?.submitRequestedAt ?? sourceUpdatedAt) : null,
+      organizationId: context.organization.id,
+      counterpartyId: context.counterparty.id,
+      agreementId: context.agreement?.id ?? null,
+      contractId: context.contract?.id ?? context.agreement?.contractId ?? null,
+      warehouseId: context.warehouse?.id ?? context.agreement?.warehouseId ?? null,
+      deliveryAddressId: context.deliveryAddress?.id ?? null,
+      priceTypeId: context.priceType?.id ?? null,
+      comment: body.comment ?? null,
+      deliveryDate,
+      paymentForm: body.paymentForm ?? null,
+      deliveryMethod: body.deliveryMethod ?? null,
+      invoiceRequested: body.invoiceRequested,
+      trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
+      trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
+      currency: DEFAULT_ORDER_CURRENCY,
+      totalAmount: prepared.totalAmount,
+      generalDiscountPercent:
+        body.generalDiscountPercent !== null && body.generalDiscountPercent !== undefined
+          ? toDecimal(body.generalDiscountPercent)
+          : null,
+      generalDiscountAmount: prepared.generalDiscountAmount,
+      exportAttempts: shouldQueue ? 0 : undefined,
+      lastExportError: null,
+      last1cError: null,
+      sourceUpdatedAt,
+    } satisfies Prisma.OrderUncheckedUpdateInput;
+
+    let order: { id: string; guid: string | null; revision: number };
+    if (!existing) {
+      order = await tx.order.create({
+        data: {
+          guid: randomUUID(),
+          clientOrderId,
+          source: OrderSource.MANAGER_APP,
+          revision: 1,
+          createdByUserId: userId,
+          ...commonData,
+          items: { create: prepared.items.map((item) => item.create) },
+        },
+        select: { id: true, guid: true, revision: true },
+      });
+      await appendOrderEvent(tx, {
+        orderId: order.id,
+        revision: order.revision,
+        source: OrderEventSource.APP_MANAGER,
+        eventType: 'CLIENT_ORDER_CREATED',
+        actorUserId: userId,
+        payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent },
+      });
+    } else {
+      ensureEditable(existing);
+      const nextRevision = existing.revision + 1;
+      await tx.orderItem.deleteMany({ where: { orderId: existing.id } });
+      order = await tx.order.update({
+        where: { id: existing.id },
+        data: {
+          ...commonData,
+          revision: nextRevision,
+          items: { create: prepared.items.map((item) => item.create) },
+        },
+        select: { id: true, guid: true, revision: true },
+      });
+      if (body.saveReason !== 'autosave') {
+        await appendOrderEvent(tx, {
+          orderId: order.id,
+          revision: order.revision,
+          source: OrderEventSource.APP_MANAGER,
+          eventType: 'CLIENT_ORDER_UPDATED',
+          actorUserId: userId,
+          payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent },
+        });
+      }
+    }
+
+    if (body.intent === 'SUBMIT') {
+      await appendOrderEvent(tx, {
+        orderId: order.id,
+        revision: order.revision,
+        source: OrderEventSource.APP_MANAGER,
+        eventType: 'CLIENT_ORDER_SUBMITTED',
+        actorUserId: userId,
+        payload: { queuedAt: sourceUpdatedAt.toISOString(), clientOrderId, clientRevision: body.clientRevision },
+      });
+      await saveUserCounterpartyDefaults(tx, userId, order.guid!);
+    }
+    await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
+    return { guid: order.guid!, queued: shouldQueue };
+  });
+
+  if (result.queued) requestClientOrdersExportWakeup();
+  return getClientOrderByGuid(result.guid, userId);
+}
+
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
   const sourceUpdatedAt = now();
   const managerGuid = await getManagerGuidForUser(userId);
@@ -5665,6 +5966,7 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         status: OrderStatus.QUEUED,
         syncState: OrderSyncState.QUEUED,
         queuedAt,
+        submitRequestedAt: queuedAt,
         cancelRequestedAt: null,
         cancelReason: null,
         exportAttempts: 0,
@@ -5714,6 +6016,7 @@ async function unqueueClientOrderInTransaction(
       status: OrderStatus.DRAFT,
       syncState: OrderSyncState.DRAFT,
       queuedAt: null,
+      submitRequestedAt: null,
       cancelRequestedAt: null,
       cancelReason: null,
       last1cError: null,

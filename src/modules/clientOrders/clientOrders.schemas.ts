@@ -285,6 +285,15 @@ export const clientOrderUpdateSchema = clientOrderCreateSchema.extend({
   revision: z.coerce.number().int().min(1),
 });
 
+export const clientOrderIdParamsSchema = z.object({
+  clientOrderId: z.string().trim().min(8).max(128),
+});
+
+export const clientOrderMutationSchema = clientOrderCreateSchema.extend({
+  clientRevision: z.coerce.number().int().min(1),
+  intent: z.enum(['SAVE', 'SUBMIT']),
+});
+
 export const clientOrderSubmitSchema = z.object({
   revision: z.coerce.number().int().min(1),
 });
@@ -320,6 +329,7 @@ export type ClientOrdersBatchProductsBody = z.infer<typeof clientOrdersBatchProd
 export type ClientOrderDefaultsQuery = z.infer<typeof clientOrderDefaultsQuerySchema>;
 export type ClientOrderSettingsUpdateBody = z.infer<typeof clientOrderSettingsUpdateSchema>;
 export type ClientOrderCreateBody = z.infer<typeof clientOrderCreateSchema>;
+export type ClientOrderMutationBody = z.infer<typeof clientOrderMutationSchema>;
 export type ClientOrderUpdateBody = z.infer<typeof clientOrderUpdateSchema>;
 export type ClientOrderSubmitBody = z.infer<typeof clientOrderSubmitSchema>;
 export type ClientOrderUnqueueBody = z.infer<typeof clientOrderUnqueueSchema>;

@@ -1,5 +1,6 @@
 import {
   clientOrderCreateSchema,
+  clientOrderMutationSchema,
   clientOrdersBatchProductsSchema,
   clientOrdersCounterpartiesQuerySchema,
   clientOrdersListQuerySchema,
@@ -98,6 +99,19 @@ describe('client orders query schemas', () => {
 
     expect(parsed.status).toBe('CANCELLED');
     expect(parsed.number1c).toBe('НОУТ-073955');
+  });
+
+  it('parses idempotent save and submit metadata', () => {
+    const result = clientOrderMutationSchema.parse({
+      organizationGuid: 'organization-guid',
+      counterpartyGuid: 'counterparty-guid',
+      clientRevision: 7,
+      intent: 'SUBMIT',
+      saveReason: 'manual',
+      items: [{ lineGuid: 'line-guid-1', productGuid: 'product-guid', quantity: 1, manualPrice: 100 }],
+    });
+
+    expect(result).toMatchObject({ clientRevision: 7, intent: 'SUBMIT' });
   });
 
   it('defaults counterparty debt filtering to all and validates explicit modes', () => {

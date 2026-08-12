@@ -21,6 +21,8 @@ const bigintToString = (value: bigint | number | string | null | undefined): str
 export const orderDetailSelect = {
   id: true,
   guid: true,
+  clientOrderId: true,
+  clientRevision: true,
   number1c: true,
   date1c: true,
   source: true,
@@ -250,6 +252,8 @@ export function mapOrderDetail(order: OrderDetailRecord) {
   const invoiceAggregate = mapInvoiceAggregate(order.invoiceRequested, order.invoices);
   return {
     guid: order.guid,
+    clientOrderId: order.clientOrderId,
+    clientRevision: order.clientRevision,
     number1c: order.number1c,
     date1c: order.date1c,
     source: order.source,
