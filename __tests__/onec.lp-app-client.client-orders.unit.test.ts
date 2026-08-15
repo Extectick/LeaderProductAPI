@@ -2,9 +2,11 @@ import {
   getOnecLpAppAgreements,
   getOnecLpAppClientOrder,
   getOnecLpAppClientOrderDefaults,
+  getOnecLpAppClientOrderInvoices,
   getOnecLpAppClientOrders,
   getOnecLpAppContracts,
   getOnecLpAppCounterparties,
+  getOnecLpAppCounterpartyCard,
   getOnecLpAppDeliveryAddresses,
   getOnecLpAppNomenclature,
   getOnecLpAppNomenclatureItem,
@@ -47,6 +49,7 @@ describe('onec.lpApp.client client-orders live routes', () => {
     ['/organizations', getOnecLpAppOrganizations],
     ['/warehouses', getOnecLpAppWarehouses],
     ['/counterparties', getOnecLpAppCounterparties],
+    ['/counterparty-card', getOnecLpAppCounterpartyCard],
     ['/contracts', getOnecLpAppContracts],
     ['/agreements', getOnecLpAppAgreements],
     ['/delivery-addresses', getOnecLpAppDeliveryAddresses],
@@ -130,7 +133,7 @@ describe('onec.lpApp.client client-orders live routes', () => {
     });
   });
 
-  it('aborts stalled 1C requests after 10 seconds', async () => {
+  it('uses the dedicated 60 second timeout for the client orders list', async () => {
     jest.useFakeTimers();
     fetchMock.mockImplementationOnce((_url: URL, init?: RequestInit) => new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => {
@@ -140,11 +143,25 @@ describe('onec.lpApp.client client-orders live routes', () => {
 
     const request = getOnecLpAppClientOrders({ limit: 1, offset: 0 });
     const expectation = expect(request).rejects.toMatchObject({
-      name: 'OnecLpAppNetworkError',
+      name: 'OnecLpAppTimeoutError',
       message: '1C request timed out',
+      path: '/client-orders',
+      timeoutMs: 60_000,
     });
-    await jest.advanceTimersByTimeAsync(10_000);
+    await jest.advanceTimersByTimeAsync(59_999);
+    expect(fetchMock.mock.results[0]?.value).toBeDefined();
+    await jest.advanceTimersByTimeAsync(1);
 
     await expectation;
+  });
+
+  it('requests only invoice queue changes after the supplied 1C cursor', async () => {
+    await getOnecLpAppClientOrderInvoices(100, '2026-08-14T09:15:30.000Z');
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe('/WMS10/hs/lp-app/client-order-invoices');
+    expect(url.searchParams.get('limit')).toBe('100');
+    expect(url.searchParams.get('updatedSince')).toBe('2026-08-14T09:15:30.000Z');
+    expect(init.method).toBe('GET');
   });
 });

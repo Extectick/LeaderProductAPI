@@ -18,6 +18,16 @@ export class OnecLpAppNetworkError extends Error {
   }
 }
 
+export class OnecLpAppTimeoutError extends OnecLpAppNetworkError {
+  constructor(
+    public readonly path: string,
+    public readonly timeoutMs: number
+  ) {
+    super('1C request timed out');
+    this.name = 'OnecLpAppTimeoutError';
+  }
+}
+
 export class OnecLpAppConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -33,6 +43,12 @@ type RouteOrderBody = {
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_PING_TIMEOUT_MS = 5_000;
+const DEFAULT_DIRECTORY_TIMEOUT_MS = 30_000;
+const DEFAULT_PRODUCT_DATA_TIMEOUT_MS = 45_000;
+const DEFAULT_CLIENT_ORDERS_TIMEOUT_MS = 60_000;
+const DEFAULT_COUNTERPARTY_CARD_TIMEOUT_MS = 60_000;
+const DEFAULT_INVOICE_QUEUE_TIMEOUT_MS = 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 60_000;
 
 function getRequiredEnv(name: string) {
@@ -50,6 +66,35 @@ function getApiKey() {
 function getTimeoutMs() {
   const raw = Number(process.env.ONEC_LP_APP_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_TIMEOUT_MS;
+}
+
+function getProfileTimeoutMs(envName: string, fallbackMs: number) {
+  const raw = Number(process.env[envName]);
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : fallbackMs;
+}
+
+function getPingTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_PING_TIMEOUT_MS', DEFAULT_PING_TIMEOUT_MS);
+}
+
+function getDirectoryTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_DIRECTORY_TIMEOUT_MS', DEFAULT_DIRECTORY_TIMEOUT_MS);
+}
+
+function getProductDataTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_PRODUCT_DATA_TIMEOUT_MS', DEFAULT_PRODUCT_DATA_TIMEOUT_MS);
+}
+
+function getClientOrdersTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_CLIENT_ORDERS_TIMEOUT_MS', DEFAULT_CLIENT_ORDERS_TIMEOUT_MS);
+}
+
+function getCounterpartyCardTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_COUNTERPARTY_CARD_TIMEOUT_MS', DEFAULT_COUNTERPARTY_CARD_TIMEOUT_MS);
+}
+
+function getInvoiceQueueTimeoutMs() {
+  return getProfileTimeoutMs('ONEC_LP_APP_INVOICE_QUEUE_TIMEOUT_MS', DEFAULT_INVOICE_QUEUE_TIMEOUT_MS);
 }
 
 function getWriteTimeoutMs() {
@@ -156,12 +201,10 @@ async function callOnecLpApp(path: string, options: { method?: string; query?: O
       throw error;
     }
 
-    const message =
-      error instanceof Error && error.name === 'AbortError'
-        ? '1C request timed out'
-        : error instanceof Error
-          ? error.message
-          : '1C request failed';
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new OnecLpAppTimeoutError(path, timeoutMs);
+    }
+    const message = error instanceof Error ? error.message : '1C request failed';
     throw new OnecLpAppNetworkError(message);
   } finally {
     clearTimeout(timeout);
@@ -219,12 +262,10 @@ async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeout
       throw error;
     }
 
-    const message =
-      error instanceof Error && error.name === 'AbortError'
-        ? '1C request timed out'
-        : error instanceof Error
-          ? error.message
-          : '1C request failed';
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new OnecLpAppTimeoutError(path, timeoutMs);
+    }
+    const message = error instanceof Error ? error.message : '1C request failed';
     throw new OnecLpAppNetworkError(message);
   } finally {
     clearTimeout(timeout);
@@ -233,7 +274,7 @@ async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeout
 }
 
 export function pingOnecLpApp() {
-  return callOnecLpApp('/ping');
+  return callOnecLpApp('/ping', { timeoutMs: getPingTimeoutMs() });
 }
 
 export function getOnecLpAppUsers() {
@@ -245,75 +286,98 @@ export function getOnecLpAppPhysicalPersons() {
 }
 
 export function getOnecLpAppOrganizations(query: OnecLpAppQuery) {
-  return callOnecLpApp('/organizations', { query });
+  return callOnecLpApp('/organizations', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppWarehouses(query: OnecLpAppQuery) {
-  return callOnecLpApp('/warehouses', { query });
+  return callOnecLpApp('/warehouses', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppCounterparties(query: OnecLpAppQuery) {
-  return callOnecLpApp('/counterparties', { query });
+  return callOnecLpApp('/counterparties', { query, timeoutMs: getDirectoryTimeoutMs() });
+}
+
+export function getOnecLpAppCounterpartyCard(query: OnecLpAppQuery) {
+  return callOnecLpApp('/counterparty-card', { query, timeoutMs: getCounterpartyCardTimeoutMs() });
 }
 
 export function getOnecLpAppContracts(query: OnecLpAppQuery) {
-  return callOnecLpApp('/contracts', { query });
+  return callOnecLpApp('/contracts', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppAgreements(query: OnecLpAppQuery) {
-  return callOnecLpApp('/agreements', { query });
+  return callOnecLpApp('/agreements', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppDeliveryAddresses(query: OnecLpAppQuery) {
-  return callOnecLpApp('/delivery-addresses', { query });
+  return callOnecLpApp('/delivery-addresses', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppPriceTypes(query: OnecLpAppQuery) {
-  return callOnecLpApp('/price-types', { query });
+  return callOnecLpApp('/price-types', { query, timeoutMs: getDirectoryTimeoutMs() });
 }
 
 export function getOnecLpAppNomenclature(query: OnecLpAppQuery) {
-  return callOnecLpApp('/nomenclature', { query });
+  return callOnecLpApp('/nomenclature', { query, timeoutMs: getProductDataTimeoutMs() });
 }
 
 export function getOnecLpAppNomenclatureItem(guid: string, query: OnecLpAppQuery = {}) {
-  return callOnecLpApp(`/nomenclature/${encodeURIComponent(guid)}`, { query });
+  return callOnecLpApp(`/nomenclature/${encodeURIComponent(guid)}`, {
+    query,
+    timeoutMs: getProductDataTimeoutMs(),
+  });
 }
 
 export function getOnecLpAppNomenclatureImages(query: OnecLpAppQuery) {
-  return callOnecLpApp('/nomenclature-images', { query });
+  return callOnecLpApp('/nomenclature-images', { query, timeoutMs: getProductDataTimeoutMs() });
 }
 
 export function getOnecLpAppNomenclatureImageContent(fileGuid: string, query: OnecLpAppQuery = {}) {
-  return callOnecLpAppBinary(`/nomenclature-images/${encodeURIComponent(fileGuid)}/content`, query);
+  return callOnecLpAppBinary(
+    `/nomenclature-images/${encodeURIComponent(fileGuid)}/content`,
+    query,
+    getProductDataTimeoutMs()
+  );
 }
 
 export function getOnecLpAppProductPrices(query: OnecLpAppQuery) {
-  return callOnecLpApp('/product-prices', { query });
+  return callOnecLpApp('/product-prices', { query, timeoutMs: getProductDataTimeoutMs() });
 }
 
 export function getOnecLpAppSpecialPrices(query: OnecLpAppQuery) {
-  return callOnecLpApp('/special-prices', { query });
+  return callOnecLpApp('/special-prices', { query, timeoutMs: getProductDataTimeoutMs() });
 }
 
 export function getOnecLpAppStock(query: OnecLpAppQuery) {
-  return callOnecLpApp('/stock', { query });
+  return callOnecLpApp('/stock', { query, timeoutMs: getProductDataTimeoutMs() });
 }
 
 export function getOnecLpAppClientOrders(query: OnecLpAppQuery) {
-  return callOnecLpApp('/client-orders', { query });
+  return callOnecLpApp('/client-orders', { query, timeoutMs: getClientOrdersTimeoutMs() });
+}
+
+export function postOnecLpAppClientOrderProfits(query: OnecLpAppQuery, documentGuids: string[]) {
+  return callOnecLpApp('/client-orders/profits', {
+    method: 'POST',
+    query,
+    body: { documentGuids },
+    timeoutMs: getClientOrdersTimeoutMs(),
+  });
 }
 
 export function getOnecLpAppClientOrdersTodaySummary(query: OnecLpAppQuery) {
-  return callOnecLpApp('/client-orders/today-summary', { query });
+  return callOnecLpApp('/client-orders/today-summary', { query, timeoutMs: getClientOrdersTimeoutMs() });
 }
 
 export function getOnecLpAppClientOrder(documentGuid: string, query: OnecLpAppQuery = {}) {
-  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, { query });
+  return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, {
+    query,
+    timeoutMs: getClientOrdersTimeoutMs(),
+  });
 }
 
 export function getOnecLpAppClientOrderDefaults(query: OnecLpAppQuery) {
-  return callOnecLpApp('/client-order-defaults', { query });
+  return callOnecLpApp('/client-order-defaults', { query, timeoutMs: getClientOrdersTimeoutMs() });
 }
 
 export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
@@ -353,9 +417,13 @@ export type OnecClientOrderInvoiceQueueItem = {
   updatedAt?: string | null;
 };
 
-export function getOnecLpAppClientOrderInvoices(limit = 100) {
-  return callOnecLpApp('/client-order-invoices', { query: { limit } }) as Promise<{
+export function getOnecLpAppClientOrderInvoices(limit = 100, updatedSince?: string | null) {
+  return callOnecLpApp('/client-order-invoices', {
+    query: { limit, updatedSince: updatedSince || undefined },
+    timeoutMs: getInvoiceQueueTimeoutMs(),
+  }) as Promise<{
     items: OnecClientOrderInvoiceQueueItem[];
+    serverTime?: string | null;
   }>;
 }
 

@@ -13,6 +13,7 @@ import {
   OnecLpAppConfigError,
   OnecLpAppHttpError,
   OnecLpAppNetworkError,
+  OnecLpAppTimeoutError,
   pingOnecLpApp,
   postOnecLpAppRouteOrder,
   postOnecLpAppTransportTaskToLoading,
@@ -241,6 +242,14 @@ function mapUpstreamStatus(error: OnecLpAppHttpError) {
 function handleLpAppError(res: express.Response, error: unknown, fallbackMessage: string) {
   if (error instanceof ZodError) {
     return res.status(400).json(errorResponse(error.message, ErrorCodes.VALIDATION_ERROR));
+  }
+
+  if (error instanceof OnecLpAppTimeoutError) {
+    return res.status(504).json(
+      errorResponse('1С обрабатывает запрос дольше обычного. Повторите запрос.', ErrorCodes.INTERNAL_ERROR, {
+        reason: 'UPSTREAM_TIMEOUT',
+      })
+    );
   }
 
   if (error instanceof OnecLpAppHttpError) {

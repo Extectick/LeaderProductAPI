@@ -48,6 +48,11 @@ const PROCESSABLE_STATES: ClientOrderInvoiceState[] = [
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 let inMemoryLock = false;
+let lastOnecQueueCursor: Date | null = null;
+let lastFullOnecQueueSyncAt = 0;
+
+const ONEC_QUEUE_CURSOR_OVERLAP_MS = 10_000;
+const ONEC_QUEUE_FULL_SYNC_INTERVAL_MS = 10 * 60_000;
 
 function envInt(name: string, fallback: number, min = 1) {
   const raw = Number(process.env[name]);
@@ -311,8 +316,15 @@ export async function syncQueueItem(
 }
 
 async function syncOnecQueue() {
+  const queueCursor = lastOnecQueueCursor;
+  const fullSync = !queueCursor
+    || Date.now() - lastFullOnecQueueSyncAt >= ONEC_QUEUE_FULL_SYNC_INTERVAL_MS;
+  const updatedSince = !fullSync && queueCursor
+    ? new Date(queueCursor.getTime() - ONEC_QUEUE_CURSOR_OVERLAP_MS).toISOString()
+    : null;
   const response = await getOnecLpAppClientOrderInvoices(
-    envInt('CLIENT_ORDER_INVOICE_WORKER_QUEUE_LIMIT', 100, 1)
+    envInt('CLIENT_ORDER_INVOICE_WORKER_QUEUE_LIMIT', 100, 1),
+    updatedSince
   );
   const items = Array.isArray((response as any)?.items)
     ? (response as any).items
@@ -336,6 +348,12 @@ async function syncOnecQueue() {
     Math.min(4, workerConcurrency()),
     (item) => syncQueueItem(item)
   );
+  const serverCursor = parseDate((response as any)?.serverTime)
+    ?? parseDate((response as any)?.body?.serverTime)
+    ?? parseDate((response as any)?.data?.serverTime)
+    ?? new Date();
+  lastOnecQueueCursor = serverCursor;
+  if (fullSync) lastFullOnecQueueSyncAt = Date.now();
 }
 
 function safeDocumentPart(value: string | null | undefined) {

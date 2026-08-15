@@ -247,12 +247,10 @@ async function isOrderVisibleToManager(order: AccessibleOrder, managerGuid: stri
 async function findOrderThroughLiveDocument(identifier: string, managerGuid: string, userId: number) {
   try {
     const detail = await getLiveClientOrder(identifier, { managerGuid });
-    const visible = await findLiveClientOrder({
-      managerGuid,
-      appGuid: detail.appGuid,
-      number1c: detail.number1c,
-    });
-    if (!visible) return null;
+    // The detail projection already includes the actual document manager.
+    // Comparing it locally avoids a second heavy 1C list lookup while keeping
+    // the same manager isolation for old documents that have no API shadow yet.
+    if (normalizedString(detail.managerGuid) !== managerGuid) return null;
     const existing = await prisma.order.findFirst({
       where: {
         OR: [

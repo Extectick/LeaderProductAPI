@@ -4,6 +4,7 @@ import {
   getOnecLpAppClientOrderDefaults,
   getOnecLpAppClientOrders,
   getOnecLpAppClientOrdersTodaySummary,
+  postOnecLpAppClientOrderProfits,
   getOnecLpAppContracts,
   getOnecLpAppCounterparties,
   getOnecLpAppDeliveryAddresses,
@@ -50,6 +51,15 @@ export type LiveClientOrdersTodaySummary = {
   skippedReceiptPriceCount: number;
   currency: string;
   calculatedAt: string;
+};
+
+export type LiveClientOrderProfit = {
+  documentGuid: string;
+  profit: number | null;
+  profitAvailable: boolean;
+  profitBasisAmount: number;
+  profitabilityPercent: number | null;
+  missingReceiptPriceCount: number;
 };
 
 export type LiveOrganization = {
@@ -266,6 +276,8 @@ export type LiveClientOrder = {
   profitBasisAmount: number | null;
   profitabilityPercent: number | null;
   missingReceiptPriceCount: number;
+  profitRevision: string | null;
+  managerGuid: string | null;
   currency: string;
   priceType: { guid: string; name: string } | null;
   queuedAt: null;
@@ -1289,6 +1301,7 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
           : null
       )
     : null;
+  const profitRevision = text(record, ['profitRevision'], null);
   return {
     guid: orderGuid!,
     appGuid,
@@ -1321,6 +1334,8 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
       0,
       Math.trunc(numberValue(record, ['missingReceiptPriceCount', 'skippedReceiptPriceCount'], 0) ?? 0)
     ),
+    profitRevision,
+    managerGuid: text(record, ['managerGuid', 'responsibleManagerGuid'], null),
     currency: text(record, ['currency'], DEFAULT_CURRENCY) ?? DEFAULT_CURRENCY,
     priceType,
     queuedAt: null,
@@ -1502,6 +1517,36 @@ export async function getLiveClientOrders(query: ClientOrdersListQuery & { manag
   return paged(await getOnecLpAppClientOrders(normalized), ['clientOrders', 'orders'], (item) => mapClientOrder(item, true), {
     limit,
     offset,
+  });
+}
+
+export async function getLiveClientOrderProfits(
+  documentGuids: string[],
+  managerGuid: string
+): Promise<LiveClientOrderProfit[]> {
+  const uniqueGuids = Array.from(new Set(documentGuids.map((guid) => guid.trim().toLowerCase()).filter(Boolean))).slice(0, 50);
+  if (!uniqueGuids.length) return [];
+  const payload = await postOnecLpAppClientOrderProfits({ managerGuid }, uniqueGuids);
+  return readArray(asRecord(payload), ['items']).flatMap((candidate) => {
+    const record = asRecord(candidate);
+    const documentGuid = entityGuid(record, ['documentGuid', 'guid']);
+    if (!record || !documentGuid) return [];
+    const profitAvailable = bool(record, ['profitAvailable'], false);
+    const profit = profitAvailable ? numberValue(record, ['profit'], null) : null;
+    const profitBasisAmount = numberValue(record, ['profitBasisAmount'], 0) ?? 0;
+    return [{
+      documentGuid,
+      profit,
+      profitAvailable: profitAvailable && profit !== null,
+      profitBasisAmount,
+      profitabilityPercent: profitAvailable
+        ? numberValue(record, ['profitabilityPercent'], profitBasisAmount !== 0 && profit !== null ? profit / profitBasisAmount * 100 : null)
+        : null,
+      missingReceiptPriceCount: Math.max(
+        0,
+        Math.trunc(numberValue(record, ['missingReceiptPriceCount'], 0) ?? 0)
+      ),
+    }];
   });
 }
 

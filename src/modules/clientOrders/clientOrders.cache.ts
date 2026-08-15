@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { cacheGet, cacheSet } from '../../lib/redis';
 
 type CacheLoader<T> = () => Promise<T>;
+type CacheTtl<T> = number | ((value: T) => number);
 type CacheOptions = {
   shouldOpenCircuit?: (error: unknown) => boolean;
   forceRefresh?: boolean;
@@ -25,6 +26,7 @@ export const CLIENT_ORDERS_CACHE_TTL = {
   ordersList: 20,
   todaySummary: 30,
   orderDetail: 30,
+  closedOrderDetail: 12 * 60 * 60,
   defaults: 120,
   counterparties: 180,
   agreements: 120,
@@ -36,6 +38,10 @@ export const CLIENT_ORDERS_CACHE_TTL = {
   priceTypes: 600,
   products: 15,
   productsBatch: 15,
+  // Receipt prices for a dated read-only document are immutable. Current
+  // stock still changes, so keep this cache bounded rather than reusing the
+  // 12-hour closed-document TTL.
+  historicalProductsBatch: 10 * 60,
   referenceData: 120,
   referenceDetails: 300,
 };
@@ -100,11 +106,15 @@ function rememberMemoryValue(key: string, value: unknown, ttlSeconds: number) {
 export async function readThroughClientOrdersCache<T>(
   scope: string,
   payload: unknown,
-  ttlSeconds: number,
+  ttlSeconds: CacheTtl<T>,
   loader: CacheLoader<T>,
   options: CacheOptions = {}
 ): Promise<T> {
-  if (!cacheEnabled() || ttlSeconds <= 0) return loader();
+  const resolveTtl = (value: T) => {
+    const resolved = typeof ttlSeconds === 'function' ? ttlSeconds(value) : ttlSeconds;
+    return Number.isFinite(resolved) ? Math.max(0, Math.trunc(resolved)) : 0;
+  };
+  if (!cacheEnabled() || (typeof ttlSeconds === 'number' && ttlSeconds <= 0)) return loader();
 
   const key = clientOrdersCacheKey(scope, payload);
   if (!options.forceRefresh) {
@@ -114,7 +124,7 @@ export async function readThroughClientOrdersCache<T>(
     try {
       const cached = await cacheGet<T>(key);
       if (cached !== null) {
-        rememberMemoryValue(key, cached, ttlSeconds);
+        rememberMemoryValue(key, cached, resolveTtl(cached));
         return cached;
       }
     } catch {
@@ -134,9 +144,11 @@ export async function readThroughClientOrdersCache<T>(
 
   const task = loader()
     .then(async (value) => {
-      rememberMemoryValue(key, value, ttlSeconds);
+      const resolvedTtl = resolveTtl(value);
+      if (resolvedTtl <= 0) return value;
+      rememberMemoryValue(key, value, resolvedTtl);
       try {
-        await cacheSet(key, value, ttlSeconds);
+        await cacheSet(key, value, resolvedTtl);
       } catch {
         // Ignore cache write failures.
       }

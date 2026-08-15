@@ -65,4 +65,20 @@ describe('clientOrders cache circuit', () => {
       clientOrdersCacheKey('counterparties', { ...common, debtStatus: 'without_debt' })
     );
   });
+
+  it('resolves a value-dependent TTL before storing an immutable document', async () => {
+    const scope = `test-dynamic-ttl-${Date.now()}`;
+    const value = { status: 'CLOSED', documentGuid: 'document-guid' };
+
+    await expect(
+      readThroughClientOrdersCache(
+        scope,
+        { id: 1 },
+        (item) => item.status === 'CLOSED' ? 12 * 60 * 60 : 30,
+        async () => value
+      )
+    ).resolves.toEqual(value);
+
+    expect(cacheSetMock).toHaveBeenCalledWith(expect.any(String), value, 12 * 60 * 60);
+  });
 });

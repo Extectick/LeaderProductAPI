@@ -18,6 +18,7 @@ import {
   OnecLpAppConfigError,
   OnecLpAppHttpError,
   OnecLpAppNetworkError,
+  OnecLpAppTimeoutError,
 } from '../onec/onec.lpApp.client';
 import {
   CLIENT_ORDERS_CACHE_TTL,
@@ -47,6 +48,7 @@ import {
   findLiveClientOrder,
   getLiveClientOrder,
   getLiveClientOrders,
+  getLiveClientOrderProfits,
   getLiveClientOrdersTodaySummary,
   getLiveClientOrderDefaults,
   getLiveOrganizations,
@@ -61,6 +63,7 @@ import {
   type LiveCounterparty,
   type LiveDeliveryAddress,
   type LiveClientOrder,
+  type LiveClientOrderProfit,
   type LiveClientOrdersTodaySummary,
   type LiveClientOrderDefaults,
   type LiveOrganization,
@@ -114,6 +117,13 @@ type ManagerAwareProductsQuery = ClientOrdersProductsQuery & { managerGuid?: str
 type ManagerAwareBatchProductsBody = ClientOrdersBatchProductsBody & { managerGuid?: string | null };
 type ReferenceDetailsRow = { label: string; value: unknown };
 type ReferenceDetailsSection = { title: string; rows: ReferenceDetailsRow[] };
+
+type CachedClientOrderProfit = LiveClientOrderProfit & { cachedAt: number };
+
+const CLOSED_ORDER_PROFIT_CACHE_TTL_SECONDS = 12 * 60 * 60;
+const ACTIVE_ORDER_PROFIT_CACHE_TTL_SECONDS = 60;
+const MAX_PROFIT_MEMORY_ENTRIES = 2_000;
+const clientOrderProfitMemory = new Map<string, { value: CachedClientOrderProfit; expiresAt: number }>();
 
 type ManagerOrderContext = {
   organization: { id: string; guid: string; name: string; code: string | null };
@@ -536,6 +546,14 @@ function throwClientOrdersOnecError(error: unknown, message = '1С времен�
     throw error;
   }
 
+  if (error instanceof OnecLpAppTimeoutError) {
+    throw new ClientOrdersError(
+      504,
+      ErrorCodes.INTERNAL_ERROR,
+      `${message}: 1С обрабатывает запрос дольше обычного. Повторите запрос.`
+    );
+  }
+
   const detail =
     error instanceof OnecLpAppConfigError
       ? 'Не настроено подключение к 1С.'
@@ -570,6 +588,7 @@ async function onecLive<T>(
 }
 
 function shouldOpenClientOrdersOnecCircuit(error: unknown) {
+  if (error instanceof OnecLpAppTimeoutError) return false;
   if (error instanceof OnecLpAppHttpError) {
     return [502, 503, 504].includes(error.upstreamStatus);
   }
@@ -3275,7 +3294,7 @@ async function enrichLiveOrdersForWarehouseFilter(
         () => readThroughClientOrdersCache(
           'orders:detail',
           { guid: detailGuid, managerGuid, appGuid: item.appGuid ?? undefined },
-          CLIENT_ORDERS_CACHE_TTL.orderDetail,
+          liveOrderDetailCacheTtl,
           () => getLiveClientOrder(detailGuid, { managerGuid, appGuid: item.appGuid ?? undefined })
         ),
         'Ошибка получения detail заказа клиента из 1С для фильтра склада',
@@ -3287,6 +3306,136 @@ async function enrichLiveOrdersForWarehouseFilter(
   });
 
   return enriched;
+}
+
+function isClosedLiveOrder(order: LiveClientOrder) {
+  return order.status === 'CLOSED' || order.status === 'COMPLETED';
+}
+
+function liveOrderDetailCacheTtl(order: LiveClientOrder) {
+  return isClosedLiveOrder(order)
+    ? CLIENT_ORDERS_CACHE_TTL.closedOrderDetail
+    : CLIENT_ORDERS_CACHE_TTL.orderDetail;
+}
+
+function liveOrderProfitRevision(order: LiveClientOrder) {
+  return order.profitRevision || [
+    order.documentGuid,
+    order.date1c instanceof Date ? order.date1c.toISOString() : order.date1c ?? '',
+    order.totalAmount ?? '',
+    order.itemsCount,
+    order.status,
+  ].join('|');
+}
+
+function liveOrderProfitCacheKey(order: LiveClientOrder) {
+  return clientOrdersCacheKey('order:profit', {
+    documentGuid: order.documentGuid,
+    revision: liveOrderProfitRevision(order),
+  });
+}
+
+function rememberClientOrderProfit(key: string, value: CachedClientOrderProfit, ttlSeconds: number) {
+  if (clientOrderProfitMemory.size >= MAX_PROFIT_MEMORY_ENTRIES) {
+    const oldestKey = clientOrderProfitMemory.keys().next().value;
+    if (oldestKey) clientOrderProfitMemory.delete(oldestKey);
+  }
+  clientOrderProfitMemory.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1_000 });
+}
+
+async function readCachedClientOrderProfit(order: LiveClientOrder) {
+  const key = liveOrderProfitCacheKey(order);
+  const memory = clientOrderProfitMemory.get(key);
+  if (memory && memory.expiresAt > Date.now()) return memory.value;
+  if (memory) clientOrderProfitMemory.delete(key);
+  try {
+    const cached = await cacheGet<CachedClientOrderProfit>(key);
+    if (!cached) return null;
+    const ttl = isClosedLiveOrder(order)
+      ? CLOSED_ORDER_PROFIT_CACHE_TTL_SECONDS
+      : ACTIVE_ORDER_PROFIT_CACHE_TTL_SECONDS;
+    rememberClientOrderProfit(key, cached, ttl);
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+async function storeClientOrderProfit(order: LiveClientOrder, profit: LiveClientOrderProfit) {
+  const key = liveOrderProfitCacheKey(order);
+  const ttl = isClosedLiveOrder(order)
+    ? CLOSED_ORDER_PROFIT_CACHE_TTL_SECONDS
+    : ACTIVE_ORDER_PROFIT_CACHE_TTL_SECONDS;
+  const value: CachedClientOrderProfit = { ...profit, cachedAt: Date.now() };
+  rememberClientOrderProfit(key, value, ttl);
+  try {
+    await cacheSet(key, value, ttl);
+  } catch {
+    // Redis is best-effort; the process-local cache still avoids repeated reads.
+  }
+}
+
+function mergeLiveOrderProfit(order: LiveClientOrder, profit: LiveClientOrderProfit | null) {
+  if (!profit) return order;
+  return {
+    ...order,
+    profit: profit.profitAvailable ? profit.profit : null,
+    profitAvailable: profit.profitAvailable,
+    profitBasisAmount: profit.profitBasisAmount,
+    profitabilityPercent: profit.profitAvailable ? profit.profitabilityPercent : null,
+    missingReceiptPriceCount: profit.missingReceiptPriceCount,
+  };
+}
+
+async function enrichLiveOrdersWithProfits(orders: LiveClientOrder[], managerGuid: string) {
+  if (!orders.length) return orders;
+  const cached = await Promise.all(orders.map(async (order) => {
+    if (order.profitAvailable && order.profit !== null) {
+      const current: LiveClientOrderProfit = {
+        documentGuid: order.documentGuid,
+        profit: order.profit,
+        profitAvailable: true,
+        profitBasisAmount: order.profitBasisAmount ?? order.totalAmount ?? 0,
+        profitabilityPercent: order.profitabilityPercent,
+        missingReceiptPriceCount: order.missingReceiptPriceCount,
+      };
+      await storeClientOrderProfit(order, current);
+      return current;
+    }
+    return readCachedClientOrderProfit(order);
+  }));
+  const byGuid = new Map<string, LiveClientOrderProfit>();
+  cached.forEach((profit) => {
+    if (profit) byGuid.set(profit.documentGuid.toLowerCase(), profit);
+  });
+
+  const missing = orders.filter((order) => !byGuid.has(order.documentGuid.toLowerCase()));
+  if (missing.length) {
+    try {
+      const loaded = await getLiveClientOrderProfits(
+        missing.map((order) => order.documentGuid),
+        managerGuid
+      );
+      const orderByGuid = new Map(missing.map((order) => [order.documentGuid.toLowerCase(), order]));
+      await Promise.all(loaded.map(async (profit) => {
+        const normalizedGuid = profit.documentGuid.toLowerCase();
+        const order = orderByGuid.get(normalizedGuid);
+        if (!order) return;
+        byGuid.set(normalizedGuid, profit);
+        await storeClientOrderProfit(order, profit);
+      }));
+    } catch (error) {
+      console.warn('[client-orders] document profit batch unavailable', {
+        count: missing.length,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return orders.map((order) => mergeLiveOrderProfit(
+    order,
+    byGuid.get(order.documentGuid.toLowerCase()) ?? null
+  ));
 }
 
 export async function listClientOrders(query: ClientOrdersListQuery, userId: number) {
@@ -3384,7 +3533,8 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
         'Ошибка получения live-списка заказов из 1С',
         { allowCachedWhenCircuitOpen: true }
       );
-      liveItems = await enrichLiveOrdersForWarehouseFilter(livePage.items, query, managerGuid);
+      const liveItemsWithProfits = await enrichLiveOrdersWithProfits(livePage.items, managerGuid);
+      liveItems = await enrichLiveOrdersForWarehouseFilter(liveItemsWithProfits, query, managerGuid);
       liveTotal = livePage.total;
       liveHasMore = Boolean(livePage.hasMore ?? (liveQueryOffset + livePage.items.length < livePage.total));
     } catch (error) {
@@ -3633,7 +3783,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
       () => readThroughClientOrdersCache(
         'orders:detail',
         { guid, managerGuid },
-        CLIENT_ORDERS_CACHE_TTL.orderDetail,
+        liveOrderDetailCacheTtl,
         () => getLiveClientOrder(guid, { managerGuid })
       ),
       'Ошибка получения заказа клиента из 1С',
@@ -3653,23 +3803,44 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     const managerGuid = await getManagerGuidForUser(userId);
     if (managerGuid) {
       try {
-        const liveSummary = await onecLive(
-          () => readThroughClientOrdersCache(
-            'orders:find',
-            { managerGuid, appGuid: order.guid, number1c: order.number1c },
-            CLIENT_ORDERS_CACHE_TTL.ordersList,
-            () => findLiveClientOrder({ managerGuid, appGuid: order.guid, number1c: order.number1c })
-          ),
-          'Ошибка поиска заказа клиента в 1С',
-          { allowCachedWhenCircuitOpen: true }
-        );
-        if (liveSummary?.documentGuid) {
+        const snapshotRoot = order.last1cSnapshot && typeof order.last1cSnapshot === 'object'
+          ? order.last1cSnapshot as Record<string, unknown>
+          : null;
+        const snapshotItem = snapshotRoot?.item && typeof snapshotRoot.item === 'object'
+          ? snapshotRoot.item as Record<string, unknown>
+          : snapshotRoot;
+        let documentGuid = typeof snapshotItem?.documentGuid === 'string'
+          ? snapshotItem.documentGuid.trim()
+          : '';
+        let liveSummary: LiveClientOrder | null = null;
+
+        // Export snapshots already contain the immutable 1C document GUID.
+        // Use it directly and avoid an extra list/search request on every open.
+        if (!documentGuid) {
+          liveSummary = await onecLive(
+            () => readThroughClientOrdersCache(
+              'orders:find',
+              { managerGuid, appGuid: order.guid, number1c: order.number1c },
+              CLIENT_ORDERS_CACHE_TTL.ordersList,
+              () => findLiveClientOrder({ managerGuid, appGuid: order.guid, number1c: order.number1c })
+            ),
+            'Ошибка поиска заказа клиента в 1С',
+            { allowCachedWhenCircuitOpen: true }
+          );
+          documentGuid = liveSummary?.documentGuid?.trim() || '';
+        }
+        if (documentGuid) {
           const liveDetail = await onecLive(
             () => readThroughClientOrdersCache(
               'orders:detail',
-              { documentGuid: liveSummary.documentGuid, managerGuid, appGuid: order.guid },
-              CLIENT_ORDERS_CACHE_TTL.orderDetail,
-              () => getLiveClientOrder(liveSummary.documentGuid, { managerGuid, appGuid: order.guid })
+              {
+                documentGuid,
+                managerGuid,
+                appGuid: order.guid,
+                sourceRevision: liveSummary ? liveOrderProfitRevision(liveSummary) : undefined,
+              },
+              liveOrderDetailCacheTtl,
+              () => getLiveClientOrder(documentGuid, { managerGuid, appGuid: order.guid })
             ),
             'Ошибка получения заказа клиента из 1С',
             { allowCachedWhenCircuitOpen: true }
@@ -4397,15 +4568,24 @@ export async function getClientOrderDefaults(userId: number, query: ClientOrderD
   const deliveryDateResolution = resolveDeliveryDateSettings(settings);
   try {
     const defaults = await onecLive(
-      () => getLiveClientOrderDefaults(query),
+      () => readThroughClientOrdersCache(
+        'defaults',
+        query,
+        CLIENT_ORDERS_CACHE_TTL.defaults,
+        async () => {
+          const liveDefaults = await getLiveClientOrderDefaults(query);
+          try {
+            await materializeLiveDefaultsReferences(liveDefaults);
+          } catch {
+            // The live answer is still valid when the optional local snapshot
+            // could not be refreshed.
+          }
+          return liveDefaults;
+        }
+      ),
       'Ошибка получения подсказок по умолчанию из 1С',
       { allowCachedWhenCircuitOpen: true }
     );
-    try {
-      await materializeLiveDefaultsReferences(defaults);
-    } catch {
-      // Defaults are still useful to the app even if local snapshot caching failed.
-    }
     return {
       ...mapLiveDefaults(defaults, deliveryDateResolution),
       invoiceRequested: await getInvoicePreference(userId, query.counterpartyGuid),
@@ -5159,11 +5339,14 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
 export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProductsBody, userId?: number | null) {
   const managerGuid = userId ? await getManagerGuidForUser(userId) : null;
   const liveBody: ManagerAwareBatchProductsBody = managerGuid ? { ...body, managerGuid } : body;
+  const cacheTtl = liveBody.receiptPriceAt
+    ? CLIENT_ORDERS_CACHE_TTL.historicalProductsBatch
+    : CLIENT_ORDERS_CACHE_TTL.productsBatch;
   const items = await onecLive(
     () => readThroughClientOrdersCache(
       'products:batch',
       { ...liveBody, productGuids: [...new Set(liveBody.productGuids)].sort() },
-      CLIENT_ORDERS_CACHE_TTL.productsBatch,
+      cacheTtl,
       () => getLiveProductsByGuids(liveBody),
       { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }
     ),
