@@ -68,7 +68,9 @@ function batchSize() {
 }
 
 function workerConcurrency() {
-  return Math.min(8, envInt('CLIENT_ORDER_INVOICE_WORKER_CONCURRENCY', 3, 1));
+  // Invoice processing performs several consistency checks in 1C. Two workers
+  // keep throughput without creating the long Apache/1C contention seen with 3+.
+  return Math.min(8, envInt('CLIENT_ORDER_INVOICE_WORKER_CONCURRENCY', 2, 1));
 }
 
 function leaseMs() {
@@ -643,7 +645,10 @@ export async function processInvoice(invoiceId: string) {
   });
   if (!invoice) return;
   try {
-    if (!(await validateCandidate(invoice))) return;
+    // A newly generated PDF is validated inside ensurePdf both before and
+    // after generation. Repeating the same check here added one expensive 1C
+    // round-trip per invoice. An already stored PDF still needs this check.
+    if (invoice.s3Key && !(await validateCandidate(invoice))) return;
     await ensurePdf(invoice);
     const refreshed = await prisma.clientOrderInvoice.findUnique({
       where: { id: invoice.id },

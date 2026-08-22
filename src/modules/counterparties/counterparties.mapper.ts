@@ -7,6 +7,7 @@ import type {
   CounterpartyFinanceSummary,
   CounterpartyFinancialDocument,
   CounterpartyFinancialDocumentsSummary,
+  CounterpartyFinancialDocumentsPage,
   CounterpartyIncomingPayment,
   CounterpartyOrganizationSummary,
   CounterpartyPaymentDiscipline,
@@ -403,6 +404,22 @@ function mapFinancialDocumentsSummary(
     awaitingShipmentCount: Math.max(0, numberOrNull(source, [
       'awaitingShipmentCount', 'shipmentPendingCount',
     ]) ?? fallback.awaitingShipmentCount),
+  };
+}
+
+export function mapOnecCounterpartyFinancialDocumentsPage(payload: unknown): Omit<CounterpartyFinancialDocumentsPage, 'nextCursor' | 'stale'> & { nextOffset: number | null } {
+  const root = unwrap(payload);
+  if (!root) throw new Error('1C returned an incomplete financial documents page');
+  const itemsRoot = { financialDocuments: value(root, 'items', 'financialDocuments') };
+  const items = mapFinancialDocuments(itemsRoot, []);
+  const summaryRoot = { financialDocumentsSummary: value(root, 'summary', 'financialDocumentsSummary') };
+  return {
+    items,
+    summary: mapFinancialDocumentsSummary(summaryRoot, items),
+    hasMore: booleanOrNull(root, ['hasMore']) ?? false,
+    nextOffset: numberOrNull(root, ['nextOffset']),
+    asOf: text(root, ['calculatedAt', 'asOf'], new Date().toISOString()) ?? new Date().toISOString(),
+    sourceVersion: text(root, ['sourceVersion'], 'counterparty-financial-documents-v1') ?? 'counterparty-financial-documents-v1',
   };
 }
 

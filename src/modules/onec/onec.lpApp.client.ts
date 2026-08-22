@@ -301,6 +301,10 @@ export function getOnecLpAppCounterpartyCard(query: OnecLpAppQuery) {
   return callOnecLpApp('/counterparty-card', { query, timeoutMs: getCounterpartyCardTimeoutMs() });
 }
 
+export function getOnecLpAppCounterpartyFinancialDocuments(query: OnecLpAppQuery) {
+  return callOnecLpApp('/counterparty-card', { query: { ...query, mode: 'financial-documents' }, timeoutMs: getCounterpartyCardTimeoutMs() });
+}
+
 export function getOnecLpAppContracts(query: OnecLpAppQuery) {
   return callOnecLpApp('/contracts', { query, timeoutMs: getDirectoryTimeoutMs() });
 }

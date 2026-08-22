@@ -223,6 +223,8 @@ model Product {
 
   sourceUpdatedAt DateTime?
   lastSyncedAt    DateTime?
+  catalogHash     String?
+  catalogRevision BigInt   @default(0)
 
   group ProductGroup? @relation(fields: [groupId], references: [id])
 
@@ -243,6 +245,7 @@ model Product {
   @@index([sourceUpdatedAt])
   @@index([sku])
   @@index([article])
+  @@index([catalogRevision])
 }
 
 model ProductImage {

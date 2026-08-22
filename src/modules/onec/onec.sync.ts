@@ -1,4 +1,5 @@
 import {
+  CatalogChangeOperation,
   OnecStageResolveStatus,
   OnecSyncSessionStatus,
   Prisma,
@@ -68,6 +69,55 @@ type SessionOutcome = {
 };
 
 type TxClient = Prisma.TransactionClient;
+
+const PRODUCT_CATALOG_STATE_ID = 'nomenclature';
+const PRODUCT_CATALOG_SCHEMA_VERSION = 1;
+
+async function recordProductCatalogChange(
+  tx: TxClient,
+  input: {
+    productId: string;
+    productGuid: string;
+    operation: CatalogChangeOperation;
+    payloadHash: string;
+    sourceUpdatedAt: Date;
+  }
+) {
+  const change = await tx.catalogChange.create({
+    data: {
+      productGuid: input.productGuid,
+      operation: input.operation,
+      payloadHash: input.payloadHash,
+      sourceUpdatedAt: input.sourceUpdatedAt,
+    },
+    select: { revision: true },
+  });
+
+  await tx.product.update({
+    where: { id: input.productId },
+    data: {
+      catalogHash: input.payloadHash,
+      catalogRevision: change.revision,
+    },
+  });
+
+  await tx.catalogState.upsert({
+    where: { id: PRODUCT_CATALOG_STATE_ID },
+    create: {
+      id: PRODUCT_CATALOG_STATE_ID,
+      epoch: randomUUID(),
+      schemaVersion: PRODUCT_CATALOG_SCHEMA_VERSION,
+      currentRevision: change.revision,
+      minAvailableRevision: 0,
+      lastSourceUpdateAt: input.sourceUpdatedAt,
+    },
+    update: {
+      schemaVersion: PRODUCT_CATALOG_SCHEMA_VERSION,
+      currentRevision: change.revision,
+      lastSourceUpdateAt: input.sourceUpdatedAt,
+    },
+  });
+}
 
 const ACTIVE_AGREEMENT_STATUS = 'Действует';
 const ACTIVE_CONTRACT_STATUS = 'Действует';
@@ -194,7 +244,10 @@ const ENTITY_SYNC_TYPE: Record<BatchEntityCode, SyncEntityType> = {
 };
 
 const SYNC_SESSION_TX_MAX_WAIT_MS = 10_000;
-const SYNC_SESSION_TX_TIMEOUT_MS = 120_000;
+// A full nomenclature snapshot can contain several thousand products and
+// packages. Keep the atomic promote bounded, but allow enough time for a cold
+// PostgreSQL cache instead of leaving the session stuck in COMPLETING.
+const SYNC_SESSION_TX_TIMEOUT_MS = 600_000;
 const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
 
 const RECONCILE_ORDER: BatchEntityCode[] = [
@@ -849,11 +902,42 @@ async function clearEntityInTx(tx: TxClient, entity: BatchEntityCode) {
       await tx.warehouse.deleteMany({});
       return;
     case 'nomenclature':
+      await tx.catalogChange.deleteMany({});
+      await tx.catalogState.upsert({
+        where: { id: PRODUCT_CATALOG_STATE_ID },
+        create: {
+          id: PRODUCT_CATALOG_STATE_ID,
+          epoch: randomUUID(),
+          schemaVersion: PRODUCT_CATALOG_SCHEMA_VERSION,
+          currentRevision: 0,
+          minAvailableRevision: 0,
+          lastFullReconcileAt: now(),
+        },
+        update: {
+          epoch: randomUUID(),
+          schemaVersion: PRODUCT_CATALOG_SCHEMA_VERSION,
+          currentRevision: 0,
+          minAvailableRevision: 0,
+          lastFullReconcileAt: now(),
+        },
+      });
       await tx.stockBalance.deleteMany({});
       await tx.specialPrice.deleteMany({});
       await tx.productPrice.deleteMany({});
       await tx.productPackage.deleteMany({});
-      await tx.product.deleteMany({});
+      // Products can be referenced by historical order rows. A full catalog
+      // replacement must never destroy that history: deactivate the old
+      // snapshot and let the incoming snapshot reactivate/upsert its members.
+      // Resetting catalog metadata forces a fresh change row for every active
+      // item in the new epoch.
+      await tx.product.updateMany({
+        data: {
+          isActive: false,
+          groupId: null,
+          catalogHash: null,
+          catalogRevision: BigInt(0),
+        },
+      });
       await tx.productGroup.deleteMany({});
       return;
   }
@@ -946,6 +1030,11 @@ async function applyStagedNomenclature(
   for (const stage of products) {
     const item = stage.payload as unknown as NomenclatureItem;
     try {
+      const existingCatalogProduct = await tx.product.findUnique({
+        where: { guid: item.guid },
+        select: { catalogHash: true },
+      });
+      const catalogChanged = existingCatalogProduct?.catalogHash !== stage.payloadHash;
       let groupId: string | null = null;
       if (item.parentGuid) {
         const group = await tx.productGroup.findUnique({
@@ -1068,6 +1157,16 @@ async function applyStagedNomenclature(
             await tx.productPackage.create({ data: packageData });
           }
         }
+      }
+
+      if (catalogChanged) {
+        await recordProductCatalogChange(tx, {
+          productId: product.id,
+          productGuid: item.guid,
+          operation: item.isActive === false ? CatalogChangeOperation.DELETE : CatalogChangeOperation.UPSERT,
+          payloadHash: stage.payloadHash,
+          sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+        });
       }
 
       summary.resolvedStageIds.push(stage.id);

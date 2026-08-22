@@ -144,6 +144,7 @@ describe('manual client order invoice request', () => {
       date1c: '2026-08-05T10:00:00',
       source: 'ONEC_LIVE',
       origin: 'onec',
+      managerGuid: 'manager-guid',
       readOnly: true,
       readOnlyReason: null,
       hasRealization: true,

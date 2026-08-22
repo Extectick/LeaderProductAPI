@@ -3,14 +3,17 @@ import { cacheGet, cacheSet } from '../../lib/redis';
 import { ErrorCodes } from '../../utils/apiResponse';
 import {
   getOnecLpAppCounterpartyCard,
+  getOnecLpAppCounterpartyFinancialDocuments,
   OnecLpAppHttpError,
   type OnecLpAppQuery,
 } from '../onec/onec.lpApp.client';
-import { mapOnecCounterpartyCard } from './counterparties.mapper';
+import { mapOnecCounterpartyCard, mapOnecCounterpartyFinancialDocumentsPage } from './counterparties.mapper';
 import type {
   CounterpartyCardBootstrap,
   CounterpartyCardPeriods,
   CounterpartyCardPermissions,
+  CounterpartyFinancialDocumentStatus,
+  CounterpartyFinancialDocumentsPage,
   CounterpartyPeriodPreset,
 } from './counterparties.types';
 
@@ -32,15 +35,83 @@ export class CounterpartiesError extends Error {
 
 // Bump this value whenever API-side scoping changes. It prevents an older,
 // broader cached projection from being returned under newer access rules.
-const CARD_CONTRACT_VERSION = 'counterparty-card-api-v14';
+const CARD_CONTRACT_VERSION = 'counterparty-card-api-v16';
 // Financial and sales aggregates are expensive in 1C and do not need
 // second-by-second freshness. Explicit pull-to-refresh bypasses this cache.
 const CARD_FRESH_TTL_SECONDS = 2 * 60;
 const CARD_STALE_TTL_SECONDS = 30 * 60;
+const FINANCIAL_DOCUMENTS_FRESH_TTL_SECONDS = 30;
+const FINANCIAL_DOCUMENTS_STALE_TTL_SECONDS = 10 * 60;
 const MAX_MEMORY_ENTRIES = 500;
+const DEFAULT_MAX_CONCURRENT_CARD_READS = 3;
+const DEFAULT_MAX_QUEUED_CARD_READS = 18;
 const TIME_ZONE = 'Asia/Omsk';
 const pendingReads = new Map<string, Promise<CounterpartyCardBootstrap>>();
+const pendingFinancialDocumentReads = new Map<string, Promise<CounterpartyFinancialDocumentsPage>>();
 const memoryCache = new Map<string, { entry: CacheEntry; expiresAt: number }>();
+const cardReadWaiters: Array<() => void> = [];
+let activeCardReads = 0;
+const performanceMetrics = {
+  memoryHits: 0,
+  redisHits: 0,
+  staleHits: 0,
+  upstreamReads: 0,
+  queueWaits: 0,
+  queueWaitMs: 0,
+  upstreamMs: 0,
+  rejectedReads: 0,
+};
+
+export function counterpartyPerformanceSnapshot() {
+  return {
+    ...performanceMetrics,
+    activeReads: activeCardReads,
+    queuedReads: cardReadWaiters.length,
+  };
+}
+
+function positiveIntegerEnv(name: string, fallback: number, max: number) {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
+}
+
+function maxConcurrentCardReads() {
+  return positiveIntegerEnv('ONEC_COUNTERPARTY_CARD_MAX_CONCURRENCY', DEFAULT_MAX_CONCURRENT_CARD_READS, 12);
+}
+
+function maxQueuedCardReads() {
+  return positiveIntegerEnv('ONEC_COUNTERPARTY_CARD_MAX_QUEUE', DEFAULT_MAX_QUEUED_CARD_READS, 100);
+}
+
+async function withCardReadSlot<T>(task: () => Promise<T>): Promise<T> {
+  const queuedAt = Date.now();
+  if (activeCardReads >= maxConcurrentCardReads()) {
+    if (cardReadWaiters.length >= maxQueuedCardReads()) {
+      performanceMetrics.rejectedReads += 1;
+      throw new CounterpartiesError(
+        429,
+        ErrorCodes.TOO_MANY_REQUESTS,
+        '1С обрабатывает другие карточки. Повторите запрос через несколько секунд.'
+      );
+    }
+    performanceMetrics.queueWaits += 1;
+    await new Promise<void>((resolve) => cardReadWaiters.push(resolve));
+    performanceMetrics.queueWaitMs += Date.now() - queuedAt;
+  } else {
+    activeCardReads += 1;
+  }
+
+  const startedAt = Date.now();
+  performanceMetrics.upstreamReads += 1;
+  try {
+    return await task();
+  } finally {
+    performanceMetrics.upstreamMs += Date.now() - startedAt;
+    const next = cardReadWaiters.shift();
+    if (next) next();
+    else activeCardReads = Math.max(0, activeCardReads - 1);
+  }
+}
 
 function dayParts(date: Date) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -167,6 +238,8 @@ function cacheKey(payload: object, stale: boolean) {
 }
 
 function remember(key: string, entry: CacheEntry) {
+  // Map insertion order gives us a small O(1) LRU without another dependency.
+  memoryCache.delete(key);
   if (memoryCache.size >= MAX_MEMORY_ENTRIES) {
     const oldest = memoryCache.keys().next().value;
     if (oldest) memoryCache.delete(oldest);
@@ -182,11 +255,17 @@ function usable(entry: CacheEntry | null | undefined, maxAgeSeconds: number) {
 
 async function readEntry(key: string, maxAgeSeconds: number) {
   const memory = memoryCache.get(key);
-  if (memory && memory.expiresAt > Date.now() && usable(memory.entry, maxAgeSeconds)) return memory.entry;
+  if (memory && memory.expiresAt > Date.now() && usable(memory.entry, maxAgeSeconds)) {
+    performanceMetrics.memoryHits += 1;
+    memoryCache.delete(key);
+    memoryCache.set(key, memory);
+    return memory.entry;
+  }
   if (memory && memory.expiresAt <= Date.now()) memoryCache.delete(key);
   try {
     const cached = await cacheGet<CacheEntry>(key);
     if (usable(cached, maxAgeSeconds)) {
+      performanceMetrics.redisHits += 1;
       remember(key, cached!);
       return cached!;
     }
@@ -317,8 +396,11 @@ export async function getCounterpartyCard(options: {
         periodTo: periods.periodTo,
         compareFrom: periods.compareFrom,
         compareTo: periods.compareTo,
+        financialDocumentsLimit: 20,
       };
-      const upstream = await getOnecLpAppCounterpartyCard(query);
+      // Protect 1C/Apache from a burst of distinct counterparties or periods.
+      // Same-key requests have already been coalesced by pendingReads above.
+      const upstream = await withCardReadSlot(() => getOnecLpAppCounterpartyCard(query));
       const value = scopeCardToRequestedOrganization(
         mapOnecCounterpartyCard(
           upstream,
@@ -333,7 +415,10 @@ export async function getCounterpartyCard(options: {
       return value;
     } catch (error) {
       const stale = await readEntry(staleKey, CARD_STALE_TTL_SECONDS);
-      if (stale) return { ...stale.value, stale: true };
+      if (stale) {
+        performanceMetrics.staleHits += 1;
+        return { ...stale.value, stale: true };
+      }
       if (error instanceof OnecLpAppHttpError && error.upstreamStatus === 404) {
         throw new CounterpartiesError(404, ErrorCodes.NOT_FOUND, 'Контрагент не найден в 1С.');
       }
@@ -353,6 +438,7 @@ export async function getCounterpartyCard(options: {
     // 1C aggregate is recalculated. Single-flight prevents duplicate refreshes.
     const stale = await readEntry(staleKey, CARD_STALE_TTL_SECONDS);
     if (stale) {
+      performanceMetrics.staleHits += 1;
       void loadLive().catch((error) => {
         console.warn('[counterparties] background card refresh failed', {
           counterpartyGuid: options.counterpartyGuid,
@@ -364,4 +450,126 @@ export async function getCounterpartyCard(options: {
   }
 
   return loadLive();
+}
+
+function encodeFinancialDocumentsCursor(offset: number) {
+  return Buffer.from(JSON.stringify({ version: 1, offset }), 'utf8').toString('base64url');
+}
+
+function decodeFinancialDocumentsCursor(cursor?: string) {
+  if (!cursor) return 0;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { version?: unknown; offset?: unknown };
+    if (parsed.version !== 1 || !Number.isInteger(parsed.offset) || Number(parsed.offset) < 0 || Number(parsed.offset) > 500) {
+      throw new Error('invalid cursor');
+    }
+    return Number(parsed.offset);
+  } catch {
+    throw new CounterpartiesError(400, ErrorCodes.VALIDATION_ERROR, 'Курсор финансовых документов устарел или повреждён.');
+  }
+}
+
+export async function getCounterpartyFinancialDocuments(options: {
+  counterpartyGuid: string;
+  organizationGuid: string;
+  permissionNames: string[];
+  roleName?: string;
+  preset?: CounterpartyPeriodPreset;
+  periodFrom?: string;
+  periodTo?: string;
+  status?: CounterpartyFinancialDocumentStatus;
+  cursor?: string;
+  limit?: number;
+}): Promise<CounterpartyFinancialDocumentsPage> {
+  const elevated = ['admin', 'administrator'].includes(options.roleName?.trim().toLowerCase() ?? '');
+  const permissions = elevated
+    ? { viewFinance: true, viewSales: true, viewContacts: true, createOrder: true }
+    : counterpartyCardPermissions(options.permissionNames);
+  if (!permissions.viewFinance) {
+    throw new CounterpartiesError(403, ErrorCodes.FORBIDDEN, 'Нет доступа к финансовым документам контрагента.');
+  }
+
+  const periods = counterpartyCardPeriods(new Date(), options.preset ?? 'month', {
+    periodFrom: options.periodFrom,
+    periodTo: options.periodTo,
+  });
+  const offset = decodeFinancialDocumentsCursor(options.cursor);
+  const limit = Math.max(1, Math.min(50, Math.trunc(options.limit ?? 20)));
+  const payload = {
+    contractVersion: 'counterparty-financial-documents-api-v1',
+    counterpartyGuid: options.counterpartyGuid.toLowerCase(),
+    organizationGuid: options.organizationGuid.toLowerCase(),
+    periodFrom: periods.periodFrom,
+    periodTo: periods.periodTo,
+    status: options.status ?? null,
+    offset,
+    limit,
+  };
+  const stable = JSON.stringify(Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b))));
+  const hash = createHash('sha1').update(stable).digest('hex');
+  const freshKey = `counterparties:financial-documents:fresh:${hash}`;
+  const staleKey = `counterparties:financial-documents:stale:${hash}`;
+  type PageEntry = { value: CounterpartyFinancialDocumentsPage; fetchedAt: string };
+
+  const readPage = async (key: string, maxAgeSeconds: number) => {
+    try {
+      const cached = await cacheGet<PageEntry>(key);
+      if (!cached?.value) return null;
+      const fetchedAt = Date.parse(cached.fetchedAt);
+      return Number.isFinite(fetchedAt) && Date.now() - fetchedAt <= maxAgeSeconds * 1000 ? cached : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const cached = await readPage(freshKey, FINANCIAL_DOCUMENTS_FRESH_TTL_SECONDS);
+  if (cached) {
+    performanceMetrics.redisHits += 1;
+    return { ...cached.value, stale: false };
+  }
+
+  const existing = pendingFinancialDocumentReads.get(freshKey);
+  if (existing) return existing;
+  const task = (async () => {
+    try {
+      const upstream = await withCardReadSlot(() => getOnecLpAppCounterpartyFinancialDocuments({
+        counterpartyGuid: options.counterpartyGuid,
+        organizationGuid: options.organizationGuid,
+        period: periods.preset === 'halfYear' ? 'half-year' : periods.preset,
+        periodFrom: periods.periodFrom,
+        periodTo: periods.periodTo,
+        status: options.status,
+        offset,
+        limit,
+      }));
+      const mapped = mapOnecCounterpartyFinancialDocumentsPage(upstream);
+      const value: CounterpartyFinancialDocumentsPage = {
+        items: mapped.items,
+        summary: mapped.summary,
+        hasMore: mapped.hasMore,
+        nextCursor: mapped.hasMore && mapped.nextOffset != null ? encodeFinancialDocumentsCursor(mapped.nextOffset) : null,
+        asOf: mapped.asOf,
+        stale: false,
+        sourceVersion: mapped.sourceVersion,
+      };
+      const entry: PageEntry = { value, fetchedAt: new Date().toISOString() };
+      await Promise.allSettled([
+        cacheSet(freshKey, entry, FINANCIAL_DOCUMENTS_FRESH_TTL_SECONDS),
+        cacheSet(staleKey, entry, FINANCIAL_DOCUMENTS_STALE_TTL_SECONDS),
+      ]);
+      return value;
+    } catch (error) {
+      const stale = await readPage(staleKey, FINANCIAL_DOCUMENTS_STALE_TTL_SECONDS);
+      if (stale) {
+        performanceMetrics.staleHits += 1;
+        return { ...stale.value, stale: true };
+      }
+      if (error instanceof OnecLpAppHttpError && error.upstreamStatus === 404) {
+        throw new CounterpartiesError(404, ErrorCodes.NOT_FOUND, 'Контрагент не найден в 1С.');
+      }
+      throw error;
+    }
+  })().finally(() => pendingFinancialDocumentReads.delete(freshKey));
+  pendingFinancialDocumentReads.set(freshKey, task);
+  return task;
 }

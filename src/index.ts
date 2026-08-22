@@ -31,6 +31,7 @@ import onecLpAppRouter from './modules/onec/onec.lpApp.routes';
 import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import counterpartiesRouter from './modules/counterparties/counterparties.routes';
+import catalogRouter from './modules/catalog/catalog.routes';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
 import {
   startClientOrdersExportWorker,
@@ -191,6 +192,7 @@ app.use('/api/1c', onecRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/client-orders', clientOrdersRouter);
 app.use('/api/counterparties', counterpartiesRouter);
+app.use('/api/catalog', catalogRouter);
 
 app.use(
   '/appeals',

@@ -131,6 +131,16 @@ export type CounterpartyFinancialDocumentsSummary = {
   awaitingShipmentCount: number;
 };
 
+export type CounterpartyFinancialDocumentsPage = {
+  items: CounterpartyFinancialDocument[];
+  summary: CounterpartyFinancialDocumentsSummary;
+  hasMore: boolean;
+  nextCursor: string | null;
+  asOf: string;
+  stale: boolean;
+  sourceVersion: string;
+};
+
 export type CounterpartyIncomingPayment = {
   guid: string;
   number: string | null;

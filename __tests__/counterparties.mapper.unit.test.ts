@@ -1,4 +1,4 @@
-import { mapOnecCounterpartyCard } from '../src/modules/counterparties/counterparties.mapper';
+import { mapOnecCounterpartyCard, mapOnecCounterpartyFinancialDocumentsPage } from '../src/modules/counterparties/counterparties.mapper';
 
 const permissions = {
   viewFinance: true,
@@ -296,5 +296,16 @@ describe('counterparty card mapper', () => {
     } }, '11111111-1111-4111-8111-111111111111', null, permissions);
 
     expect(card.overview.status).toBe('Есть долг');
+  });
+
+  it('maps a standalone financial documents page', () => {
+    const page = mapOnecCounterpartyFinancialDocumentsPage({
+      items: [{ documentGuid: '22222222-2222-4222-8222-222222222222', status: 'OVERDUE', amount: '1 200,50' }],
+      summary: { totalCount: 5, overdueCount: 1, pendingCount: 4, awaitingShipmentCount: 1 },
+      hasMore: true, nextOffset: 20, calculatedAt: '2026-08-16T10:00:00', sourceVersion: 'v1',
+    });
+    expect(page.items[0]).toMatchObject({ status: 'OVERDUE', amount: 1200.5 });
+    expect(page.summary.totalCount).toBe(5);
+    expect(page.nextOffset).toBe(20);
   });
 });

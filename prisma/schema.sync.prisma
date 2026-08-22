@@ -51,6 +51,35 @@ enum SyncEntityType {
   ORDERS_SNAPSHOT
 }
 
+enum CatalogChangeOperation {
+  UPSERT
+  DELETE
+}
+
+model CatalogState {
+  id                   String   @id
+  epoch                String
+  schemaVersion        Int      @default(1)
+  currentRevision      BigInt   @default(0)
+  minAvailableRevision BigInt   @default(0)
+  lastSourceUpdateAt   DateTime?
+  lastFullReconcileAt  DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model CatalogChange {
+  revision       BigInt                 @id @default(autoincrement())
+  productGuid    String
+  operation      CatalogChangeOperation
+  payloadHash    String?
+  sourceUpdatedAt DateTime?
+  changedAt      DateTime               @default(now())
+
+  @@index([productGuid, revision])
+  @@index([changedAt])
+}
+
 model SyncRun {
   id        String         @id @default(cuid())
   requestId String         @unique

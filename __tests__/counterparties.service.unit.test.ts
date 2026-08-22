@@ -1,6 +1,7 @@
 const cacheGet = jest.fn();
 const cacheSet = jest.fn();
 const getOnecLpAppCounterpartyCard = jest.fn();
+const getOnecLpAppCounterpartyFinancialDocuments = jest.fn();
 
 jest.mock('../src/lib/redis', () => ({ cacheGet, cacheSet }));
 jest.mock('../src/modules/onec/onec.lpApp.client', () => {
@@ -9,13 +10,14 @@ jest.mock('../src/modules/onec/onec.lpApp.client', () => {
       super(message);
     }
   }
-  return { getOnecLpAppCounterpartyCard, OnecLpAppHttpError };
+  return { getOnecLpAppCounterpartyCard, getOnecLpAppCounterpartyFinancialDocuments, OnecLpAppHttpError };
 });
 
 import {
   counterpartyCardPeriods,
   counterpartyCardPermissions,
   getCounterpartyCard,
+  getCounterpartyFinancialDocuments,
 } from '../src/modules/counterparties/counterparties.service';
 
 describe('counterparty card service', () => {
@@ -57,8 +59,49 @@ describe('counterparty card service', () => {
       periodFrom: '2026-06-10',
       periodTo: '2026-06-20',
       period: 'custom',
+      financialDocumentsLimit: 20,
     }));
     expect(getOnecLpAppCounterpartyCard.mock.calls[0][0]).not.toHaveProperty('managerGuid');
+  });
+
+  it('limits distinct heavy 1C card reads while preserving the queue', async () => {
+    process.env.ONEC_COUNTERPARTY_CARD_MAX_CONCURRENCY = '2';
+    const pending: Array<{ query: any; resolve: (value: unknown) => void }> = [];
+    getOnecLpAppCounterpartyCard.mockImplementation((query) => new Promise((resolve) => {
+      pending.push({ query, resolve });
+    }));
+    const base = {
+      organizationGuid: '55555555-5555-4555-8555-555555555555',
+      userId: 1,
+      roleName: 'employee',
+      permissionNames: ['view_client_orders'],
+      preset: 'month' as const,
+      forceRefresh: true,
+    };
+
+    try {
+      const requests = [1, 2, 3].map((index) => getCounterpartyCard({
+        ...base,
+        counterpartyGuid: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(getOnecLpAppCounterpartyCard).toHaveBeenCalledTimes(2);
+
+      const first = pending[0];
+      first.resolve({ item: { identity: { guid: first.query.counterpartyGuid, name: 'Первый' }, overview: {} } });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(getOnecLpAppCounterpartyCard).toHaveBeenCalledTimes(3);
+
+      for (const item of pending.slice(1)) {
+        item.resolve({ item: { identity: { guid: item.query.counterpartyGuid, name: 'Клиент' }, overview: {} } });
+      }
+      await Promise.all(requests);
+    } finally {
+      delete process.env.ONEC_COUNTERPARTY_CARD_MAX_CONCURRENCY;
+    }
   });
 
   it('returns a stale card immediately and refreshes it in the background', async () => {
@@ -225,5 +268,34 @@ describe('counterparty card service', () => {
       viewContacts: false,
       createOrder: false,
     });
+  });
+
+  it('maps financial documents and keeps the upstream offset inside an opaque cursor', async () => {
+    getOnecLpAppCounterpartyFinancialDocuments.mockResolvedValueOnce({
+      items: [{ documentGuid: '22222222-2222-4222-8222-222222222222', status: 'EXPECTED', amount: 500 }],
+      summary: { totalCount: 21, overdueCount: 1, pendingCount: 20, awaitingShipmentCount: 1 },
+      hasMore: true,
+      nextOffset: 20,
+      calculatedAt: '2026-08-16T10:00:00',
+      sourceVersion: 'financial-v1',
+    });
+    const first = await getCounterpartyFinancialDocuments({
+      counterpartyGuid: '11111111-1111-4111-8111-111111111111',
+      organizationGuid: '33333333-3333-4333-8333-333333333333',
+      roleName: 'employee', permissionNames: ['view_client_orders'], preset: 'month', limit: 20,
+    });
+    expect(first.items).toHaveLength(1);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(getOnecLpAppCounterpartyFinancialDocuments).toHaveBeenCalledWith(expect.objectContaining({ offset: 0, limit: 20 }));
+
+    getOnecLpAppCounterpartyFinancialDocuments.mockResolvedValueOnce({
+      items: [], summary: { totalCount: 21 }, hasMore: false, nextOffset: null,
+    });
+    await getCounterpartyFinancialDocuments({
+      counterpartyGuid: '11111111-1111-4111-8111-111111111111',
+      organizationGuid: '33333333-3333-4333-8333-333333333333',
+      roleName: 'employee', permissionNames: ['view_client_orders'], preset: 'month', cursor: first.nextCursor!, limit: 20,
+    });
+    expect(getOnecLpAppCounterpartyFinancialDocuments).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 20 }));
   });
 });
