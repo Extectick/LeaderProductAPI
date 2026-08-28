@@ -389,7 +389,15 @@ describe('clientOrders 1C live adapter', () => {
         priceType: { guid: 'price-type-guid', name: 'Розничная' },
         currency: 'RUB',
       },
-      contract: { guid: 'contract-guid', number: 'Д-1', counterpartyGuid: 'counterparty-guid', organizationGuid: 'org-guid', organization: { guid: 'org-guid', name: 'Организация' } },
+      contract: {
+        guid: 'contract-guid',
+        name: 'Генеральный договор поставки Д-1',
+        number: 'Д-1',
+        doNotExportToAccounting: true,
+        counterpartyGuid: 'counterparty-guid',
+        organizationGuid: 'org-guid',
+        organization: { guid: 'org-guid', name: 'Организация' },
+      },
       deliveryAddress: { guid: 'address-guid', fullAddress: 'Новосибирск', counterpartyGuid: 'counterparty-guid' },
       paymentForm: null,
       paymentForms: [
@@ -434,7 +442,13 @@ describe('clientOrders 1C live adapter', () => {
       warehouse: { guid: 'warehouse-guid', name: 'Склад' },
       priceType: { guid: 'price-type-guid', name: 'Розничная' },
     });
-    expect(result.contract).toMatchObject({ guid: 'contract-guid', organization: { guid: 'org-guid', name: 'Организация' } });
+    expect(result.contract).toMatchObject({
+      guid: 'contract-guid',
+      name: 'Генеральный договор поставки Д-1',
+      number: 'Д-1',
+      doNotExportToAccounting: true,
+      organization: { guid: 'org-guid', name: 'Организация' },
+    });
     expect(result.deliveryAddress).toMatchObject({ guid: 'address-guid', fullAddress: 'Новосибирск' });
     expect(result.paymentForm).toBeNull();
     expect(result.paymentForms).toEqual([

@@ -916,6 +916,8 @@ function mapContractSummary(
     | {
         guid: string;
         number: string;
+        name?: string | null;
+        doNotExportToAccounting?: boolean;
         date?: Date | string | null;
         validFrom?: Date | string | null;
         validTo?: Date | string | null;
@@ -935,6 +937,8 @@ function mapContractSummary(
   return {
     guid: contract.guid,
     number: contract.number,
+    name: contract.name ?? null,
+    doNotExportToAccounting: contract.doNotExportToAccounting ?? false,
     date: contract.date ?? null,
     validFrom: contract.validFrom ?? null,
     validTo: contract.validTo ?? null,

@@ -118,6 +118,7 @@ export type LiveContract = {
   guid: string;
   number: string;
   name?: string | null;
+  doNotExportToAccounting?: boolean;
   date: string | Date | null;
   validFrom: string | Date | null;
   validTo: string | Date | null;
@@ -834,6 +835,7 @@ function mapContract(record: AnyRecord): LiveContract | null {
     guid,
     number,
     name: text(record, ['name', 'Наименование'], null),
+    doNotExportToAccounting: bool(record, ['doNotExportToAccounting', 'НеВыгружатьВБух'], false),
     date: text(record, ['date', 'Дата'], null),
     validFrom: text(record, ['validFrom'], null),
     validTo: text(record, ['validTo'], null),
