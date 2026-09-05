@@ -35,6 +35,7 @@ jobs:
       image_tag: ${{ steps.vars.outputs.image_tag }}
       git_ref: ${{ steps.vars.outputs.git_ref }}
       deploy: ${{ steps.vars.outputs.deploy }}
+      deploy_target: ${{ steps.vars.outputs.deploy_target }}
 
     steps:
       - name: Checkout
@@ -48,12 +49,18 @@ jobs:
           git_ref="${GITHUB_REF_NAME}"
           image_tag=dev
           publish_latest=false
+          deploy_target=development
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" = "dev" ]; then
+            deploy=true
+          fi
 
           if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
             image_tag="${{ github.event.release.tag_name }}"
             git_ref="${{ github.event.release.tag_name }}"
             deploy=true
             publish_latest=true
+            deploy_target=production
           elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             image_tag="${{ inputs.image_tag }}"
             git_ref="${{ inputs.git_ref }}"
@@ -61,11 +68,17 @@ jobs:
             [ -n "$image_tag" ] || image_tag=latest
             [ -n "$git_ref" ] || git_ref=main
             [ "$image_tag" = "latest" ] && publish_latest=true
+            if [ "$git_ref" = "dev" ] || [ "$image_tag" = "dev" ]; then
+              deploy_target=development
+            else
+              deploy_target=production
+            fi
           elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "production" ]; then
             image_tag=latest
             git_ref="${GITHUB_REF_NAME}"
             deploy=true
             publish_latest=true
+            deploy_target=production
           fi
 
           {
@@ -79,6 +92,7 @@ jobs:
             echo "image_tag=$image_tag"
             echo "git_ref=$git_ref"
             echo "deploy=$deploy"
+            echo "deploy_target=$deploy_target"
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
@@ -102,7 +116,7 @@ jobs:
 
   deploy-production:
     needs: build-and-push
-    if: needs.build-and-push.outputs.deploy == 'true'
+    if: needs.build-and-push.outputs.deploy == 'true' && needs.build-and-push.outputs.deploy_target == 'production'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -134,3 +148,49 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps api
             docker compose -f docker-compose.yml -f docker-compose.prod.yml ps api
+
+  deploy-development:
+    needs: build-and-push
+    if: needs.build-and-push.outputs.deploy == 'true' && needs.build-and-push.outputs.deploy_target == 'development'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment: development
+
+    steps:
+      - name: Deploy development API
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
+          script: |
+            set -euo pipefail
+            cd /opt/leader-api-dev
+
+            git fetch origin "$GIT_REF"
+            git checkout -B "$GIT_REF" "origin/$GIT_REF"
+
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+            export IMAGE_TAG
+            docker compose -f docker-compose.server-dev.yml pull api
+            docker compose -f docker-compose.server-dev.yml up -d postgres-dev redis-dev
+            docker compose -f docker-compose.server-dev.yml up -d --no-deps api
+
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --show-error http://127.0.0.1:3001/health >/dev/null; then
+                docker compose -f docker-compose.server-dev.yml ps
+                exit 0
+              fi
+              sleep 2
+            done
+
+            docker compose -f docker-compose.server-dev.yml logs --tail=100 api
+            exit 1

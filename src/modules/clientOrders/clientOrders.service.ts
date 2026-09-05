@@ -101,7 +101,11 @@ type ClientOrdersErrorCode =
   | ErrorCodes.VALIDATION_ERROR
   | ErrorCodes.INTERNAL_ERROR
   | ErrorCodes.CONFLICT
-  | ErrorCodes.FORBIDDEN;
+  | ErrorCodes.FORBIDDEN
+  | ErrorCodes.PRICE_REVIEW_REQUIRED
+  | ErrorCodes.STOCK_SHORTAGE
+  | ErrorCodes.REFERENCE_STALE
+  | ErrorCodes.ONEC_UNAVAILABLE;
 
 type Tx = Prisma.TransactionClient;
 
@@ -517,11 +521,13 @@ function mapClientOrderSummary(order: ClientOrderSummaryRecord, queuePositions?:
 class ClientOrdersError extends Error {
   public readonly status: number;
   public readonly code: ClientOrdersErrorCode;
+  public readonly details?: unknown;
 
-  constructor(status: number, code: ClientOrdersErrorCode, message: string) {
+  constructor(status: number, code: ClientOrdersErrorCode, message: string, details?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -5442,6 +5448,220 @@ function clientOrderPayloadHash(body: ClientOrderMutationBody) {
   return createHash('sha256').update(JSON.stringify(stableJsonValue(payload))).digest('hex');
 }
 
+type OrderGeoEventInput = NonNullable<ClientOrderCreateBody['geoEvents']>[number];
+
+async function saveOrderGeoEvents(
+  tx: Tx,
+  orderId: string,
+  userId: number,
+  events: readonly OrderGeoEventInput[] | undefined
+) {
+  if (!events?.length) return;
+
+  const serverNow = now();
+  for (const event of events) {
+    const capturedAtMs = event.capturedAt.getTime();
+    if (
+      capturedAtMs > serverNow.getTime() + 5 * 60 * 1000
+      || capturedAtMs < serverNow.getTime() - 180 * 24 * 60 * 60 * 1000
+    ) {
+      throw new ClientOrdersError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'Время геопозиции заказа выходит за допустимый срок хранения'
+      );
+    }
+
+    await tx.orderGeoEvent.upsert({
+      where: { userId_clientEventId: { userId, clientEventId: event.clientEventId } },
+      create: {
+        orderId,
+        userId,
+        clientEventId: event.clientEventId,
+        eventType: event.type,
+        status: event.status,
+        capturedAt: event.capturedAt,
+        latitude: event.latitude ?? null,
+        longitude: event.longitude ?? null,
+        accuracy: event.accuracy ?? null,
+        source: event.source ?? null,
+        failureReason: event.reason ?? null,
+      },
+      update: {},
+    });
+  }
+}
+
+function throwOfflineOnecUnavailable(error: unknown): never {
+  if (error instanceof ClientOrdersError) throw error;
+  if (isOnecLpAppError(error) || error instanceof ClientOrdersOnecCircuitOpenError) {
+    throw new ClientOrdersError(
+      503,
+      ErrorCodes.ONEC_UNAVAILABLE,
+      '1С недоступна. Черновик остался на устройстве, повторите проверку позже.'
+    );
+  }
+  throw error;
+}
+
+function referenceStale(kind: string, guid: string): never {
+  throw new ClientOrdersError(
+    409,
+    ErrorCodes.REFERENCE_STALE,
+    `${kind} больше недоступен. Обновите офлайн-данные и выберите значение заново.`,
+    { kind, guid }
+  );
+}
+
+/**
+ * Offline drafts are never trusted for commercial data. This check deliberately
+ * bypasses read-through caches and asks 1C for one coherent manager-aware batch.
+ */
+async function validateOfflineSubmission(
+  body: ClientOrderMutationBody,
+  managerGuid: string | null
+): Promise<ClientOrderMutationBody> {
+  if (!body.offlineReview || body.intent !== 'SUBMIT') return body;
+  if (!managerGuid) {
+    throw new ClientOrdersError(409, ErrorCodes.REFERENCE_STALE, 'Для пользователя не настроен менеджер 1С');
+  }
+
+  try {
+    const [organization, counterparty, agreement, contract, warehouse, priceType, deliveryAddress, products] = await Promise.all([
+      findLiveOrganization(body.organizationGuid),
+      findLiveCounterparty(body.counterpartyGuid),
+      body.agreementGuid
+        ? findLiveAgreement(body.agreementGuid, body.counterpartyGuid, body.organizationGuid)
+        : Promise.resolve(null),
+      body.contractGuid ? findLiveContract(body.contractGuid, body.counterpartyGuid) : Promise.resolve(null),
+      body.warehouseGuid ? findLiveWarehouse(body.warehouseGuid) : Promise.resolve(null),
+      body.priceTypeGuid ? findLivePriceType(body.priceTypeGuid) : Promise.resolve(null),
+      body.deliveryAddressGuid
+        ? findLiveDeliveryAddress(body.deliveryAddressGuid, body.counterpartyGuid)
+        : Promise.resolve(null),
+      getLiveProductsByGuids({
+        productGuids: [...new Set(body.items.map((item) => item.productGuid))],
+        organizationGuid: body.organizationGuid,
+        counterpartyGuid: body.counterpartyGuid,
+        agreementGuid: body.agreementGuid ?? undefined,
+        warehouseGuid: body.warehouseGuid ?? undefined,
+        priceTypeGuid: body.priceTypeGuid ?? undefined,
+        managerGuid,
+      }),
+    ]);
+
+    if (!organization || organization.isActive === false || organization.isSelectable === false) {
+      referenceStale('Организация', body.organizationGuid);
+    }
+    if (!counterparty || counterparty.isActive === false) referenceStale('Контрагент', body.counterpartyGuid);
+    if (body.agreementGuid && (!agreement || agreement.isActive === false || !isActiveAgreementStatus(agreement.status))) {
+      referenceStale('Соглашение', body.agreementGuid);
+    }
+    const contractOrganizationGuid = contract?.organizationGuid ?? contract?.organization?.guid ?? null;
+    if (
+      body.contractGuid
+      && (
+        !contract
+        || contract.isActive === false
+        || (contractOrganizationGuid && contractOrganizationGuid.toLowerCase() !== body.organizationGuid.toLowerCase())
+        || (agreement?.contract?.guid && agreement.contract.guid.toLowerCase() !== body.contractGuid.toLowerCase())
+      )
+    ) {
+      referenceStale('Договор', body.contractGuid);
+    }
+    if (body.warehouseGuid && (!warehouse || warehouse.isActive === false || warehouse.isSelectable === false)) {
+      referenceStale('Склад', body.warehouseGuid);
+    }
+    if (body.priceTypeGuid && (!priceType || priceType.isActive === false)) {
+      referenceStale('Вид цены', body.priceTypeGuid);
+    }
+    if (body.deliveryAddressGuid && (!deliveryAddress || deliveryAddress.isActive === false)) {
+      referenceStale('Адрес доставки', body.deliveryAddressGuid);
+    }
+
+    const byGuid = new Map(products.map((product) => [product.guid.toLowerCase(), product]));
+    const requirements = new Map<string, { productGuid: string; name: string; required: number; available: number }>();
+    const priceChanges: Array<{
+      lineGuid: string | null;
+      productGuid: string;
+      productName: string;
+      oldPrice: number;
+      currentPrice: number;
+    }> = [];
+    let oldTotal = 0;
+    let currentTotal = 0;
+    const normalizedItems = body.items.map((line) => {
+      const product = byGuid.get(line.productGuid.toLowerCase());
+      if (!product || product.isActive === false) referenceStale('Товар', line.productGuid);
+      const pack = line.packageGuid
+        ? product.packages.find((item) => item.guid.toLowerCase() === line.packageGuid!.toLowerCase())
+        : null;
+      if (line.packageGuid && !pack) referenceStale('Упаковка', line.packageGuid);
+      const multiplier = pack?.multiplier && pack.multiplier > 0 ? pack.multiplier : 1;
+      const requiredBase = line.isCancelled ? 0 : Number(line.quantity) * multiplier;
+      const available = Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0);
+      const requirement = requirements.get(product.guid) ?? {
+        productGuid: product.guid,
+        name: product.name,
+        required: 0,
+        available: Number.isFinite(available) ? available : 0,
+      };
+      requirement.required += Number.isFinite(requiredBase) ? requiredBase : 0;
+      requirements.set(product.guid, requirement);
+
+      const draftPrice = Number(line.basePrice ?? 0);
+      const currentPrice = Number(product.basePrice ?? 0);
+      const manualPrice = line.manualPrice !== null && line.manualPrice !== undefined
+        ? Number(line.manualPrice)
+        : null;
+      oldTotal += (manualPrice ?? draftPrice) * requiredBase;
+      currentTotal += (manualPrice ?? currentPrice) * requiredBase;
+      if (manualPrice !== null) return line;
+      if (!line.isCancelled && Math.abs(draftPrice - currentPrice) > 0.0001) {
+        priceChanges.push({
+          lineGuid: line.lineGuid ?? null,
+          productGuid: product.guid,
+          productName: product.name,
+          oldPrice: draftPrice,
+          currentPrice,
+        });
+      }
+      return body.offlineReview?.pricePolicy === 'USE_CURRENT'
+        ? { ...line, basePrice: currentPrice }
+        : line;
+    });
+
+    const shortages = [...requirements.values()]
+      .filter((item) => item.required > item.available + 0.0001)
+      .map((item) => ({ ...item, shortage: item.required - item.available }));
+    if (shortages.length) {
+      throw new ClientOrdersError(
+        422,
+        ErrorCodes.STOCK_SHORTAGE,
+        'Недостаточно остатка для отправки заказа',
+        { items: shortages }
+      );
+    }
+    if (priceChanges.length && body.offlineReview.pricePolicy === 'ASK') {
+      throw new ClientOrdersError(
+        409,
+        ErrorCodes.PRICE_REVIEW_REQUIRED,
+        'Цены изменились после последней синхронизации',
+        {
+          items: priceChanges,
+          oldTotal: Math.round(oldTotal * 100) / 100,
+          currentTotal: Math.round(currentTotal * 100) / 100,
+          totalDifference: Math.round((currentTotal - oldTotal) * 100) / 100,
+        }
+      );
+    }
+
+    return { ...body, items: normalizedItems };
+  } catch (error) {
+    throwOfflineOnecUnavailable(error);
+  }
+}
+
 function assertClientOrderCanBeSubmitted(order: {
   organizationId?: string | null;
   agreementId?: string | null;
@@ -5480,13 +5700,25 @@ function assertClientOrderCanBeSubmitted(order: {
  * restarts, while clientRevision prevents an older queued retry from rolling
  * newer data back. SAVE -> SUBMIT is a monotonic intent escalation.
  */
+export async function getClientOrderByClientId(userId: number, clientOrderId: string) {
+  const order = await prisma.order.findFirst({
+    where: { createdByUserId: userId, clientOrderId },
+    select: { guid: true },
+  });
+  if (!order?.guid) {
+    throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ с таким идентификатором устройства не найден');
+  }
+  return getClientOrderByGuid(order.guid, userId);
+}
+
 export async function putClientOrderByClientId(
   userId: number,
   clientOrderId: string,
   body: ClientOrderMutationBody
 ) {
   const sourceUpdatedAt = now();
-  const payloadHash = clientOrderPayloadHash(body);
+  const requestedBody = body;
+  const requestedPayloadHash = clientOrderPayloadHash(requestedBody);
   const committed = await prisma.order.findFirst({
     where: { createdByUserId: userId, clientOrderId },
     select: {
@@ -5504,7 +5736,7 @@ export async function putClientOrderByClientId(
       return getClientOrderByGuid(committed.guid!, userId);
     }
     if (body.clientRevision === committedRevision) {
-      if (committed.clientPayloadHash && committed.clientPayloadHash !== payloadHash) {
+      if (committed.clientPayloadHash && committed.clientPayloadHash !== requestedPayloadHash) {
         throw new ClientOrdersError(
           409,
           ErrorCodes.CONFLICT,
@@ -5517,6 +5749,10 @@ export async function putClientOrderByClientId(
     }
   }
   const managerGuid = await getManagerGuidForUser(userId);
+  body = await validateOfflineSubmission(body, managerGuid);
+  // Idempotency belongs to the user's request, not to prices normalized by the
+  // server. A retry after a lost response must compare equal.
+  const payloadHash = requestedPayloadHash;
   const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
 
   const result = await prisma.$transaction(async (tx) => {
@@ -5602,6 +5838,7 @@ export async function putClientOrderByClientId(
         actorUserId: userId,
         payload: { queuedAt: queuedAt.toISOString(), clientOrderId, clientRevision: body.clientRevision },
       });
+      await saveOrderGeoEvents(tx, existing.id, userId, body.geoEvents);
       await saveUserCounterpartyDefaults(tx, userId, existing.guid!);
       return { guid: existing.guid!, queued: true };
     }
@@ -5722,6 +5959,7 @@ export async function putClientOrderByClientId(
       });
       await saveUserCounterpartyDefaults(tx, userId, order.guid!);
     }
+    await saveOrderGeoEvents(tx, order.id, userId, body.geoEvents);
     await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
     return { guid: order.guid!, queued: shouldQueue };
   });
@@ -5800,6 +6038,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
       } as Prisma.InputJsonValue,
     });
 
+    await saveOrderGeoEvents(tx, order.id, userId, body.geoEvents);
     await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
 
     return order.guid!;
@@ -6053,8 +6292,6 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     const nextRevision = order.revision + 1;
     const isAutosave = body.saveReason === 'autosave';
     const queueState = resolveUpdatedOrderQueueState(order.status);
-    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
-
     await tx.orderItem.deleteMany({ where: { orderId: order.id } });
 
     await tx.order.update({
@@ -6077,12 +6314,6 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         paymentForm: body.paymentForm ?? null,
         deliveryMethod: body.deliveryMethod ?? null,
         invoiceRequested: body.invoiceRequested,
-        ...(trackingSnapshot
-          ? {
-              trackingRoutePointId: trackingSnapshot.routePointId,
-              trackingSnapshot: trackingSnapshot.snapshot,
-            }
-          : {}),
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
         generalDiscountPercent:
@@ -6115,13 +6346,14 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           paymentForm: body.paymentForm ?? null,
           deliveryMethod: body.deliveryMethod ?? null,
           invoiceRequested: body.invoiceRequested,
-          trackingSnapshot: trackingSnapshot?.snapshot ?? null,
+          trackingSnapshot: null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,
           items: prepared.items.map((item) => item.snapshot),
         } as Prisma.InputJsonValue,
       });
     }
 
+    await saveOrderGeoEvents(tx, order.id, userId, body.geoEvents);
     await saveInvoicePreference(tx, userId, context.counterparty.id, body.invoiceRequested);
   });
 
@@ -6191,8 +6423,6 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
 
     const nextRevision = order.revision + 1;
     const queuedAt = now();
-    const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
-
     await tx.order.update({
       where: { id: order.id },
       data: {
@@ -6206,12 +6436,6 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         exportAttempts: 0,
         lastExportError: null,
         last1cError: null,
-        ...(trackingSnapshot
-          ? {
-              trackingRoutePointId: trackingSnapshot.routePointId,
-              trackingSnapshot: trackingSnapshot.snapshot,
-            }
-          : {}),
         sourceUpdatedAt: queuedAt,
       },
     });
@@ -6224,10 +6448,11 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
       actorUserId: userId,
       payload: {
         queuedAt: queuedAt.toISOString(),
-        trackingSnapshot: trackingSnapshot?.snapshot ?? null,
+        trackingSnapshot: null,
       },
     });
 
+    await saveOrderGeoEvents(tx, order.id, userId, body.geoEvents);
     await saveUserCounterpartyDefaults(tx, userId, guid);
   });
 

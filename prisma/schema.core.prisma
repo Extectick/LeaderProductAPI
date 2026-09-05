@@ -67,6 +67,32 @@ enum RouteEventType {
   STOP
 }
 
+enum TrackingPointSource {
+  LEGACY
+  TRACCAR
+  ORDER_CAPTURE
+  LOCATION_REQUEST
+}
+
+enum TrackingLocationRequestStatus {
+  PENDING
+  SUCCEEDED
+  TIMED_OUT
+  FAILED
+}
+
+enum OrderGeoEventType {
+  CREATED
+  SUBMITTED
+}
+
+enum OrderGeoCaptureStatus {
+  CAPTURED
+  UNAVAILABLE
+  PERMISSION_DENIED
+  TIMEOUT
+}
+
 enum AppPlatform {
   ANDROID
   IOS
@@ -298,6 +324,9 @@ model User {
   routes               UserRoute[]
   routePoints          RoutePoint[]
   trackingDeviceTokens TrackingDeviceToken[]
+  orderGeoEvents       OrderGeoEvent[]
+  trackingRequestsTargeted TrackingLocationRequest[] @relation("TrackingLocationRequestTarget")
+  trackingRequestsCreated  TrackingLocationRequest[] @relation("TrackingLocationRequestRequester")
   createdOrders        Order[]               @relation("OrdersCreatedBy")
   orderEvents          OrderEvent[]          @relation("OrderEventsActor")
   lastSeenAt           DateTime?
@@ -739,6 +768,10 @@ model RoutePoint {
   userId                        Int
   user                          User           @relation(fields: [userId], references: [id])
   orderTrackingSnapshots        Order[]        @relation("OrderTrackingPoint")
+  orderGeoEvents                OrderGeoEvent[]
+  locationRequests              TrackingLocationRequest[] @relation("TrackingLocationRequestPoint")
+  trackingDeviceTokenId         Int?
+  trackingDeviceToken           TrackingDeviceToken? @relation(fields: [trackingDeviceTokenId], references: [id], onDelete: SetNull)
   latitude                      Float
   longitude                     Float
   recordedAt                    DateTime
@@ -751,11 +784,17 @@ model RoutePoint {
   stayDurationSeconds           Int?
   sequence                      Int?
   clientPointId                 String?
+  source                        TrackingPointSource @default(LEGACY)
+  batteryLevel                  Float?
+  altitude                      Float?
+  isCharging                    Boolean?
+  serverPointKey                String? @unique
   createdAt                     DateTime       @default(now())
 
   @@unique([userId, clientPointId])
   @@index([userId, recordedAt])
   @@index([routeId, recordedAt])
+  @@index([trackingDeviceTokenId, recordedAt])
 }
 
 model TrackingDeviceToken {
@@ -773,12 +812,40 @@ model TrackingDeviceToken {
   lastUsedAt      DateTime?
   revokedAt       DateTime?
   expiresAt       DateTime?
+  lastBootstrapAt DateTime?
+  trackingEnabled Boolean   @default(true)
+  routePoints     RoutePoint[]
+  locationRequests TrackingLocationRequest[]
 
   @@index([userId])
   @@index([installId])
   @@index([deviceSessionId])
   @@index([revokedAt])
   @@index([expiresAt])
+}
+
+model TrackingLocationRequest {
+  id                    String                        @id @default(cuid())
+  targetUserId          Int
+  requestedByUserId     Int
+  trackingDeviceTokenId Int?
+  routePointId          Int?
+  status                TrackingLocationRequestStatus @default(PENDING)
+  requestedAt           DateTime                      @default(now())
+  expiresAt             DateTime
+  completedAt           DateTime?
+  failureReason         String?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  targetUser          User                 @relation("TrackingLocationRequestTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  requestedByUser     User                 @relation("TrackingLocationRequestRequester", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  trackingDeviceToken TrackingDeviceToken? @relation(fields: [trackingDeviceTokenId], references: [id], onDelete: SetNull)
+  routePoint          RoutePoint?          @relation("TrackingLocationRequestPoint", fields: [routePointId], references: [id], onDelete: SetNull)
+
+  @@index([targetUserId, status, requestedAt])
+  @@index([requestedByUserId, requestedAt])
+  @@index([expiresAt, status])
 }
 
 enum QRStatus {

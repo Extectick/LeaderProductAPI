@@ -8,6 +8,11 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
+import {
+  recordOfflineDatasetChanges,
+  resetOfflineDataset,
+  type OfflineDatasetEntity,
+} from '../clientOrders/offlineClientOrders.service';
 import type {
   AgreementItem,
   ContractItem,
@@ -72,6 +77,78 @@ type TxClient = Prisma.TransactionClient;
 
 const PRODUCT_CATALOG_STATE_ID = 'nomenclature';
 const PRODUCT_CATALOG_SCHEMA_VERSION = 1;
+const MANAGER_SCOPED_OFFLINE_ENTITIES: OfflineDatasetEntity[] = [
+  'counterparties',
+  'agreements',
+  'contracts',
+  'delivery-addresses',
+  'price-types',
+  'order-options',
+  'selling-prices',
+];
+
+async function resetPromotedOfflineDatasets(tx: TxClient, entities: BatchEntityCode[], replaceMode: boolean) {
+  const datasets = new Set<OfflineDatasetEntity>();
+  if (entities.includes('organizations')) datasets.add('organizations');
+  if (entities.includes('warehouses')) datasets.add('warehouses');
+  if (entities.includes('stock') || entities.includes('product-prices')) datasets.add('stock');
+  if (entities.some((entity) => entity === 'counterparties' || entity === 'contracts' || entity === 'agreements')) {
+    MANAGER_SCOPED_OFFLINE_ENTITIES.forEach((entity) => datasets.add(entity));
+  }
+  if (!replaceMode) {
+    // A manager relation change can add or remove an entire counterparty tree.
+    // A new epoch is safer and cheaper than emitting every derived deletion.
+    for (const entity of [...datasets].filter((item) => MANAGER_SCOPED_OFFLINE_ENTITIES.includes(item))) {
+      await resetOfflineDataset(entity, tx);
+      datasets.delete(entity);
+    }
+  }
+  if (replaceMode) {
+    for (const entity of datasets) await resetOfflineDataset(entity, tx);
+  }
+}
+
+async function recordPromotedOfflineChanges(
+  tx: TxClient,
+  entity: BatchEntityCode,
+  sessionId: string,
+  syncedAt: Date
+) {
+  if (entity === 'organizations') {
+    const rows = await tx.onecStageOrganization.findMany({ where: { sessionId }, select: { guid: true } });
+    await recordOfflineDatasetChanges(tx, 'organizations', rows.map((item) => item.guid), syncedAt);
+  } else if (entity === 'warehouses') {
+    const rows = await tx.onecStageWarehouse.findMany({ where: { sessionId }, select: { guid: true } });
+    await recordOfflineDatasetChanges(tx, 'warehouses', rows.map((item) => item.guid), syncedAt);
+  } else if (entity === 'stock') {
+    const rows = await tx.onecStageStock.findMany({
+      where: { sessionId },
+      select: { productGuid: true, warehouseGuid: true, organizationGuid: true, seriesGuid: true },
+    });
+    await recordOfflineDatasetChanges(tx, 'stock', rows.map((item) =>
+      `${item.productGuid}|${item.warehouseGuid}|${item.organizationGuid ?? ''}|${item.seriesGuid ?? ''}`
+    ), syncedAt);
+  } else if (entity === 'product-prices') {
+    const rows = await tx.onecStageProductPrice.findMany({
+      where: { sessionId },
+      distinct: ['productGuid'],
+      select: { productGuid: true },
+    });
+    if (!rows.length) return;
+    const balances = await tx.stockBalance.findMany({
+      where: { product: { guid: { in: rows.map((item) => item.productGuid) } } },
+      select: {
+        seriesGuid: true,
+        product: { select: { guid: true } },
+        warehouse: { select: { guid: true } },
+        organization: { select: { guid: true } },
+      },
+    });
+    await recordOfflineDatasetChanges(tx, 'stock', balances.map((item) =>
+      `${item.product.guid}|${item.warehouse.guid}|${item.organization?.guid ?? ''}|${item.seriesGuid ?? ''}`
+    ), syncedAt);
+  }
+}
 
 async function recordProductCatalogChange(
   tx: TxClient,
@@ -334,7 +411,10 @@ async function touchSession(sessionId: string) {
 }
 
 export async function startOnecSyncSession(body: SessionStartBody) {
-  const selectedEntities = normalizeSelectedEntities(body.selectedEntities);
+  // Preserve additive direct-import entity codes as well. The staged importer
+  // only processes known staged entities, but an explicit list containing only
+  // a newer direct entity must never be mistaken for "all entities" on finish.
+  const selectedEntities = [...new Set((body.selectedEntities ?? []).map((item) => String(item).trim()).filter(Boolean))];
   return prisma.onecSyncSession.create({
     data: {
       requestId: randomUUID(),
@@ -1253,6 +1333,7 @@ async function applyStagedCounterparties(
         headCounterpartyGuid: item.headCounterpartyGuid ?? null,
         additionalInfo: item.additionalInfo ?? null,
         partnerGuid: item.partnerGuid ?? null,
+        managerGuid: item.managerGuid ?? null,
         vatByRates4And2: item.vatByRates4And2 ?? null,
         okpoCode: item.okpoCode ?? null,
         registrationNumber: item.registrationNumber ?? null,
@@ -1270,6 +1351,23 @@ async function applyStagedCounterparties(
         update: counterpartyData,
         select: { id: true },
       });
+
+      if (item.managerLinks) {
+        await tx.counterpartyManager.deleteMany({ where: { counterpartyId: counterparty.id } });
+        if (item.managerLinks.length) {
+          await tx.counterpartyManager.createMany({
+            data: item.managerLinks.map((link) => ({
+              counterpartyId: counterparty.id,
+              managerGuid: link.managerGuid,
+              relationSource: link.relationSource,
+              isActive: link.isActive ?? true,
+              sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+              lastSyncedAt: syncedAt,
+            })),
+            skipDuplicates: true,
+          });
+        }
+      }
 
       if (item.addresses?.length) {
         for (const address of item.addresses) {
@@ -2223,8 +2321,9 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
     throw new Error(`Sync session ${body.sessionId} not found`);
   }
 
-  const selected = normalizeSelectedEntities((session.selectedEntities as string[] | null) ?? []);
-  const entities = selected.length
+  const rawSelected = (session.selectedEntities as string[] | null) ?? [];
+  const selected = normalizeSelectedEntities(rawSelected);
+  const entities = rawSelected.length
     ? RECONCILE_ORDER.filter((entity) => selected.includes(entity))
     : RECONCILE_ORDER;
   const syncedAt = now();
@@ -2241,6 +2340,7 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
   try {
     await prisma.$transaction(
       async (tx) => {
+        await resetPromotedOfflineDatasets(tx, entities, session.replaceMode);
         if (session.replaceMode) {
           for (const entity of entities) {
             await clearEntityInTx(tx, entity);
@@ -2279,6 +2379,9 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
               break;
           }
           summaries.set(entity, summary);
+          if (!session.replaceMode) {
+            await recordPromotedOfflineChanges(tx, entity, session.id, syncedAt);
+          }
         }
 
         if (entities.includes('counterparties')) {

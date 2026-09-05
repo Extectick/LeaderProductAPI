@@ -107,6 +107,12 @@ const counterpartySchema = z.object({
   headCounterpartyGuid: z.string().nullable().optional(),
   additionalInfo: z.string().nullable().optional(),
   partnerGuid: z.string().nullable().optional(),
+  managerGuid: z.string().nullable().optional(),
+  managerLinks: z.array(z.object({
+    managerGuid: z.string().min(1),
+    relationSource: z.enum(['PARTNER', 'CONTRACT', 'AGREEMENT']),
+    isActive: z.boolean().optional(),
+  })).optional(),
   vatByRates4And2: z.boolean().nullable().optional(),
   okpoCode: z.string().nullable().optional(),
   registrationNumber: z.string().nullable().optional(),
@@ -457,6 +463,46 @@ export const orderAckSchema = z.object({
   vatCalculationSource: z.enum(['CONTRACT', 'ACTIVITY_DIRECTION', 'ORGANIZATION']).nullable().optional(),
   priceIncludesVat: z.boolean().nullable().optional(),
   error: z.string().optional(),
+});
+
+const sellingPriceItemSchema = z.object({
+  syncKey: z.string().min(1).optional(),
+  productGuid: z.string().min(1),
+  priceTypeGuid: z.string().min(1),
+  priceType: priceTypeSchema.optional(),
+  price: z.number().nonnegative(),
+  currency: z.string().nullable().optional(),
+  packageGuid: z.string().nullable().optional(),
+  characteristicGuid: z.string().nullable().optional(),
+  sourceRegister: z.enum(['ЦеныНоменклатуры', 'ЦеныНоменклатуры25']),
+  priority: z.number().int().optional(),
+  startDate: nullableDate,
+  endDate: nullableDate,
+  minQty: z.number().nonnegative().optional(),
+  isActive: z.boolean().optional(),
+  sourceUpdatedAt: nullableDate,
+});
+export type SellingPriceItem = z.infer<typeof sellingPriceItemSchema>;
+
+export const sellingPricesBatchSchema = z.object({
+  ...envelope,
+  items: z.array(sellingPriceItemSchema).min(1),
+});
+
+const managerStockItemSchema = z.object({
+  syncKey: z.string().min(1).optional(),
+  managerGuid: z.string().min(1),
+  productGuid: z.string().min(1),
+  warehouseGuid: z.string().min(1),
+  organizationGuid: z.string().nullable().optional(),
+  reserved: z.number().nonnegative(),
+  sourceUpdatedAt: nullableDate,
+});
+export type ManagerStockItem = z.infer<typeof managerStockItemSchema>;
+
+export const managerStockBatchSchema = z.object({
+  ...envelope,
+  items: z.array(managerStockItemSchema).min(1),
 });
 
 export const sessionStartSchema = z.object({

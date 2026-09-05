@@ -19,6 +19,7 @@ import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
 import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
+import trackingV2Router from './routes/trackingV2';
 import updatesRouter from './routes/updates';
 import otaRouter from './routes/ota';
 import filesRouter from './routes/files';
@@ -33,6 +34,7 @@ import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import counterpartiesRouter from './modules/counterparties/counterparties.routes';
 import catalogRouter from './modules/catalog/catalog.routes';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
+import { startTrackingMaintenance, stopTrackingMaintenance } from './services/trackingMaintenanceService';
 import {
   startClientOrdersExportWorker,
   stopClientOrdersExportWorker,
@@ -178,6 +180,7 @@ app.use('/users', usersRouter);
 app.use('/departments', departmentsRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
+app.use('/tracking', trackingV2Router);
 app.use('/tracking', trackingRouter);
 app.use('/services', servicesRouter);
 app.use('/stock-balances', stockBalancesRouter);
@@ -481,6 +484,7 @@ if (ENV !== 'test') {
 
     // 4) Запускаем фоновые задачи приложения
     startScheduledJobs();
+    startTrackingMaintenance();
     startClientOrdersExportWorker();
     startClientOrderInvoiceWorker();
 
@@ -534,6 +538,7 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
+  stopTrackingMaintenance();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
@@ -546,6 +551,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
+  stopTrackingMaintenance();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});

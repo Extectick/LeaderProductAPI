@@ -279,6 +279,26 @@ export const clientOrderCreateSchema = z.object({
     { message: 'generalDiscountPercent must be between 0 and 100' }
   ),
   items: z.array(managerOrderItemSchema).min(1),
+  geoEvents: z.array(z.object({
+    clientEventId: z.string().trim().min(8).max(128),
+    type: z.enum(['CREATED', 'SUBMITTED']),
+    status: z.enum(['CAPTURED', 'UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT']).default('CAPTURED'),
+    capturedAt: z.coerce.date(),
+    latitude: z.coerce.number().min(-90).max(90).nullable().optional(),
+    longitude: z.coerce.number().min(-180).max(180).nullable().optional(),
+    accuracy: z.coerce.number().min(0).max(100_000).nullable().optional(),
+    source: z.string().trim().min(1).max(64).optional(),
+    reason: z.string().trim().min(1).max(256).optional(),
+  }).superRefine((event, context) => {
+    const hasLatitude = event.latitude !== null && event.latitude !== undefined;
+    const hasLongitude = event.longitude !== null && event.longitude !== undefined;
+    if (hasLatitude !== hasLongitude) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'latitude и longitude должны передаваться вместе' });
+    }
+    if (event.status === 'CAPTURED' && (!hasLatitude || !hasLongitude)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Для полученной геопозиции нужны координаты' });
+    }
+  })).max(4).optional(),
 });
 
 export const clientOrderUpdateSchema = clientOrderCreateSchema.extend({
@@ -289,13 +309,47 @@ export const clientOrderIdParamsSchema = z.object({
   clientOrderId: z.string().trim().min(8).max(128),
 });
 
+export const offlineDatasetEntitySchema = z.enum([
+  'organizations',
+  'warehouses',
+  'counterparties',
+  'agreements',
+  'contracts',
+  'delivery-addresses',
+  'price-types',
+  'order-options',
+  'selling-prices',
+  'stock',
+  'manager-stock',
+]);
+
+export const offlineDatasetParamsSchema = z.object({
+  entity: offlineDatasetEntitySchema,
+});
+
+export const offlineSnapshotQuerySchema = z.object({
+  cursor: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(2000).default(500),
+});
+
+export const offlineChangesQuerySchema = z.object({
+  afterRevision: z.string().regex(/^\d+$/).default('0'),
+  epoch: z.string().trim().min(1),
+  limit: z.coerce.number().int().min(1).max(2000).default(500),
+});
+
 export const clientOrderMutationSchema = clientOrderCreateSchema.extend({
   clientRevision: z.coerce.number().int().min(1),
   intent: z.enum(['SAVE', 'SUBMIT']),
+  offlineReview: z.object({
+    pricePolicy: z.enum(['ASK', 'USE_CURRENT', 'KEEP_DRAFT']).default('ASK'),
+    snapshotSyncedAt: z.string().datetime().optional(),
+  }).optional(),
 });
 
 export const clientOrderSubmitSchema = z.object({
   revision: z.coerce.number().int().min(1),
+  geoEvents: clientOrderCreateSchema.shape.geoEvents,
 });
 
 export const clientOrderUnqueueSchema = z.object({

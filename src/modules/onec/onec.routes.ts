@@ -5,12 +5,14 @@ import {
   handleCounterpartiesBatch,
   handleEntityClear,
   handleNomenclatureBatch,
+  handleManagerStockBatch,
   handleOrganizationsBatch,
   handleOrderAck,
   handleOrdersQueued,
   handleOrdersSnapshotBatch,
   handleOrdersStatusBatch,
   handleProductPricesBatch,
+  handleSellingPricesBatch,
   handleSchema,
   handleSpecialPricesBatch,
   handleSyncSessionComplete,
@@ -185,6 +187,7 @@ router.post('/organizations/batch', handleOrganizationsBatch);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/stock/batch', handleStockBatch);
+router.post('/manager-stock/batch', handleManagerStockBatch);
 
 /**
  * @openapi
@@ -514,6 +517,7 @@ router.post('/agreements/batch', handleAgreementsBatch);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/product-prices/batch', handleProductPricesBatch);
+router.post('/selling-prices/batch', handleSellingPricesBatch);
 
 /**
  * @openapi

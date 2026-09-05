@@ -77,7 +77,7 @@ const dateTimeField = (
   nullable: options?.nullable ?? false,
 });
 
-export const ONEC_SCHEMA_VERSION = '1.3.0';
+export const ONEC_SCHEMA_VERSION = '1.4.0';
 
 export const onecSchemaEntities: OneCSchemaEntity[] = [
   {
@@ -498,5 +498,52 @@ export const onecSchemaEntities: OneCSchemaEntity[] = [
         ],
       },
     ],
+  },
+  {
+    code: 'selling-prices',
+    title: 'Продажные цены для офлайн-работы',
+    method: 'POST',
+    path: '/api/1c/selling-prices/batch',
+    wrapper: 'items',
+    sections: [{
+      code: 'item',
+      title: 'Продажная цена',
+      multiple: true,
+      fields: [
+        stringField('syncKey', 'Ключ строки'),
+        stringField('productGuid', 'GUID товара', { required: true }),
+        stringField('priceTypeGuid', 'GUID вида цены', { required: true }),
+        numberField('price', 'Цена', { required: true }),
+        stringField('currency', 'Валюта'),
+        stringField('packageGuid', 'GUID упаковки'),
+        stringField('sourceRegister', 'Регистр-источник', { required: true }),
+        numberField('priority', 'Приоритет источника'),
+        dateTimeField('startDate', 'Начало действия'),
+        numberField('minQty', 'Минимальное количество'),
+        booleanField('isActive', 'Активна'),
+        dateTimeField('sourceUpdatedAt', 'Дата изменения в 1С'),
+      ],
+    }],
+  },
+  {
+    code: 'manager-stock',
+    title: 'Личные резервы менеджеров',
+    method: 'POST',
+    path: '/api/1c/manager-stock/batch',
+    wrapper: 'items',
+    sections: [{
+      code: 'item',
+      title: 'Личный резерв',
+      multiple: true,
+      fields: [
+        stringField('syncKey', 'Ключ строки'),
+        stringField('managerGuid', 'GUID менеджера', { required: true }),
+        stringField('productGuid', 'GUID товара', { required: true }),
+        stringField('warehouseGuid', 'GUID склада', { required: true }),
+        stringField('organizationGuid', 'GUID организации'),
+        numberField('reserved', 'Количество в резерве', { required: true }),
+        dateTimeField('sourceUpdatedAt', 'Дата изменения в 1С'),
+      ],
+    }],
   },
 ];

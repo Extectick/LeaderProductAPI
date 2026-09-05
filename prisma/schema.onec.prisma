@@ -91,6 +91,7 @@ model Counterparty {
   headCounterpartyGuid     String?
   additionalInfo           String?
   partnerGuid              String?
+  managerGuid              String?
   vatByRates4And2          Boolean?
   okpoCode                 String?
   registrationNumber       String?
@@ -111,6 +112,7 @@ model Counterparty {
   agreements                    ClientAgreement[]
   addresses                     DeliveryAddress[]
   specialPrices                 SpecialPrice[]
+  managerLinks                  CounterpartyManager[]
   orders                        Order[]
   clientProfiles                ClientProfile[]                       @relation("ClientProfileCounterparty")
   defaultAgreement              ClientAgreement?                      @relation("CounterpartyDefaultAgreement", fields: [defaultAgreementId], references: [id])
@@ -124,6 +126,7 @@ model Counterparty {
   updatedAt DateTime @updatedAt
 
   @@index([isActive])
+  @@index([managerGuid])
   @@index([sourceUpdatedAt])
   @@index([defaultAgreementId])
   @@index([defaultContractId])
@@ -235,6 +238,8 @@ model Product {
   stocks        StockBalance[]
   prices        ProductPrice[]
   specialPrices SpecialPrice[]
+  sellingPrices SellingPrice[]
+  managerReservations ManagerStockReservation[]
   orderItems    OrderItem[]
 
   createdAt DateTime @default(now())
@@ -317,6 +322,7 @@ model Warehouse {
   lastSyncedAt    DateTime?
 
   stocks                        StockBalance[]
+  managerReservations           ManagerStockReservation[]
   agreements                    ClientAgreement[]
   orders                        Order[]
   activeForProfiles             ClientProfile[]                       @relation("ClientProfileActiveWarehouse")
@@ -342,6 +348,7 @@ model Organization {
   lastSyncedAt    DateTime?
 
   stocks                        StockBalance[]
+  managerReservations           ManagerStockReservation[]
   contracts                     ClientContract[]
   agreements                    ClientAgreement[]
   orders                        Order[]
@@ -386,6 +393,51 @@ model StockBalance {
   @@index([warehouseId, productId])
   @@index([seriesGuid])
   @@index([updatedAt])
+  @@index([sourceUpdatedAt])
+}
+
+/// Personal reserve exported by 1C for an individual manager. Keeping it
+/// separate from StockBalance prevents one manager's reserve being exposed as
+/// another manager's available quantity.
+model ManagerStockReservation {
+  id              String   @id @default(cuid())
+  syncKey         String   @unique
+  managerGuid     String
+  productId       String
+  warehouseId     String
+  organizationId  String?
+  reserved        Decimal  @db.Decimal(18, 3)
+  sourceUpdatedAt DateTime?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  product      Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse    Warehouse     @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([managerGuid, warehouseId, productId])
+  @@index([managerGuid, organizationId])
+  @@index([sourceUpdatedAt])
+}
+
+/// A counterparty may be related to the same manager by several independent
+/// rules in 1C (partner, contract and agreement).
+model CounterpartyManager {
+  id              String   @id @default(cuid())
+  counterpartyId  String
+  managerGuid     String
+  relationSource  String
+  isActive        Boolean  @default(true)
+  sourceUpdatedAt DateTime?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  counterparty Counterparty @relation(fields: [counterpartyId], references: [id], onDelete: Cascade)
+
+  @@unique([counterpartyId, managerGuid, relationSource])
+  @@index([managerGuid, isActive])
   @@index([sourceUpdatedAt])
 }
 
@@ -474,6 +526,7 @@ model PriceType {
   orderItems        OrderItem[]
   productPrices     ProductPrice[]
   specialPrices     SpecialPrice[]
+  sellingPrices     SellingPrice[]
   activeForProfiles ClientProfile[]   @relation("ClientProfileActivePriceType")
 
   createdAt DateTime @default(now())
@@ -594,6 +647,69 @@ model ProductPrice {
   @@index([sourceUpdatedAt])
 }
 
+/// Sales price for client orders. ProductPrice intentionally keeps the
+/// existing receipt/cost meaning used by profit calculations.
+model SellingPrice {
+  id                 String   @id @default(cuid())
+  syncKey            String   @unique
+  productId          String
+  priceTypeId        String
+  price              Decimal  @db.Decimal(18, 4)
+  currency           String?
+  packageGuid        String?
+  characteristicGuid String?
+  sourceRegister     String
+  priority           Int      @default(0)
+  startDate          DateTime?
+  endDate            DateTime?
+  minQty             Decimal? @db.Decimal(18, 3)
+  isActive           Boolean  @default(true)
+  sourceUpdatedAt    DateTime?
+  lastSyncedAt       DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  priceType PriceType @relation(fields: [priceTypeId], references: [id], onDelete: Cascade)
+
+  @@index([productId, priceTypeId, isActive, priority])
+  @@index([priceTypeId, isActive])
+  @@index([sourceUpdatedAt])
+}
+
+model OfflineDatasetState {
+  id                   String   @id @default(cuid())
+  scopeKey             String
+  entity               String
+  epoch                String   @default(uuid())
+  schemaVersion        Int      @default(1)
+  currentRevision      BigInt   @default(0)
+  minAvailableRevision BigInt   @default(0)
+  itemCount            Int      @default(0)
+  lastSourceUpdateAt   DateTime?
+  lastFullReconcileAt  DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([scopeKey, entity])
+  @@index([entity, updatedAt])
+}
+
+model OfflineDatasetChange {
+  revision        BigInt   @id @default(autoincrement())
+  scopeKey        String
+  entity          String
+  itemKey         String
+  operation       String
+  payload         Json?
+  sourceUpdatedAt DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([scopeKey, entity, revision])
+  @@index([scopeKey, entity, itemKey])
+  @@index([createdAt])
+}
+
 model SpecialPrice {
   id   String  @id @default(cuid())
   guid String? @unique
@@ -694,6 +810,7 @@ model Order {
 
   items    OrderItem[]
   events   OrderEvent[]
+  geoEvents OrderGeoEvent[]
   invoices ClientOrderInvoice[]
 
   createdAt DateTime @default(now())
@@ -721,6 +838,32 @@ model Order {
   @@index([hasRealization])
   @@index([sourceUpdatedAt])
   @@unique([createdByUserId, clientOrderId])
+}
+
+model OrderGeoEvent {
+  id            String                @id @default(cuid())
+  orderId       String
+  userId        Int
+  routePointId  Int?
+  clientEventId String
+  eventType     OrderGeoEventType
+  status        OrderGeoCaptureStatus @default(CAPTURED)
+  capturedAt    DateTime
+  latitude      Float?
+  longitude     Float?
+  accuracy      Float?
+  source        String?
+  failureReason String?
+  createdAt     DateTime              @default(now())
+
+  order      Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  routePoint RoutePoint? @relation(fields: [routePointId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, clientEventId])
+  @@index([orderId, eventType, capturedAt])
+  @@index([userId, capturedAt])
+  @@index([routePointId])
 }
 
 model ClientOrderInvoicePreference {

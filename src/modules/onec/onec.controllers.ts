@@ -17,17 +17,20 @@ import { getRedis } from '../../lib/redis';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
+import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
 import { buildQueuedOrderPayload, clientOrderDirectPushLockKey, queuedOrderSelect } from './onec.orderQueuePayload';
 import {
   agreementsBatchSchema,
   contractsBatchSchema,
   counterpartiesBatchSchema,
   nomenclatureBatchSchema,
+  managerStockBatchSchema,
   organizationsBatchSchema,
   orderAckSchema,
   ordersSnapshotBatchSchema,
   ordersStatusBatchSchema,
   productPricesBatchSchema,
+  sellingPricesBatchSchema,
   sessionCompleteSchema,
   sessionStartSchema,
   specialPricesBatchSchema,
@@ -60,7 +63,9 @@ type ClearEntityCode =
   | 'agreements'
   | 'product-prices'
   | 'special-prices'
-  | 'stock';
+  | 'selling-prices'
+  | 'stock'
+  | 'manager-stock';
 
 const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
 
@@ -271,6 +276,12 @@ const clearOnecEntity = async (entity: ClearEntityCode) => {
       case 'stock':
         await tx.stockBalance.deleteMany({});
         return;
+      case 'manager-stock':
+        await tx.managerStockReservation.deleteMany({});
+        return;
+      case 'selling-prices':
+        await tx.sellingPrice.deleteMany({});
+        return;
       case 'organizations':
         await tx.stockBalance.deleteMany({});
         await tx.organization.deleteMany({});
@@ -373,13 +384,18 @@ export const handleEntityClear = async (req: Request, res: Response) => {
     entity !== 'agreements' &&
     entity !== 'product-prices' &&
     entity !== 'special-prices' &&
-    entity !== 'stock'
+    entity !== 'selling-prices' &&
+    entity !== 'stock' &&
+    entity !== 'manager-stock'
   ) {
     return res.status(400).json({ error: 'Unsupported entity for clear' });
   }
 
   try {
     await clearOnecEntity(entity);
+    if (entity === 'selling-prices') await resetOfflineDataset('selling-prices');
+    if (entity === 'stock') await resetOfflineDataset('stock');
+    if (entity === 'manager-stock') await resetOfflineDataset('manager-stock');
     if (entity === 'stock' || entity === 'nomenclature' || entity === 'warehouses' || entity === 'organizations') {
       await cacheDelPrefix(STOCK_BALANCES_CACHE_PREFIX);
     }
@@ -697,6 +713,144 @@ export const handleProductPricesBatch = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+export const handleSellingPricesBatch = async (req: Request, res: Response) => {
+  try {
+    const parsed = sellingPricesBatchSchema.parse(req.body);
+    const syncedAt = now();
+    const results: BatchResult[] = [];
+    const changedKeys: string[] = [];
+    await prisma.$transaction(async (tx) => {
+      const productGuids = [...new Set(parsed.items.map((item) => item.productGuid))];
+      const priceTypeGuids = [...new Set(parsed.items.map((item) => item.priceTypeGuid))];
+      const [products, existingPriceTypes] = await Promise.all([
+        tx.product.findMany({ where: { guid: { in: productGuids } }, select: { id: true, guid: true } }),
+        tx.priceType.findMany({ where: { guid: { in: priceTypeGuids } }, select: { id: true, guid: true } }),
+      ]);
+      const productByGuid = new Map(products.map((item) => [item.guid, item]));
+      const priceTypeByGuid = new Map(existingPriceTypes.map((item) => [item.guid, item]));
+      for (const item of parsed.items) {
+        if (priceTypeByGuid.has(item.priceTypeGuid) || !item.priceType) continue;
+        const priceType = await tx.priceType.upsert({
+          where: { guid: item.priceType.guid },
+          create: {
+            guid: item.priceType.guid,
+            name: item.priceType.name,
+            code: item.priceType.code,
+            isActive: item.priceType.isActive ?? true,
+            sourceUpdatedAt: item.priceType.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          },
+          update: {
+            name: item.priceType.name,
+            code: item.priceType.code,
+            isActive: item.priceType.isActive ?? true,
+            sourceUpdatedAt: item.priceType.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          },
+          select: { id: true, guid: true },
+        });
+        priceTypeByGuid.set(priceType.guid, priceType);
+      }
+      for (const item of parsed.items) {
+        const key = item.syncKey
+          ?? `${item.productGuid}|${item.priceTypeGuid}|${item.packageGuid ?? ''}|${item.characteristicGuid ?? ''}|${item.sourceRegister}`;
+        try {
+          const product = productByGuid.get(item.productGuid);
+          if (!product) throw new Error(`Product ${item.productGuid} not found`);
+          const priceType = priceTypeByGuid.get(item.priceTypeGuid);
+          if (!priceType) throw new Error(`Price type ${item.priceTypeGuid} not found`);
+          const data = {
+            productId: product.id,
+            priceTypeId: priceType.id,
+            price: new Prisma.Decimal(item.price),
+            currency: item.currency ?? null,
+            packageGuid: item.packageGuid ?? null,
+            characteristicGuid: item.characteristicGuid ?? null,
+            sourceRegister: item.sourceRegister,
+            priority: item.priority ?? (item.sourceRegister === 'ЦеныНоменклатуры' ? 100 : 50),
+            startDate: item.startDate ?? null,
+            endDate: item.endDate ?? null,
+            minQty: toDecimal(item.minQty),
+            isActive: item.isActive ?? true,
+            sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          };
+          await tx.sellingPrice.upsert({ where: { syncKey: key }, create: { syncKey: key, ...data }, update: data });
+          changedKeys.push(key);
+          results.push({ key, status: 'ok' });
+        } catch (error) {
+          results.push({ key, status: 'error', error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      await recordOfflineDatasetChanges(tx, 'selling-prices', changedKeys, syncedAt);
+    });
+    const success = results.every((item) => item.status === 'ok');
+    return res.status(success ? 200 : 422).json({ success, count: results.length, results });
+  } catch (error) {
+    if (error instanceof ZodError) return handleValidationError(error, res);
+    console.error('Unexpected error in selling prices batch', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const handleManagerStockBatch = async (req: Request, res: Response) => {
+  try {
+    const parsed = managerStockBatchSchema.parse(req.body);
+    const syncedAt = now();
+    const results: BatchResult[] = [];
+    const changedReserveKeys: string[] = [];
+    await prisma.$transaction(async (tx) => {
+      const productGuids = [...new Set(parsed.items.map((item) => item.productGuid))];
+      const warehouseGuids = [...new Set(parsed.items.map((item) => item.warehouseGuid))];
+      const organizationGuids = [...new Set(parsed.items.flatMap((item) => item.organizationGuid ? [item.organizationGuid] : []))];
+      const [products, warehouses, organizations] = await Promise.all([
+        tx.product.findMany({ where: { guid: { in: productGuids } }, select: { id: true, guid: true } }),
+        tx.warehouse.findMany({ where: { guid: { in: warehouseGuids } }, select: { id: true, guid: true } }),
+        organizationGuids.length
+          ? tx.organization.findMany({ where: { guid: { in: organizationGuids } }, select: { id: true, guid: true } })
+          : Promise.resolve([]),
+      ]);
+      const productByGuid = new Map(products.map((item) => [item.guid, item]));
+      const warehouseByGuid = new Map(warehouses.map((item) => [item.guid, item]));
+      const organizationByGuid = new Map(organizations.map((item) => [item.guid, item]));
+      for (const item of parsed.items) {
+        const key = item.syncKey
+          ?? `${item.managerGuid}|${item.productGuid}|${item.warehouseGuid}|${item.organizationGuid ?? ''}`;
+        try {
+          const product = productByGuid.get(item.productGuid);
+          const warehouse = warehouseByGuid.get(item.warehouseGuid);
+          const organization = item.organizationGuid ? organizationByGuid.get(item.organizationGuid) ?? null : null;
+          if (!product) throw new Error(`Product ${item.productGuid} not found`);
+          if (!warehouse) throw new Error(`Warehouse ${item.warehouseGuid} not found`);
+          if (item.organizationGuid && !organization) throw new Error(`Organization ${item.organizationGuid} not found`);
+          const data = {
+            managerGuid: item.managerGuid,
+            productId: product.id,
+            warehouseId: warehouse.id,
+            organizationId: organization?.id ?? null,
+            reserved: new Prisma.Decimal(item.reserved),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
+            lastSyncedAt: syncedAt,
+          };
+          await tx.managerStockReservation.upsert({ where: { syncKey: key }, create: { syncKey: key, ...data }, update: data });
+          changedReserveKeys.push(key);
+          results.push({ key, status: 'ok' });
+        } catch (error) {
+          results.push({ key, status: 'error', error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      await recordOfflineDatasetChanges(tx, 'manager-stock', changedReserveKeys, syncedAt);
+    });
+    const success = results.every((item) => item.status === 'ok');
+    return res.status(success ? 200 : 422).json({ success, count: results.length, results });
+  } catch (error) {
+    if (error instanceof ZodError) return handleValidationError(error, res);
+    console.error('Unexpected error in manager stock batch', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const handleOrdersQueued = async (req: Request, res: Response) => {
   const includeSentRaw = String(req.query.includeSent ?? '').toLowerCase();
   const includeSent = includeSentRaw === '1' || includeSentRaw === 'true' || includeSentRaw === 'yes';

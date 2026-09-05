@@ -5,8 +5,15 @@ import {
   clientOrdersCounterpartiesQuerySchema,
   clientOrdersListQuerySchema,
   clientOrdersProductsQuerySchema,
+  offlineChangesQuerySchema,
+  offlineDatasetParamsSchema,
 } from '../src/modules/clientOrders/clientOrders.schemas';
-import { orderAckSchema, ordersSnapshotBatchSchema } from '../src/modules/onec/onec.schemas';
+import {
+  managerStockBatchSchema,
+  orderAckSchema,
+  ordersSnapshotBatchSchema,
+  sellingPricesBatchSchema,
+} from '../src/modules/onec/onec.schemas';
 
 describe('client orders query schemas', () => {
   it('parses inStockOnly=false as false', () => {
@@ -112,6 +119,73 @@ describe('client orders query schemas', () => {
     });
 
     expect(result).toMatchObject({ clientRevision: 7, intent: 'SUBMIT' });
+  });
+
+  it('accepts an explicit offline price review policy', () => {
+    const result = clientOrderMutationSchema.parse({
+      organizationGuid: 'organization-guid',
+      counterpartyGuid: 'counterparty-guid',
+      clientRevision: 8,
+      intent: 'SUBMIT',
+      offlineReview: {
+        pricePolicy: 'USE_CURRENT',
+        snapshotSyncedAt: '2026-09-01T08:00:00.000Z',
+      },
+      items: [{ lineGuid: 'line-guid-1', productGuid: 'product-guid', quantity: 1, manualPrice: 100 }],
+    });
+
+    expect(result.offlineReview).toEqual({
+      pricePolicy: 'USE_CURRENT',
+      snapshotSyncedAt: '2026-09-01T08:00:00.000Z',
+    });
+    expect(clientOrderMutationSchema.safeParse({
+      organizationGuid: 'organization-guid',
+      counterpartyGuid: 'counterparty-guid',
+      intent: 'SUBMIT',
+      offlineReview: { pricePolicy: 'AUTO' },
+      items: [{ productGuid: 'product-guid', quantity: 1 }],
+    }).success).toBe(false);
+  });
+
+  it('validates offline dataset cursors and entities', () => {
+    expect(offlineDatasetParamsSchema.parse({ entity: 'selling-prices' }).entity).toBe('selling-prices');
+    expect(offlineDatasetParamsSchema.parse({ entity: 'order-options' }).entity).toBe('order-options');
+    expect(offlineDatasetParamsSchema.parse({ entity: 'manager-stock' }).entity).toBe('manager-stock');
+    expect(offlineChangesQuerySchema.parse({ afterRevision: '12', epoch: 'epoch-1' })).toMatchObject({
+      afterRevision: '12',
+      epoch: 'epoch-1',
+      limit: 500,
+    });
+    expect(offlineChangesQuerySchema.safeParse({ afterRevision: '-1', epoch: 'epoch-1' }).success).toBe(false);
+  });
+
+  it('accepts selling prices and personal manager stock from 1C', () => {
+    expect(sellingPricesBatchSchema.parse({
+      secret: 'secret',
+      items: [{
+        syncKey: 'product|price-type|package|source',
+        productGuid: 'product-guid',
+        priceTypeGuid: 'price-type-guid',
+        price: 125.5,
+        currency: 'RUB',
+        packageGuid: 'package-guid',
+        sourceRegister: 'ЦеныНоменклатуры',
+        priority: 100,
+        minQty: 1,
+        isActive: true,
+      }],
+    }).items).toHaveLength(1);
+
+    expect(managerStockBatchSchema.parse({
+      secret: 'secret',
+      items: [{
+        syncKey: 'manager|product|warehouse',
+        managerGuid: 'manager-guid',
+        productGuid: 'product-guid',
+        warehouseGuid: 'warehouse-guid',
+        reserved: 6,
+      }],
+    }).items[0].reserved).toBe(6);
   });
 
   it('defaults counterparty debt filtering to all and validates explicit modes', () => {

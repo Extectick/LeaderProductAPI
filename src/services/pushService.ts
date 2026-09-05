@@ -6,11 +6,14 @@ const expo = new Expo({
 });
 
 type PushPayload = {
-  title: string;
-  body: string;
+  title?: string;
+  body?: string;
   data?: Record<string, any>;
   sound?: 'default' | null;
   channelId?: string;
+  dataOnly?: boolean;
+  priority?: 'default' | 'normal' | 'high';
+  ttl?: number;
 };
 
 export async function sendPushToUser(userId: number, payload: PushPayload) {
@@ -28,11 +31,13 @@ export async function sendPushToUser(userId: number, payload: PushPayload) {
 
   const messages: ExpoPushMessage[] = expoTokens.map((token) => ({
     to: token,
-    title: payload.title,
-    body: payload.body,
+    ...(!payload.dataOnly && payload.title ? { title: payload.title } : {}),
+    ...(!payload.dataOnly && payload.body ? { body: payload.body } : {}),
     data: payload.data,
-    sound: payload.sound ?? 'default',
-    channelId: payload.channelId,
+    ...(!payload.dataOnly ? { sound: payload.sound ?? 'default' } : {}),
+    ...(!payload.dataOnly && payload.channelId ? { channelId: payload.channelId } : {}),
+    ...(payload.priority ? { priority: payload.priority } : {}),
+    ...(typeof payload.ttl === 'number' ? { ttl: payload.ttl } : {}),
   }));
 
   const chunks = expo.chunkPushNotifications(messages);
