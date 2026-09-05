@@ -44,6 +44,8 @@ function cleanText(value: unknown, maxLength = 200) {
 }
 
 function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && !value.trim()) return null;
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -371,17 +373,36 @@ async function ingestTraccarPoint(req: express.Request, res: express.Response) {
     return res.status(202).send('device disabled');
   }
 
+  const now = new Date();
+  const touchDevice = () => prisma.trackingDeviceToken.update({
+    where: { id: token.id },
+    data: { lastUsedAt: now },
+  });
+  const latitudeMissing = input?.lat === null || input?.lat === undefined
+    || (typeof input.lat === 'string' && !input.lat.trim());
+  const longitudeMissing = input?.lon === null || input?.lon === undefined
+    || (typeof input.lon === 'string' && !input.lon.trim());
+
+  // Traccar intentionally emits coordinate-less heartbeats while stop
+  // detection has suspended GPS. They prove that the foreground service and
+  // its scoped credential are alive, but they are not route points.
+  if (latitudeMissing && longitudeMissing) {
+    await touchDevice();
+    return res.status(200).send('heartbeat');
+  }
+
   const latitude = finiteNumber(input?.lat);
   const longitude = finiteNumber(input?.lon);
   const recordedAt = parseRecordedAt(input?.timestamp) || new Date();
-  const now = new Date();
   const valid = latitude !== null && longitude !== null
     && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
     && recordedAt.getTime() <= now.getTime() + 5 * 60_000
     && recordedAt.getTime() >= now.getTime() - 180 * 24 * 60 * 60_000;
   if (!valid) {
     // A 2xx response removes a permanently invalid position from Traccar's
-    // durable queue instead of retrying it forever.
+    // durable queue instead of retrying it forever. The authenticated request
+    // still refreshes device liveness for diagnostics.
+    await touchDevice();
     return res.status(202).send('ignored invalid point');
   }
 
@@ -436,10 +457,7 @@ async function ingestTraccarPoint(req: express.Request, res: express.Response) {
   }
 
   await Promise.all([
-    prisma.trackingDeviceToken.update({
-      where: { id: token.id },
-      data: { lastUsedAt: now },
-    }),
+    touchDevice(),
     prisma.trackingLocationRequest.updateMany({
       where: {
         targetUserId: token.userId,
