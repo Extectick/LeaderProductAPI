@@ -813,6 +813,7 @@ model TrackingDeviceToken {
   revokedAt       DateTime?
   expiresAt       DateTime?
   lastBootstrapAt DateTime?
+  lastCommandPollAt DateTime?
   trackingEnabled Boolean   @default(true)
   routePoints     RoutePoint[]
   locationRequests TrackingLocationRequest[]
@@ -846,6 +847,7 @@ model TrackingLocationRequest {
   @@index([targetUserId, status, requestedAt])
   @@index([requestedByUserId, requestedAt])
   @@index([expiresAt, status])
+  @@index([trackingDeviceTokenId, status, expiresAt], map: "TrackingLocationRequest_device_status_expires_idx")
 }
 
 enum QRStatus {

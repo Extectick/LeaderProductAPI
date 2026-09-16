@@ -42,32 +42,32 @@ export async function sendPushToUser(userId: number, payload: PushPayload) {
 
   const chunks = expo.chunkPushNotifications(messages);
   const tickets: ExpoPushTicket[] = [];
+  const invalidTokens: string[] = [];
 
   for (const chunk of chunks) {
     try {
       const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
       tickets.push(...ticketChunk);
+      ticketChunk.forEach((ticket, index) => {
+        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+          const token = chunk[index]?.to;
+          if (typeof token === 'string') invalidTokens.push(token);
+        }
+      });
     } catch (error) {
       console.error('[push] Failed to send chunk', error);
     }
   }
 
   // Remove invalid tokens immediately if Expo reports them
-  const invalidTokens: string[] = [];
-  tickets.forEach((ticket, idx) => {
-    if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
-      const token = (messages[idx]?.to as string) || '';
-      if (token) invalidTokens.push(token);
-    }
-  });
-
   if (invalidTokens.length) {
     await prisma.deviceToken.deleteMany({
       where: { token: { in: invalidTokens } },
     });
   }
 
-  return { ok: true, ticketsCount: tickets.length };
+  const acceptedCount = tickets.filter((ticket) => ticket.status === 'ok').length;
+  return { ok: acceptedCount > 0, reason: acceptedCount ? null : 'push_rejected', ticketsCount: tickets.length, acceptedCount };
 }
 
 export async function notifyProfileActivated(userId: number, profileType: string) {

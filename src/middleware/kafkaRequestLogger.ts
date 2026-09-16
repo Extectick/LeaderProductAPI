@@ -39,6 +39,9 @@ function safeBody(body: any) {
 
 export function kafkaRequestLogger(req: Request, res: Response, next: NextFunction) {
   if (!isKafkaEnabled()) return next();
+  // Native credentials and bootstrap responses must never enter request logs.
+  const privateTracking = /^\/tracking\/(native\/|device\/bootstrap)/.test(req.originalUrl || req.url);
+  const captureBody = CAPTURE_BODY && !privateTracking;
 
   const startedAt = new Date().toISOString();
   const start = process.hrtime.bigint();
@@ -49,7 +52,7 @@ export function kafkaRequestLogger(req: Request, res: Response, next: NextFuncti
   const originalWrite = res.write.bind(res);
   const originalEnd = res.end.bind(res);
 
-  if (CAPTURE_BODY) {
+  if (captureBody) {
     res.write = (chunk: any, encoding?: any, cb?: any) => {
       if (chunk && resSize < MAX_BODY) {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8');
@@ -93,7 +96,7 @@ export function kafkaRequestLogger(req: Request, res: Response, next: NextFuncti
 
     let resBody: any = null;
     let bodyTruncated = false;
-    if (CAPTURE_BODY && resBodyChunks.length) {
+    if (captureBody && resBodyChunks.length) {
       const buf = Buffer.concat(resBodyChunks);
       bodyTruncated = resSize > MAX_BODY;
       const ct = String(res.getHeader('content-type') || '');
@@ -114,7 +117,7 @@ export function kafkaRequestLogger(req: Request, res: Response, next: NextFuncti
       topic: getKafkaTopic(),
       ts: startedAt,
       method: req.method,
-      url: req.originalUrl || req.url,
+      url: privateTracking ? (req.originalUrl || req.url).split('?')[0] : req.originalUrl || req.url,
       route: routePath,
       status: res.statusCode,
       durationMs: Number(durationMs.toFixed(3)),
@@ -122,8 +125,8 @@ export function kafkaRequestLogger(req: Request, res: Response, next: NextFuncti
       req: {
         headers: sanitizeHeaders(req.headers as any),
         params: req.params,
-        query: req.query,
-        body: safeBody(req.body),
+        query: privateTracking ? '[redacted]' : req.query,
+        body: privateTracking ? '[redacted]' : safeBody(req.body),
       },
       res: {
         headers: sanitizeHeaders(res.getHeaders() as any),

@@ -14,7 +14,7 @@ const TRACKING_TOKEN_PREFIX = 'lpt_';
 const DAY_OFFSET_MINUTES = Number(process.env.TRACKING_DEFAULT_TIMEZONE_OFFSET_MINUTES || 360);
 const MAX_DAY_POINTS = 5000;
 const MAX_RENDER_POINTS = 600;
-const LOCATION_REQUEST_TIMEOUT_MS = 30_000;
+const LOCATION_REQUEST_TIMEOUT_MS = 60_000;
 const LOCATION_REQUEST_COOLDOWN_MS = 60_000;
 
 type ViewerScope = { mode: 'SELF' | 'DEPARTMENT' | 'ALL'; departmentIds: number[] };
@@ -462,6 +462,7 @@ async function ingestTraccarPoint(req: express.Request, res: express.Response) {
     prisma.trackingLocationRequest.updateMany({
       where: {
         targetUserId: token.userId,
+        trackingDeviceTokenId: token.id,
         status: 'PENDING',
         requestedAt: { lte: recordedAt },
         expiresAt: { gte: now },
@@ -482,6 +483,44 @@ async function ingestTraccarPoint(req: express.Request, res: express.Response) {
 
 router.post('/native/osmand', rateLimit({ windowSec: 60, limit: 600 }), ingestTraccarPoint);
 router.get('/native/osmand', rateLimit({ windowSec: 60, limit: 600 }), ingestTraccarPoint);
+
+// Scoped device credential: can only receive a pending fix request for this
+// device, never read routes or other users. POST keeps credentials out of URLs.
+router.post('/native/commands', rateLimit({ windowSec: 10, limit: 1000 }), async (req, res) => {
+  if (!isTrackingV2Enabled()) return res.sendStatus(404);
+  res.setHeader('Cache-Control', 'no-store');
+  const credential = cleanText((req.body as any)?.credential, 200);
+  if (!credential?.startsWith(TRACKING_TOKEN_PREFIX)) return res.sendStatus(401);
+  const token = await prisma.trackingDeviceToken.findUnique({
+    where: { tokenHash: hashCredential(credential) },
+    include: { user: { select: { isActive: true, profileStatus: true } } },
+  });
+  if (!token) return res.sendStatus(401);
+  const now = new Date();
+  if (token.revokedAt || !token.trackingEnabled || (token.expiresAt && token.expiresAt <= now)
+    || !token.user.isActive || token.user.profileStatus !== 'ACTIVE') return res.sendStatus(403);
+  if (token.lastCommandPollAt && now.getTime() - token.lastCommandPollAt.getTime() < 2000) {
+    return res.status(429).json({ pollAfterSeconds: 15 });
+  }
+  // Do not touch last GPS time: command-channel liveness is a separate fact.
+  await prisma.trackingDeviceToken.update({ where: { id: token.id }, data: { lastCommandPollAt: now } });
+  const failure = (req.body as any)?.failure;
+  if (failure && ['LOCATION_PERMISSION_DENIED', 'LOCATION_SERVICES_DISABLED', 'LOCATION_FIX_FAILED'].includes(failure.reason)) {
+    await prisma.trackingLocationRequest.updateMany({
+      where: { id: cleanText(failure.requestId, 100) || '', trackingDeviceTokenId: token.id, status: 'PENDING', expiresAt: { gt: now } },
+      data: { status: 'FAILED', completedAt: now, failureReason: failure.reason },
+    });
+  }
+  const pending = await prisma.trackingLocationRequest.findFirst({
+    where: { trackingDeviceTokenId: token.id, targetUserId: token.userId, status: 'PENDING', expiresAt: { gt: now } },
+    orderBy: { requestedAt: 'asc' },
+    select: { id: true, expiresAt: true },
+  });
+  return res.json({
+    command: pending ? { id: pending.id, validForSeconds: Math.max(0, Math.floor((pending.expiresAt.getTime() - now.getTime()) / 1000)) } : null,
+    pollAfterSeconds: 15,
+  });
+});
 
 router.delete('/native/device', rateLimit({ windowSec: 60, limit: 20 }), async (req, res) => {
   if (!isTrackingV2Enabled()) return res.sendStatus(404);
@@ -631,6 +670,40 @@ router.get('/users/:userId/live', rateLimit({ windowSec: 60, limit: 180 }), asyn
   }, 'Текущее состояние геопозиции получено'));
 });
 
+async function readOrderEventsPage(userId: number, start: Date, end: Date, cursor: ReturnType<typeof parseEventCursor>, limit: number) {
+  const page = await prisma.orderGeoEvent.findMany({
+    where: {
+      userId, capturedAt: { gte: start, lt: end },
+      ...(cursor ? { OR: [{ capturedAt: { gt: cursor.capturedAt } }, { capturedAt: cursor.capturedAt, id: { gt: cursor.id } }] } : {}),
+    },
+    orderBy: [{ capturedAt: 'asc' }, { id: 'asc' }], take: limit + 1,
+    include: { order: { select: { guid: true, number1c: true, date1c: true, totalAmount: true, counterparty: { select: { name: true } } } } },
+  });
+  const more = page.length > limit;
+  const events = page.slice(0, limit);
+  return {
+    orderEventsNextCursor: more && events.length ? encodeEventCursor(events[events.length - 1]) : null,
+    orderEvents: events.map((event) => ({
+      id: event.id, eventType: event.eventType, status: event.status, capturedAt: event.capturedAt.toISOString(),
+      latitude: event.latitude, longitude: event.longitude, accuracy: event.accuracy, failureReason: event.failureReason,
+      order: { guid: event.order.guid, number: event.order.number1c, date: event.order.date1c?.toISOString() ?? null,
+        totalAmount: event.order.totalAmount?.toString() ?? null, counterpartyName: event.order.counterparty.name },
+    })),
+  };
+}
+
+// Further event pages do not reload GPS points or recalculate the day's route.
+router.get('/users/:userId/day/events', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthRequest, res) => {
+  const userId = Number((req.params as any).userId);
+  if (!Number.isInteger(userId) || !(await canViewUser(req, userId))) {
+    return res.status(403).json(errorResponse('Нет доступа к маршруту пользователя', ErrorCodes.FORBIDDEN));
+  }
+  const { start, end } = parseDayRange((req.query as any).date);
+  const limit = Math.max(20, Math.min(100, Math.round(finiteNumber((req.query as any).eventLimit) ?? 30)));
+  const page = await readOrderEventsPage(userId, start, end, parseEventCursor((req.query as any).eventCursor), limit);
+  return res.json(successResponse(page, 'События дня получены'));
+});
+
 router.get('/users/:userId/day', rateLimit({ windowSec: 60, limit: 90 }), async (req: AuthRequest, res) => {
   const targetUserId = Number((req.params as any).userId);
   if (!Number.isInteger(targetUserId) || !(await canViewUser(req, targetUserId))) {
@@ -640,7 +713,7 @@ router.get('/users/:userId/day', rateLimit({ windowSec: 60, limit: 90 }), async 
   const eventCursor = parseEventCursor((req.query as any).eventCursor);
   const requestedEventLimit = finiteNumber((req.query as any).eventLimit);
   const eventLimit = Math.max(20, Math.min(200, Math.round(requestedEventLimit ?? 100)));
-  const [points, geoEventsPage, distinctOrders] = await Promise.all([
+  const [points, eventPage, distinctOrders] = await Promise.all([
     prisma.routePoint.findMany({
       where: {
         userId: targetUserId,
@@ -650,39 +723,13 @@ router.get('/users/:userId/day', rateLimit({ windowSec: 60, limit: 90 }), async 
       orderBy: { recordedAt: 'asc' },
       take: MAX_DAY_POINTS,
     }),
-    prisma.orderGeoEvent.findMany({
-      where: {
-        userId: targetUserId,
-        capturedAt: { gte: start, lt: end },
-        ...(eventCursor ? {
-          OR: [
-            { capturedAt: { gt: eventCursor.capturedAt } },
-            { capturedAt: eventCursor.capturedAt, id: { gt: eventCursor.id } },
-          ],
-        } : {}),
-      },
-      orderBy: [{ capturedAt: 'asc' }, { id: 'asc' }],
-      take: eventLimit + 1,
-      include: {
-        order: {
-          select: {
-            guid: true,
-            number1c: true,
-            date1c: true,
-            totalAmount: true,
-            counterparty: { select: { name: true } },
-          },
-        },
-      },
-    }),
+    readOrderEventsPage(targetUserId, start, end, eventCursor, eventLimit),
     prisma.orderGeoEvent.findMany({
       where: { userId: targetUserId, capturedAt: { gte: start, lt: end } },
       distinct: ['orderId'],
       select: { orderId: true },
     }),
   ]);
-  const hasMoreOrderEvents = geoEventsPage.length > eventLimit;
-  const geoEvents = hasMoreOrderEvents ? geoEventsPage.slice(0, eventLimit) : geoEventsPage;
   let distanceMeters = 0;
   let movingSeconds = 0;
   for (let index = 1; index < points.length; index += 1) {
@@ -719,26 +766,7 @@ router.get('/users/:userId/day', rateLimit({ windowSec: 60, limit: 90 }), async 
     },
     polyline,
     stops,
-    orderEventsNextCursor: hasMoreOrderEvents && geoEvents.length
-      ? encodeEventCursor(geoEvents[geoEvents.length - 1])
-      : null,
-    orderEvents: geoEvents.map((event) => ({
-      id: event.id,
-      eventType: event.eventType,
-      status: event.status,
-      capturedAt: event.capturedAt.toISOString(),
-      latitude: event.latitude,
-      longitude: event.longitude,
-      accuracy: event.accuracy,
-      failureReason: event.failureReason,
-      order: {
-        guid: event.order.guid,
-        number: event.order.number1c,
-        date: event.order.date1c?.toISOString() ?? null,
-        totalAmount: event.order.totalAmount?.toString() ?? null,
-        counterpartyName: event.order.counterparty.name,
-      },
-    })),
+    ...eventPage,
   }, 'Дневной геомаршрут получен'));
 });
 
@@ -753,6 +781,7 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
     return res.status(403).json(errorResponse('Нет права запрашивать геопозицию', ErrorCodes.FORBIDDEN));
   }
   const now = new Date();
+  const localInstallId = targetUserId === req.user!.userId ? cleanText((req.body as any)?.localInstallId, 160) : null;
   await prisma.trackingLocationRequest.updateMany({
     where: { targetUserId, status: 'PENDING', expiresAt: { lt: now } },
     data: { status: 'TIMED_OUT', completedAt: now, failureReason: 'LOCATION_TIMEOUT' },
@@ -769,7 +798,7 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
   }
   const [device, lastPoint] = await Promise.all([
     prisma.trackingDeviceToken.findFirst({
-      where: { userId: targetUserId, revokedAt: null, trackingEnabled: true },
+      where: { userId: targetUserId, revokedAt: null, trackingEnabled: true, ...(localInstallId ? { installId: localInstallId } : {}) },
       orderBy: [{ lastUsedAt: 'desc' }, { createdAt: 'desc' }],
     }),
     prisma.routePoint.findFirst({ where: { userId: targetUserId }, orderBy: { recordedAt: 'desc' } }),
@@ -785,7 +814,8 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
       expiresAt: new Date(now.getTime() + LOCATION_REQUEST_TIMEOUT_MS),
     },
   });
-  const push = await sendPushToUser(targetUserId, {
+  const nativeCommands = Boolean(device.lastCommandPollAt);
+  const push = localInstallId || nativeCommands ? { ok: true, reason: nativeCommands ? 'native_poll' : 'local_device' } : await sendPushToUser(targetUserId, {
     data: {
       type: 'TRACKING_LOCATION_REQUEST',
       requestId: request.id,
@@ -794,11 +824,19 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
     dataOnly: true,
     priority: 'high',
     ttl: Math.ceil(LOCATION_REQUEST_TIMEOUT_MS / 1000),
-  });
+  }).catch(() => ({ ok: false, reason: 'push_unavailable' }));
+  if (!push.ok) {
+    await prisma.trackingLocationRequest.updateMany({
+      where: { id: request.id, status: 'PENDING' },
+      data: { status: 'FAILED', completedAt: new Date(), failureReason: 'DEVICE_UPDATE_REQUIRED' },
+    });
+  }
   await writeAudit(req.user!.userId, 'LOCATION_REQUESTED', targetUserId, { requestId: request.id, push });
   return res.status(202).json(successResponse({
     id: request.id,
-    status: request.status,
+    status: push.ok ? request.status : 'FAILED',
+    failureReason: push.ok ? null : 'DEVICE_UPDATE_REQUIRED',
+    delivery: push.reason || 'push',
     requestedAt: request.requestedAt.toISOString(),
     expiresAt: request.expiresAt.toISOString(),
     lastKnown: lastPoint ? {
@@ -807,11 +845,11 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
       recordedAt: lastPoint.recordedAt.toISOString(),
       accuracy: lastPoint.accuracy,
     } : null,
-  }, 'Запрос геопозиции отправлен'));
+  }, push.ok ? 'Запрос геопозиции отправлен' : 'Не удалось доставить запрос на телефон'));
 });
 
 router.get('/location-requests/:requestId', rateLimit({ windowSec: 60, limit: 180 }), async (req: AuthRequest, res) => {
-  const request = await prisma.trackingLocationRequest.findUnique({
+  let request = await prisma.trackingLocationRequest.findUnique({
     where: { id: (req.params as any).requestId },
     include: { routePoint: true },
   });
@@ -819,11 +857,19 @@ router.get('/location-requests/:requestId', rateLimit({ windowSec: 60, limit: 18
     return res.status(404).json(errorResponse('Запрос геопозиции не найден', ErrorCodes.NOT_FOUND));
   }
   if (request.status === 'PENDING' && request.expiresAt < new Date()) {
-    await prisma.trackingLocationRequest.update({
-      where: { id: request.id },
+    const expired = await prisma.trackingLocationRequest.updateMany({
+      where: { id: request.id, status: 'PENDING', expiresAt: { lt: new Date() } },
       data: { status: 'TIMED_OUT', completedAt: new Date(), failureReason: 'LOCATION_TIMEOUT' },
     });
-    request.status = 'TIMED_OUT';
+    if (expired.count) {
+      request.status = 'TIMED_OUT';
+      request.completedAt = new Date();
+      request.failureReason = 'LOCATION_TIMEOUT';
+    } else {
+      // Ingestion can complete while a poll is expiring the request.
+      request = await prisma.trackingLocationRequest.findUnique({ where: { id: request.id }, include: { routePoint: true } });
+      if (!request) return res.status(404).json(errorResponse('Запрос геопозиции не найден', ErrorCodes.NOT_FOUND));
+    }
   }
   return res.json(successResponse({
     id: request.id,
