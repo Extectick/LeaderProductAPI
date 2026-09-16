@@ -7,6 +7,7 @@ import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { rateLimit } from '../middleware/rateLimit';
 import { errorResponse, ErrorCodes, successResponse } from '../utils/apiResponse';
 import { sendPushToUser } from '../services/pushService';
+import { resolveObjectUrl } from '../storage/minio';
 
 const router = express.Router();
 const TRACKING_TOKEN_PREFIX = 'lpt_';
@@ -501,9 +502,12 @@ router.use(requireTrackingV2, authenticateToken, checkUserStatus, authorizeServi
 router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthRequest, res) => {
   const scope = await getViewerScope(req);
   const query = cleanText((req.query as any).q, 120);
+  const selfOnly = (req.query as any).self === 'true';
+  const offset = Math.max(0, Math.floor(finiteNumber((req.query as any).offset) ?? 0));
   const departmentFilter = scope.mode === 'DEPARTMENT'
     ? {
         OR: [
+          { id: req.user!.userId },
           { employeeProfile: { departmentId: { in: scope.departmentIds } } },
           { employeeProfile: { activeDepartmentId: { in: scope.departmentIds } } },
           { departmentRoles: { some: { departmentId: { in: scope.departmentIds } } } },
@@ -514,16 +518,30 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
     where: {
       isActive: true,
       deletedAt: null,
-      currentProfileType: 'EMPLOYEE',
-      ...(scope.mode === 'SELF' ? { id: req.user!.userId } : departmentFilter),
-      ...(query ? {
-        OR: [
-          { firstName: { contains: query, mode: 'insensitive' as const } },
-          { lastName: { contains: query, mode: 'insensitive' as const } },
-          { middleName: { contains: query, mode: 'insensitive' as const } },
-          { email: { contains: query, mode: 'insensitive' as const } },
-        ],
-      } : {}),
+      profileStatus: 'ACTIVE',
+      employeeProfile: { is: { status: 'ACTIVE' } },
+      // Keep visibility and search in separate AND clauses: search must never
+      // replace the department OR and expose employees outside the viewer scope.
+      AND: [
+        selfOnly || scope.mode === 'SELF' ? { id: req.user!.userId } : departmentFilter,
+        ...(query ? query.split(/\s+/).map((word) => {
+          const contains = { contains: word, mode: 'insensitive' as const };
+          return { OR: [
+            { firstName: contains }, { lastName: contains }, { middleName: contains },
+            { email: contains },
+            { employeeProfile: { department: { name: contains } } },
+            { employeeProfile: { activeDepartment: { name: contains } } },
+            { role: { OR: [{ name: contains }, { displayName: contains }] } },
+            { departmentRoles: { some: { OR: [
+              { department: { name: contains } },
+              { role: { OR: [{ name: contains }, { displayName: contains }] } },
+            ] } } },
+            { employeeProfile: { departmentRoles: { some: {
+              role: { OR: [{ name: contains }, { displayName: contains }] },
+            } } } },
+          ] };
+        }) : []),
+      ],
     },
     select: {
       id: true,
@@ -531,15 +549,21 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
       lastName: true,
       middleName: true,
       email: true,
+      avatarUrl: true,
+      role: { select: { id: true, name: true, displayName: true } },
+      departmentRoles: { select: { role: { select: { id: true, name: true, displayName: true } } } },
       employeeProfile: {
         select: {
+          avatarUrl: true,
+          departmentRoles: { select: { role: { select: { id: true, name: true, displayName: true } } } },
           department: { select: { id: true, name: true } },
           activeDepartment: { select: { id: true, name: true } },
         },
       },
     },
-    orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-    take: 100,
+    orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }, { id: 'asc' }],
+    skip: selfOnly ? 0 : offset,
+    take: selfOnly ? 1 : 100,
   });
   const tokens = users.length ? await prisma.trackingDeviceToken.findMany({
     where: { userId: { in: users.map((user) => user.id) }, revokedAt: null },
@@ -548,7 +572,7 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
   const deviceByUser = new Map<number, typeof tokens[number]>();
   tokens.forEach((token) => { if (!deviceByUser.has(token.userId)) deviceByUser.set(token.userId, token); });
   const now = Date.now();
-  return res.json(successResponse(users.map((user) => {
+  return res.json(successResponse(await Promise.all(users.map(async (user) => {
     const device = deviceByUser.get(user.id);
     const lastUploadAt = device?.lastUsedAt?.toISOString() ?? null;
     return {
@@ -557,6 +581,13 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
       lastName: user.lastName,
       middleName: user.middleName,
       email: user.email,
+      avatarUrl: await resolveObjectUrl(user.employeeProfile?.avatarUrl || user.avatarUrl).catch(() => null),
+      role: user.role,
+      roles: Array.from(new Map([
+        user.role,
+        ...user.departmentRoles.map((item) => item.role),
+        ...(user.employeeProfile?.departmentRoles || []).map((item) => item.role),
+      ].map((role) => [role.id, role])).values()),
       department: user.employeeProfile?.activeDepartment || user.employeeProfile?.department || null,
       tracking: device ? {
         enabled: device.trackingEnabled,
@@ -564,7 +595,7 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
         stale: !device.lastUsedAt || now - device.lastUsedAt.getTime() > 15 * 60_000,
       } : null,
     };
-  }), 'Пользователи геомаршрутов получены'));
+  })), 'Пользователи геомаршрутов получены'));
 });
 
 router.get('/users/:userId/live', rateLimit({ windowSec: 60, limit: 180 }), async (req: AuthRequest, res) => {
