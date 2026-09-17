@@ -80,11 +80,24 @@ test('price snapshot and count use identical product and dependency filters', as
   expect(page.priceType.guid.in).toEqual([id(10), id(11), id(12)]);
 });
 test('own reserves use the same allowed goods/warehouse/organization filter', async () => {
+  db.offlineExportPolicy.findUnique.mockResolvedValue({ payload: { ...payload, stockOrganizationGuid: id(30) } });
   await getOfflineSnapshot(7, 'manager-stock', { limit: 100 });
   const where = db.managerStockReservation.findMany.mock.calls[0][0].where;
   expect(where.managerGuid).toBe(id(50));
   expect(where.product.guid.in).toEqual([id(1)]);
   expect(where.warehouse.guid.in).toEqual([id(31)]);
+  expect(where.OR).toContainEqual({ organizationId: null });
+});
+test('stock uses the authoritative technical key, exposes warehouse-wide quantity and preserves delta identity', async () => {
+  db.offlineExportPolicy.findUnique.mockResolvedValue({ payload: { ...payload, stockOrganizationGuid: id(30) } });
+  const syncKey = `${id(1)}|${id(31)}|${id(30)}|`;
+  db.stockBalance.findMany.mockResolvedValue([{ syncKey, productId: 'p1', quantity: 9, reserved: 6, available: 3, product: { guid: id(1) }, warehouse: { guid: id(31) }, organization: { guid: id(30) } }]);
+  const page = await getOfflineSnapshot(7, 'stock', { limit: 100 });
+  expect(db.stockBalance.findMany.mock.calls[0][0].where.OR).toEqual([{ organization: { is: { guid: id(30) } } }]);
+  expect(page.items[0]).toMatchObject({ syncKey, organization: null, available: 3 });
+  db.offlineDatasetChange.findMany.mockResolvedValue([{ revision: 5n, itemKey: syncKey }]);
+  const changes = await getOfflineChanges(7, 'stock', { limit: 100, afterRevision: 4n, epoch: page.epoch });
+  expect(changes.changes[0]).toMatchObject({ itemKey: syncKey, operation: 'UPSERT' });
 });
 test('old scope epoch requires full replacement, not a delta retaining extra rows', async () => {
   await expect(getOfflineChanges(7, 'stock', { afterRevision: 0n, limit: 100, epoch: state.epoch })).rejects.toMatchObject({ status: 409 });

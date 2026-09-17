@@ -13,6 +13,8 @@ export const offlineExportPolicySchema = z.object({
   priceTypes: z.array(z.object({ guid, dependencies: z.array(guid).max(2000) })).max(20_000),
   organizationGuids: z.array(guid).max(1000),
   warehouseGuids: z.array(guid).max(10_000),
+  // Legacy stock export attaches warehouse-wide balances to one technical organization.
+  stockOrganizationGuid: guid.optional(),
 });
 export type OfflineExportPolicy = z.infer<typeof offlineExportPolicySchema>;
 
@@ -37,11 +39,12 @@ export function buildOfflinePolicy(payload: OfflineExportPolicy, today: string) 
   })).sort((a, b) => a.guid.localeCompare(b.guid));
   const organizationGuids = [...new Set(payload.organizationGuids)].sort();
   const warehouseGuids = [...new Set(payload.warehouseGuids)].sort();
+  const stockOrganizationGuid = payload.stockOrganizationGuid;
   // Stable on identical re-exports. Changes at rolling expiry even if 1C is offline.
   const fingerprint = createHash('sha256').update(JSON.stringify({
-    productGuids, priceTypes, organizationGuids, warehouseGuids,
+    productGuids, priceTypes, organizationGuids, warehouseGuids, stockOrganizationGuid,
   })).digest('hex');
-  return { productGuids, priceTypes, organizationGuids, warehouseGuids, fingerprint };
+  return { productGuids, priceTypes, organizationGuids, warehouseGuids, stockOrganizationGuid, fingerprint };
 }
 export type ResolvedOfflinePolicy = ReturnType<typeof buildOfflinePolicy>;
 

@@ -93,10 +93,12 @@ async function accessibleCounterpartyIds(managerGuid: string) {
 const productWhere = (policy: ResolvedOfflinePolicy | null): Prisma.ProductWhereInput => ({
   isActive: true, ...(policy ? { guid: { in: policy.productGuids } } : {}),
 });
-const activeStockWhere = (policy: ResolvedOfflinePolicy | null) => ({
+const activeStockWhere = (policy: ResolvedOfflinePolicy | null, managerReserve = false) => ({
   product: productWhere(policy),
   warehouse: { isActive: true, ...(policy ? { guid: { in: policy.warehouseGuids } } : {}) },
-  OR: [
+  OR: policy?.stockOrganizationGuid && !managerReserve
+    ? [{ organization: { is: { guid: policy.stockOrganizationGuid } } }]
+    : [
     { organizationId: null },
     { organization: { is: { isActive: true, ...(policy ? { guid: { in: policy.organizationGuids } } : {}) } } },
   ],
@@ -110,7 +112,7 @@ async function accessiblePriceTypeGuids(managerGuid: string, policy: ResolvedOff
   return priceTypeClosure(agreements.flatMap(item => item.priceType ? [item.priceType.guid] : []), policy?.priceTypes ?? []);
 }
 
-async function decorateStockBalances(balances: any[]) {
+async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePolicy | null) {
   if (!balances.length) return [];
   const productIds = [...new Set(balances.map((item) => item.productId as string))];
   const costs = await prisma.productPrice.findMany({
@@ -127,6 +129,8 @@ async function decorateStockBalances(balances: any[]) {
     const { productId: _productId, warehouseId: _warehouseId, ...publicItem } = item;
     return {
       ...publicItem,
+      // These registers contain warehouse-wide stock, not stock owned by an organization.
+      ...(policy?.stockOrganizationGuid ? { organization: null } : {}),
       receiptPrice: costByProduct.get(item.product.guid) ?? null,
       freeAvailable,
       ownReserve: 0,
@@ -277,14 +281,14 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
             organization: { select: { guid: true } },
           },
       });
-      return decorateStockBalances(balances);
+      return decorateStockBalances(balances, policy);
     }
     case 'manager-stock': {
       return prisma.managerStockReservation.findMany({
         where: {
           managerGuid,
           reserved: { gt: 0 },
-          ...activeStockWhere(policy),
+          ...activeStockWhere(policy, true),
         },
         orderBy: { syncKey: 'asc' },
         select: {
@@ -327,7 +331,7 @@ async function countItemsForEntity(entity: OfflineDatasetEntity, managerGuid: st
       where: {
         managerGuid,
         reserved: { gt: 0 },
-        ...activeStockWhere(policy),
+        ...activeStockWhere(policy, true),
       },
     });
   }
@@ -364,7 +368,7 @@ async function getLargeEntityPage(
       where: {
         managerGuid,
         reserved: { gt: 0 },
-        ...activeStockWhere(policy),
+        ...activeStockWhere(policy, true),
         ...(cursor ? { syncKey: { gt: cursor } } : {}),
       },
       orderBy: { syncKey: 'asc' },
@@ -393,7 +397,7 @@ async function getLargeEntityPage(
       organization: { select: { guid: true } },
     },
   });
-  return decorateStockBalances(balances);
+  return decorateStockBalances(balances, policy);
 }
 
 async function getLargeItemsByKeys(
@@ -427,7 +431,7 @@ async function getLargeItemsByKeys(
         syncKey: { in: itemKeys },
         managerGuid,
         reserved: { gt: 0 },
-        ...activeStockWhere(policy),
+        ...activeStockWhere(policy, true),
       },
       select: {
         syncKey: true,
@@ -457,7 +461,7 @@ async function getLargeItemsByKeys(
       organization: { select: { guid: true } },
     },
   });
-  const decorated = await decorateStockBalances(balances);
+  const decorated = await decorateStockBalances(balances, policy);
   return decorated.filter((item) => keySet.has(itemKey('stock', item)));
 }
 
@@ -465,6 +469,7 @@ function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
   if (entity === 'selling-prices') return String(item.syncKey ?? '');
   if (entity === 'manager-stock') return String(item.syncKey ?? '');
   if (entity === 'stock') {
+    if (item.syncKey) return String(item.syncKey);
     const product = item.product as { guid?: string } | undefined;
     const warehouse = item.warehouse as { guid?: string } | undefined;
     const organization = item.organization as { guid?: string } | undefined;
