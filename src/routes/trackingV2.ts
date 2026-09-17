@@ -637,6 +637,18 @@ router.get('/users', rateLimit({ windowSec: 60, limit: 120 }), async (req: AuthR
   })), 'Пользователи геомаршрутов получены'));
 });
 
+async function findReachableTrackingDevice(where: { userId: number; revokedAt: null; trackingEnabled?: boolean; installId?: string }) {
+  // Prefer a phone that can receive a command now, not a retired installation
+  // that happened to poll months ago. Preserve legacy selection as fallback.
+  const connected = await prisma.trackingDeviceToken.findFirst({
+    where: { ...where, trackingEnabled: true, lastCommandPollAt: { gte: new Date(Date.now() - 90_000) } },
+    orderBy: [{ lastCommandPollAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+  });
+  return connected || prisma.trackingDeviceToken.findFirst({
+    where, orderBy: [{ lastUsedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+  });
+}
+
 router.get('/users/:userId/live', rateLimit({ windowSec: 60, limit: 180 }), async (req: AuthRequest, res) => {
   const targetUserId = Number((req.params as any).userId);
   if (!Number.isInteger(targetUserId) || !(await canViewUser(req, targetUserId))) {
@@ -644,7 +656,7 @@ router.get('/users/:userId/live', rateLimit({ windowSec: 60, limit: 180 }), asyn
   }
   const [point, device] = await Promise.all([
     prisma.routePoint.findFirst({ where: { userId: targetUserId }, orderBy: { recordedAt: 'desc' } }),
-    prisma.trackingDeviceToken.findFirst({ where: { userId: targetUserId, revokedAt: null }, orderBy: [{ lastUsedAt: 'desc' }, { createdAt: 'desc' }] }),
+    findReachableTrackingDevice({ userId: targetUserId, revokedAt: null }),
   ]);
   const ageSeconds = point ? Math.max(0, Math.round((Date.now() - point.recordedAt.getTime()) / 1000)) : null;
   return res.json(successResponse({
@@ -662,6 +674,8 @@ router.get('/users/:userId/live', rateLimit({ windowSec: 60, limit: 180 }), asyn
     device: device ? {
       enabled: device.trackingEnabled,
       lastUploadAt: device.lastUsedAt?.toISOString() ?? null,
+      lastCommandPollAt: device.lastCommandPollAt?.toISOString() ?? null,
+      commandChannelOnline: device.trackingEnabled && Boolean(device.lastCommandPollAt && Date.now() - device.lastCommandPollAt.getTime() < 90_000),
       stale: !device.lastUsedAt || Date.now() - device.lastUsedAt.getTime() > 15 * 60_000,
       platform: device.platform,
       appVersion: device.appVersion,
@@ -797,10 +811,7 @@ router.post('/users/:userId/location-requests', rateLimit({ windowSec: 60, limit
     return res.status(429).json(errorResponse('Повторный запрос можно сделать через минуту', ErrorCodes.TOO_MANY_REQUESTS));
   }
   const [device, lastPoint] = await Promise.all([
-    prisma.trackingDeviceToken.findFirst({
-      where: { userId: targetUserId, revokedAt: null, trackingEnabled: true, ...(localInstallId ? { installId: localInstallId } : {}) },
-      orderBy: [{ lastUsedAt: 'desc' }, { createdAt: 'desc' }],
-    }),
+    findReachableTrackingDevice({ userId: targetUserId, revokedAt: null, trackingEnabled: true, ...(localInstallId ? { installId: localInstallId } : {}) }),
     prisma.routePoint.findFirst({ where: { userId: targetUserId }, orderBy: { recordedAt: 'desc' } }),
   ]);
   if (!device) {

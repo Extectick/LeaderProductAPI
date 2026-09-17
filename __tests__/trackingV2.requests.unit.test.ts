@@ -53,6 +53,26 @@ it('queues a native command without any push registration', async () => {
   const response = await request(app).post('/tracking/users/8/location-requests').send({});
   expect(response.body.data).toMatchObject({ status: 'PENDING', delivery: 'native_poll', failureReason: null });
   expect(sendPushToUser).not.toHaveBeenCalled();
+  expect(mockPrisma.trackingDeviceToken.findFirst.mock.calls[0][0].orderBy[0]).toEqual({ lastCommandPollAt: { sort: 'desc', nulls: 'last' } });
+});
+
+it('reports command connection independently of old GPS coordinates', async () => {
+  const old = new Date(Date.now() - 3600_000);
+  const recent = new Date();
+  mockPrisma.routePoint.findFirst.mockResolvedValue({ id: 1, recordedAt: old, latitude: 55, longitude: 73 });
+  mockPrisma.trackingDeviceToken.findFirst.mockResolvedValue({ trackingEnabled: true, lastUsedAt: old, lastCommandPollAt: recent });
+  const response = await request(app).get('/tracking/users/7/live');
+  expect(response.body.data.device).toMatchObject({ lastCommandPollAt: recent.toISOString(), commandChannelOnline: true, stale: true });
+  expect(response.body.data.point.recordedAt).toBe(old.toISOString());
+  expect(response.body.data.point.ageSeconds).toBeGreaterThanOrEqual(3600);
+});
+
+it('falls back to the last active legacy phone when no recent command channel exists', async () => {
+  mockPrisma.trackingDeviceToken.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 38 });
+  await request(app).post('/tracking/users/8/location-requests').send({});
+  expect(mockPrisma.trackingDeviceToken.findFirst.mock.calls[0][0].where.lastCommandPollAt).toEqual({ gte: expect.any(Date) });
+  expect(mockPrisma.trackingDeviceToken.findFirst.mock.calls[1][0].where.lastCommandPollAt).toBeUndefined();
+  expect(mockPrisma.trackingLocationRequest.create.mock.calls[0][0].data.trackingDeviceTokenId).toBe(38);
 });
 
 describe('native command polling', () => {
