@@ -1,4 +1,5 @@
 import express from 'express';
+import { OrderIntegrityError } from '../orders/orderIntegrity';
 import { ZodError } from 'zod';
 import { authenticateToken, authorizePermissions, type AuthRequest } from '../../middleware/auth';
 import { checkUserStatus } from '../../middleware/checkUserStatus';
@@ -85,6 +86,9 @@ const validationMessage = (error: ZodError) => {
 };
 
 const handleError = (res: express.Response, err: unknown, fallbackMessage: string) => {
+  if (err instanceof OrderIntegrityError) {
+    return res.status(err.status).json(errorResponse(err.message, ErrorCodes.CONFLICT, err.details));
+  }
   if (err instanceof ClientOrdersError) {
     return res.status(err.status).json(errorResponse(err.message, err.code));
   }

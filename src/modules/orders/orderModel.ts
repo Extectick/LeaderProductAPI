@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { orderContentToken } from './orderIntegrity';
 
 export const decimalToNumber = (value: unknown): number | null => {
   if (value === null || value === undefined) return null;
@@ -223,6 +224,7 @@ export const orderDetailSelect = {
     },
   },
   events: {
+    where: { eventType: { notIn: ['ORDER_CONTENT_SNAPSHOT', 'ORDER_EXPORT_PACKET'] } },
     orderBy: [{ createdAt: 'desc' }],
     take: 50,
     select: {
@@ -251,6 +253,7 @@ export type OrderDetailRecord = Prisma.OrderGetPayload<{ select: typeof orderDet
 export function mapOrderDetail(order: OrderDetailRecord) {
   const invoiceAggregate = mapInvoiceAggregate(order.invoiceRequested, order.invoices);
   return {
+    contentToken: orderContentToken(order),
     guid: order.guid,
     clientOrderId: order.clientOrderId,
     clientRevision: order.clientRevision,
@@ -360,7 +363,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
         : null,
       unit: item.unit,
     })),
-    events: order.events.map((event) => ({
+    events: order.events.filter((event) => !['ORDER_CONTENT_SNAPSHOT', 'ORDER_EXPORT_PACKET'].includes(event.eventType)).map((event) => ({
       id: event.id,
       revision: event.revision,
       source: event.source,

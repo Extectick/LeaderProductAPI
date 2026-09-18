@@ -260,6 +260,10 @@ export const managerOrderItemSchema = z.object({
 });
 
 export const clientOrderCreateSchema = z.object({
+  integrity: z.object({
+    baseContentToken: z.string().regex(/^[a-f0-9]{64}$/),
+    confirmationToken: z.string().max(256).optional(),
+  }).optional(),
   organizationGuid: z.string().min(1),
   counterpartyGuid: z.string().min(1),
   agreementGuid: nullableGuid,

@@ -62,6 +62,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
 
 import clientOrdersRouter from '../src/modules/clientOrders/clientOrders.routes';
 import * as service from '../src/modules/clientOrders/clientOrders.service';
+import { OrderIntegrityError } from '../src/modules/orders/orderIntegrity';
 
 const app = express();
 app.use(express.json());
@@ -370,6 +371,17 @@ describe('/api/client-orders live reference routes', () => {
       intent: 'SUBMIT',
     }));
     expect(response.body.data).toMatchObject({ guid: 'order-guid', clientOrderId: 'client-order-id' });
+  });
+
+  it('returns an actionable review challenge without converting it into a generic 500', async () => {
+    const details = { kind: 'ORDER_CHANGE_REVIEW_REQUIRED', baseContentToken: 'a'.repeat(64), confirmationToken: 'signed', changes: [] };
+    jest.mocked(service.putClientOrderByClientId).mockRejectedValueOnce(new OrderIntegrityError('Подтвердите изменение', details));
+    const response = await request(app).put('/api/client-orders/by-client-id/client-order-id').send({
+      organizationGuid: 'org', counterpartyGuid: 'client', clientRevision: 2, intent: 'SUBMIT',
+      integrity: { baseContentToken: 'a'.repeat(64) }, items: [{ lineGuid: 'line', productGuid: 'product', quantity: 1, manualPrice: 100 }],
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.error.details).toEqual(details);
   });
 
   it('rejects invalid unqueue body before calling service', async () => {

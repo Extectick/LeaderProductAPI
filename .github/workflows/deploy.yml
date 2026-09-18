@@ -26,7 +26,23 @@ env:
   IMAGE_NAME: extectick/leaderproductapi
 
 jobs:
+  order-integrity-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test
+      - run: npm run type-check
+      - run: npm run test:unit -- --runInBand __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts
+
   build-and-push:
+    needs: order-integrity-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
