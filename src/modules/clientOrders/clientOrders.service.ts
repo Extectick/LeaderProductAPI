@@ -12,6 +12,7 @@ import prisma from '../../prisma/client';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
+import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
@@ -3230,6 +3231,9 @@ function reconcilePostedLiveOrdersInBackground(
     where: {
       id: { in: [...localIds] },
       source: OrderSource.MANAGER_APP,
+      // Posting an older 1C revision does not acknowledge a pending API edit.
+      status: { notIn: [OrderStatus.QUEUED, OrderStatus.CANCELLED] },
+      syncState: OrderSyncState.SYNCED,
       OR: [
         { isPostedIn1c: false },
         { status: { not: OrderStatus.CONFIRMED } },
@@ -3857,6 +3861,9 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
           );
           return enrichOrderItemsWithImages({
             ...liveDetail,
+            // Never attach a fresh API revision to stale/cached 1C contents.
+            ...mapped,
+            contentToken: orderContentToken(order),
             guid: order.guid,
             appGuid: order.guid,
             origin: 'merged',
@@ -5444,7 +5451,7 @@ function stableJsonValue(value: unknown): unknown {
 }
 
 function clientOrderPayloadHash(body: ClientOrderMutationBody) {
-  const { clientRevision: _clientRevision, intent: _intent, ...payload } = body;
+  const { clientRevision: _clientRevision, intent: _intent, integrity: _integrity, ...payload } = body;
   return createHash('sha256').update(JSON.stringify(stableJsonValue(payload))).digest('hex');
 }
 
@@ -5768,6 +5775,9 @@ export async function putClientOrderByClientId(
       FROM advisory_lock
     `;
 
+    const identity = await tx.order.findFirst({ where: { createdByUserId: userId, clientOrderId }, select: { guid: true } });
+    if (identity?.guid) await lockOrderMutation(tx, identity.guid);
+
     const existing = await tx.order.findFirst({
       where: { createdByUserId: userId, clientOrderId },
       select: {
@@ -5843,13 +5853,14 @@ export async function putClientOrderByClientId(
       return { guid: existing.guid!, queued: true };
     }
 
+    if (existing) await guardAndAuditOrderChange(tx, existing.id, body, userId);
     await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const deliveryDate = body.deliveryDate ?? defaultDeliveryDate();
     const shouldQueue = body.intent === 'SUBMIT'
-      || !!existing?.submitRequestedAt
-      || (!!existing && (existing.status === OrderStatus.QUEUED || existing.status === OrderStatus.SENT_TO_1C));
+      || (!body.integrity && (!!existing?.submitRequestedAt
+        || (!!existing && (existing.status === OrderStatus.QUEUED || existing.status === OrderStatus.SENT_TO_1C))));
     if (shouldQueue) {
       assertClientOrderCanBeSubmitted({
         organizationId: context.organization.id,
@@ -5921,7 +5932,7 @@ export async function putClientOrderByClientId(
         source: OrderEventSource.APP_MANAGER,
         eventType: 'CLIENT_ORDER_CREATED',
         actorUserId: userId,
-        payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent },
+        payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent, items: prepared.items.map(item => item.snapshot) } as Prisma.InputJsonValue,
       });
     } else {
       ensureEditable(existing);
@@ -5936,14 +5947,14 @@ export async function putClientOrderByClientId(
         },
         select: { id: true, guid: true, revision: true },
       });
-      if (body.saveReason !== 'autosave') {
+      {
         await appendOrderEvent(tx, {
           orderId: order.id,
           revision: order.revision,
           source: OrderEventSource.APP_MANAGER,
           eventType: 'CLIENT_ORDER_UPDATED',
           actorUserId: userId,
-          payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent },
+          payload: { clientOrderId, clientRevision: body.clientRevision, intent: body.intent, saveReason: body.saveReason, items: prepared.items.map(item => item.snapshot) } as Prisma.InputJsonValue,
         });
       }
     }
@@ -6260,12 +6271,24 @@ export function resolveUpdatedOrderQueueState(currentStatus: OrderStatus) {
   };
 }
 
+async function guardAndAuditOrderChange(tx: Tx, id: string, body: ClientOrderCreateBody, userId: number) {
+  const current = await tx.order.findUniqueOrThrow({ where: { id }, select: orderDetailSelect });
+  assertOrderIntegrity(current, body, userId);
+  const { integrity: _confirmation, ...proposed } = body;
+  await appendOrderEvent(tx, {
+    orderId: id, revision: current.revision, source: OrderEventSource.APP_MANAGER,
+    eventType: 'ORDER_CONTENT_SNAPSHOT', actorUserId: userId,
+    payload: JSON.parse(JSON.stringify({ before: orderContentSnapshot(current), proposed, confirmed: Boolean(body.integrity?.confirmationToken) })) as Prisma.InputJsonValue,
+  });
+}
+
 export async function updateClientOrder(guid: string, userId: number, body: ClientOrderUpdateBody) {
   const sourceUpdatedAt = now();
   const managerGuid = await getManagerGuidForUser(userId);
   const liveReferences = await loadLiveOrderMaterialization(body, managerGuid);
 
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6286,12 +6309,13 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
     ensureEditable(order);
     assertRevision(order.revision, body.revision);
 
+    await guardAndAuditOrderChange(tx, order.id, body, userId);
     await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const nextRevision = order.revision + 1;
     const isAutosave = body.saveReason === 'autosave';
-    const queueState = resolveUpdatedOrderQueueState(order.status);
+    const queueState = resolveUpdatedOrderQueueState(body.integrity ? OrderStatus.DRAFT : order.status);
     await tx.orderItem.deleteMany({ where: { orderId: order.id } });
 
     await tx.order.update({
@@ -6330,7 +6354,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
       },
     });
 
-    if (!isAutosave) {
+    {
       await appendOrderEvent(tx, {
         orderId: order.id,
         revision: nextRevision,
@@ -6362,6 +6386,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
 
 export async function submitClientOrder(guid: string, userId: number, body: ClientOrderSubmitBody) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6500,6 +6525,7 @@ async function unqueueClientOrderInTransaction(
 
 export async function unqueueClientOrder(guid: string, userId: number, body: ClientOrderUnqueueBody) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6534,6 +6560,7 @@ export async function unqueueClientOrder(guid: string, userId: number, body: Cli
 
 export async function retryClientOrderExport(guid: string, userId: number, body: ClientOrderUnqueueBody) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6598,6 +6625,7 @@ export async function retryClientOrderExport(guid: string, userId: number, body:
 
 export async function deleteDraftClientOrder(guid: string, userId: number) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6636,6 +6664,7 @@ export async function deleteDraftClientOrder(guid: string, userId: number) {
 
 export async function restoreClientOrder(guid: string, userId: number, body: ClientOrderRestoreBody) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {
@@ -6698,6 +6727,7 @@ export async function restoreClientOrder(guid: string, userId: number, body: Cli
 
 export async function cancelClientOrder(guid: string, userId: number, body: ClientOrderCancelBody) {
   await prisma.$transaction(async (tx) => {
+    await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
       select: {

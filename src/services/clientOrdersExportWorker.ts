@@ -6,7 +6,8 @@ import {
   Prisma,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import prisma from '../prisma/client';
+import prisma, { pool } from '../prisma/client';
+import { stableOrderJson } from '../modules/orders/orderIntegrity';
 import { getRedis } from '../lib/redis';
 import {
   buildQueuedOrderPayload,
@@ -257,13 +258,29 @@ function extractSavedOrderItems(payload: unknown): unknown[] | null {
   return null;
 }
 
-function assertSavedOrderDidNotLoseItems(order: QueuedOrderForExport, payload: unknown) {
+export function assertSavedOrderDidNotLoseItems(order: QueuedOrderForExport, payload: unknown) {
   const localItemsCount = Array.isArray(order.items) ? order.items.length : 0;
   const savedItems = extractSavedOrderItems(payload);
-  if (localItemsCount > 0 && savedItems !== null && savedItems.length === 0) {
-    throw new Error(
-      `1С вернула успешный ответ без строк товаров; локально в заказе ${localItemsCount} строк. Заказ оставлен в очереди, чтобы не потерять данные.`
-    );
+  if (isCancelExportOrder(order)) return;
+  // 1C serializes base units (coefficient <= 1) as package=null.
+  const normalizedPackage = (guid: unknown, quantity: number, quantityBase: number) =>
+    quantity > 0 && quantityBase <= quantity ? null : guid ?? null;
+  const expected = order.items.map((i) => ({
+    lineGuid: i.lineGuid, product: i.product?.guid,
+    package: normalizedPackage(i.package?.guid, Number(i.quantity), Number(i.quantityBase ?? i.quantity)),
+    quantity: Number(i.quantity), quantityBase: Number(i.quantityBase ?? i.quantity), cancelled: Boolean(i.isCancelled),
+  }));
+  const actual = savedItems?.map((value) => {
+    const i = asRecord(value);
+    const quantity = Number(i?.quantity);
+    const quantityBase = Number(i?.quantityBase ?? i?.quantity);
+    return { lineGuid: i?.appLineGuid ?? i?.lineGuid ?? i?.id, product: asRecord(i?.product)?.guid,
+      package: normalizedPackage(asRecord(i?.package)?.guid, quantity, quantityBase),
+      quantity, quantityBase, cancelled: Boolean(i?.isCancelled) };
+  });
+  const sorted = (items: typeof expected) => [...items].sort((a, b) => String(a.lineGuid).localeCompare(String(b.lineGuid)));
+  if (localItemsCount && (!actual || stableOrderJson(sorted(expected)) !== stableOrderJson(sorted(actual as typeof expected)))) {
+    throw new ClientOrderExportValidationError('Состав заказа в ответе 1С отличается от отправленного. Автоматическая отправка остановлена; требуется проверка документа.');
   }
 }
 
@@ -437,7 +454,7 @@ async function validateOrderStockBeforeExport(order: QueuedOrderForExport) {
   }
 }
 
-async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unknown, requestId: string, transport: string) {
+export async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unknown, requestId: string, transport: string) {
   assertSavedOrderDidNotLoseItems(order, payload);
   const saved = extractSavedOrder(payload);
   const syncedAt = new Date();
@@ -451,16 +468,21 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
     const current = await tx.order.findFirst({
       where: {
         id: order.id,
+        revision: order.revision,
         status: isCancelExport ? OrderStatus.CANCELLED : OrderStatus.QUEUED,
         syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED,
       },
       select: { revision: true },
     });
-    if (!current) return;
+    if (!current) {
+      await appendOrderEvent(tx, { orderId: order.id, revision: order.revision, source: OrderEventSource.ONEC_ACK,
+        eventType: 'ONEC_ORDER_ACK_STALE', payload: { requestId, transport, exportedRevision: order.revision } });
+      return;
+    }
 
     const nextRevision = current.revision + 1;
-    await tx.order.update({
-      where: { id: order.id },
+    const applied = await tx.order.updateMany({
+      where: { id: order.id, revision: order.revision, syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED },
       data: {
         revision: nextRevision,
         status: isCancelExport ? OrderStatus.CANCELLED : OrderStatus.SENT_TO_1C,
@@ -484,6 +506,8 @@ async function markOrderExportSuccess(order: QueuedOrderForExport, payload: unkn
         exportAttempts: { increment: 1 },
       },
     });
+
+    if (applied.count !== 1) return;
 
     await appendOrderEvent(tx, {
       orderId: order.id,
@@ -525,6 +549,7 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
     const current = await tx.order.findFirst({
       where: {
         id: order.id,
+        revision: order.revision,
         status: isCancelExport ? OrderStatus.CANCELLED : OrderStatus.QUEUED,
         syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED,
       },
@@ -532,10 +557,10 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
     });
     if (!current) return;
 
-    await tx.order.update({
-      where: { id: order.id },
+    const applied = await tx.order.updateMany({
+      where: { id: order.id, revision: order.revision, syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED },
       data: {
-        // Keep the operation exportable so the legacy 1C pull channel remains a reliable fallback.
+        // Only this direct worker retries the same immutable operation.
         syncState: isValidationError
           ? OrderSyncState.ERROR
           : isCancelExport
@@ -547,6 +572,8 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
         sourceUpdatedAt: failedAt,
       },
     });
+
+    if (applied.count !== 1) return;
 
     await appendOrderEvent(tx, {
       orderId: order.id,
@@ -594,15 +621,40 @@ async function loadExportCandidates() {
 }
 
 async function exportOrder(order: QueuedOrderForExport) {
-  const requestId = randomUUID();
-  const payload = { ...buildQueuedOrderPayload(order), requestId };
-  const releaseOrderLock = await acquireOrderLock(String(payload.guid));
-  if (!releaseOrderLock) return;
+  // Session-level PostgreSQL lock survives Redis outages and slow 1C requests.
+  // No SQL transaction is kept open while waiting for the network.
+  const connection = await pool.connect();
+  const lockKey = `order-integrity:${order.guid}`;
+  let acquired = false;
+  let releaseOrderLock: (() => Promise<void>) | null = null;
+  let requestId: string = randomUUID();
+  let payload: ReturnType<typeof buildQueuedOrderPayload> & { requestId: string } = { ...buildQueuedOrderPayload(order), requestId };
   let transport: ExportFailureContext['transport'] = 'POST';
 
   try {
-    validateOrderReadyForExport(order);
-    await validateOrderStockBeforeExport(order);
+    acquired = (await connection.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [lockKey])).rows[0].locked;
+    if (!acquired) return;
+    const fresh = await prisma.order.findFirst({ where: { id: order.id, revision: order.revision, syncState: order.syncState, status: order.status }, select: queuedOrderSelect });
+    if (!fresh) return;
+    order = fresh;
+    releaseOrderLock = await acquireOrderLock(String(order.guid));
+    if (!releaseOrderLock) return;
+    const frozen = await prisma.orderEvent.findFirst({
+      where: { orderId: order.id, revision: order.revision, eventType: 'ORDER_EXPORT_PACKET' },
+      orderBy: { createdAt: 'asc' }, select: { payload: true },
+    });
+    if (frozen) {
+      payload = frozen.payload as unknown as typeof payload;
+      requestId = payload.requestId;
+    } else {
+      // An existing packet may already be committed in 1C with its response lost.
+      // Rechecking stock then would count its own reservation as a shortage.
+      validateOrderReadyForExport(order);
+      await validateOrderStockBeforeExport(order);
+      payload = { ...buildQueuedOrderPayload(order), requestId };
+      await appendOrderEvent(prisma as unknown as Prisma.TransactionClient, { orderId: order.id, revision: order.revision,
+        source: OrderEventSource.SYSTEM, eventType: 'ORDER_EXPORT_PACKET', payload: JSON.parse(JSON.stringify(payload)) });
+    }
     console.info('[client-orders-export-worker] pushing order to 1C', {
       requestId,
       guid: payload.guid,
@@ -641,7 +693,11 @@ async function exportOrder(order: QueuedOrderForExport) {
       payload,
     });
   } finally {
-    await releaseOrderLock();
+    if (releaseOrderLock) await releaseOrderLock();
+    try {
+      if (acquired) await connection.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockKey]);
+      connection.release();
+    } catch { connection.release(true); }
   }
 }
 

@@ -18,6 +18,7 @@ import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
+import { lockOrderMutation } from '../orders/orderIntegrity';
 import { buildQueuedOrderPayload, clientOrderDirectPushLockKey, queuedOrderSelect } from './onec.orderQueuePayload';
 import {
   agreementsBatchSchema,
@@ -875,7 +876,10 @@ export const handleOrdersQueued = async (req: Request, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
       where: {
-        source: { in: [OrderSource.MANAGER_APP, OrderSource.MARKETPLACE_CLIENT] },
+        // One transport owner per order; uncorrelated legacy ACK cannot close a direct packet.
+        source: { in: process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED === '1'
+          ? [OrderSource.MANAGER_APP, OrderSource.MARKETPLACE_CLIENT]
+          : [OrderSource.MARKETPLACE_CLIENT] },
         status: { in: statuses },
         syncState: { in: syncStates },
       },
@@ -928,13 +932,18 @@ export const handleOrderAck = async (req: Request, res: Response) => {
     const syncedAt = now();
     const order = await prisma.order.findUnique({
       where: { guid: orderGuid },
-      select: { id: true, guid: true, revision: true },
+      select: { id: true, guid: true, revision: true, source: true },
     });
 
     if (!order) {
       const results: BatchResult[] = [{ key: orderGuid, status: 'error', error: 'Order not found' }];
       await safeCompleteSyncRun(runId, results, baseMeta, 'Order not found');
       return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (order.source === OrderSource.MANAGER_APP && process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED !== '1') {
+      await safeCompleteSyncRun(runId, [], baseMeta, 'Uncorrelated legacy ACK ignored for direct-push order');
+      return res.json({ success: true, acknowledged: false, deferred: true });
     }
 
     if (parsed.error) {
@@ -1063,13 +1072,19 @@ export const handleOrdersStatusBatch = async (req: Request, res: Response) => {
 
     await prisma.$transaction(async (tx) => {
       for (const item of parsed.items) {
+        await lockOrderMutation(tx, item.guid, true);
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
-          select: { id: true, guid: true },
+          select: { id: true, guid: true, syncState: true },
         });
 
         if (!order) {
           results.push({ key: item.guid, status: 'error', error: 'Order not found' });
+          continue;
+        }
+
+        if (order.syncState !== OrderSyncState.SYNCED) {
+          results.push({ key: item.guid, status: 'ok' });
           continue;
         }
 
@@ -1319,6 +1334,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
 
     await prisma.$transaction(async (tx) => {
       for (const item of parsed.items) {
+        await lockOrderMutation(tx, item.guid, true);
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
           select: { id: true, guid: true, revision: true, source: true, status: true, syncState: true },
@@ -1336,7 +1352,18 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
             order.status === OrderStatus.CONFIRMED ||
             order.status === OrderStatus.CANCELLED) &&
           item.revision === order.revision &&
-          item.baseRevision + 1 === order.revision;
+            item.baseRevision + 1 === order.revision;
+
+        // In particular, an old 1C snapshot must not turn a pending direct retry
+        // into CONFLICT and stop delivery of the immutable packet.
+        if (order.syncState !== OrderSyncState.SYNCED) {
+          await appendOrderEvent(tx, { orderId: order.id, revision: order.revision,
+            source: OrderEventSource.ONEC_IMPORT, eventType: 'ONEC_ORDER_SNAPSHOT_DEFERRED',
+            payload: item as unknown as Prisma.InputJsonValue,
+            note: 'Локальная редакция не подтверждена; входящий снимок не применён.' });
+          results.push({ key: item.guid, status: 'ok' });
+          continue;
+        }
 
         if (item.baseRevision !== order.revision && !isAckAlignedSnapshot) {
           await tx.order.update({
@@ -1360,12 +1387,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
           continue;
         }
 
-        if (
-          order.status === OrderStatus.QUEUED ||
-          order.syncState === OrderSyncState.QUEUED ||
-          order.syncState === OrderSyncState.ERROR ||
-          order.syncState === OrderSyncState.CONFLICT
-        ) {
+        if (order.status === OrderStatus.QUEUED) {
           const message = `Snapshot 1С отложен: заказ в состоянии ${order.status}/${order.syncState}, локальные строки не перезаписаны.`;
           await tx.order.update({
             where: { id: order.id },
