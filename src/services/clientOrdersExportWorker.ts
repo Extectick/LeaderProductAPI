@@ -262,11 +262,21 @@ export function assertSavedOrderDidNotLoseItems(order: QueuedOrderForExport, pay
   const localItemsCount = Array.isArray(order.items) ? order.items.length : 0;
   const savedItems = extractSavedOrderItems(payload);
   if (isCancelExportOrder(order)) return;
-  const expected = order.items.map((i) => ({ lineGuid: i.lineGuid, product: i.product?.guid, package: i.package?.guid ?? null, quantity: Number(i.quantity), cancelled: Boolean(i.isCancelled) }));
+  // 1C serializes base units (coefficient <= 1) as package=null.
+  const normalizedPackage = (guid: unknown, quantity: number, quantityBase: number) =>
+    quantity > 0 && quantityBase <= quantity ? null : guid ?? null;
+  const expected = order.items.map((i) => ({
+    lineGuid: i.lineGuid, product: i.product?.guid,
+    package: normalizedPackage(i.package?.guid, Number(i.quantity), Number(i.quantityBase ?? i.quantity)),
+    quantity: Number(i.quantity), quantityBase: Number(i.quantityBase ?? i.quantity), cancelled: Boolean(i.isCancelled),
+  }));
   const actual = savedItems?.map((value) => {
     const i = asRecord(value);
+    const quantity = Number(i?.quantity);
+    const quantityBase = Number(i?.quantityBase ?? i?.quantity);
     return { lineGuid: i?.appLineGuid ?? i?.lineGuid ?? i?.id, product: asRecord(i?.product)?.guid,
-      package: asRecord(i?.package)?.guid ?? null, quantity: Number(i?.quantity), cancelled: Boolean(i?.isCancelled) };
+      package: normalizedPackage(asRecord(i?.package)?.guid, quantity, quantityBase),
+      quantity, quantityBase, cancelled: Boolean(i?.isCancelled) };
   });
   const sorted = (items: typeof expected) => [...items].sort((a, b) => String(a.lineGuid).localeCompare(String(b.lineGuid)));
   if (localItemsCount && (!actual || stableOrderJson(sorted(expected)) !== stableOrderJson(sorted(actual as typeof expected)))) {
@@ -550,7 +560,7 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
     const applied = await tx.order.updateMany({
       where: { id: order.id, revision: order.revision, syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED },
       data: {
-        // Keep the operation exportable so the legacy 1C pull channel remains a reliable fallback.
+        // Only this direct worker retries the same immutable operation.
         syncState: isValidationError
           ? OrderSyncState.ERROR
           : isCancelExport
@@ -629,8 +639,6 @@ async function exportOrder(order: QueuedOrderForExport) {
     order = fresh;
     releaseOrderLock = await acquireOrderLock(String(order.guid));
     if (!releaseOrderLock) return;
-    validateOrderReadyForExport(order);
-    await validateOrderStockBeforeExport(order);
     const frozen = await prisma.orderEvent.findFirst({
       where: { orderId: order.id, revision: order.revision, eventType: 'ORDER_EXPORT_PACKET' },
       orderBy: { createdAt: 'asc' }, select: { payload: true },
@@ -639,6 +647,10 @@ async function exportOrder(order: QueuedOrderForExport) {
       payload = frozen.payload as unknown as typeof payload;
       requestId = payload.requestId;
     } else {
+      // An existing packet may already be committed in 1C with its response lost.
+      // Rechecking stock then would count its own reservation as a shortage.
+      validateOrderReadyForExport(order);
+      await validateOrderStockBeforeExport(order);
       payload = { ...buildQueuedOrderPayload(order), requestId };
       await appendOrderEvent(prisma as unknown as Prisma.TransactionClient, { orderId: order.id, revision: order.revision,
         source: OrderEventSource.SYSTEM, eventType: 'ORDER_EXPORT_PACKET', payload: JSON.parse(JSON.stringify(payload)) });

@@ -22,7 +22,7 @@ First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 
 - [x] Do not return old 1C items labelled with a newer API revision.
 - [x] APP confirmation, no blind conflict retry, no stale queue completion overwriting edits.
 - [x] Production-base regression suites and typechecks; real PostgreSQL lock test on isolated localhost:54329.
-- [ ] Forward-port and run checks on dev.
+- [x] Forward-port and run checks on dev; keep offline/tracking changes.
 - [ ] WMS15 end-to-end QA with loss of HTTP response, manual 1C edits and delayed responses.
 - [ ] Approved production deployment and OTA.
 
@@ -34,6 +34,8 @@ First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 
 - A deployment explicitly disabling the direct worker retains legacy pull transport and requires separate QA; do not silently switch this flag on rollback.
 - ACCESS_TOKEN_SECRET must be configured to sign review challenges. Missing secret fails closed.
 - Unknown-result direct packets block editing between retries. Stock/response mismatch validation stops automatic sending for manual review.
+- Retry an already frozen packet without a new stock preflight: the first request may already have reserved its stock in 1C.
+- Normalize the base-unit package=null representation returned by 1C; compare line identity, product, quantity and base quantity.
 - Financial validation/1C posting rules are unchanged. No changes to 1C sources in this hotfix.
 - Before release, record current image digest, back up DB, inspect pending operations, and test the APK/OTA runtime. No DB migration is required for this stage.
 
@@ -42,3 +44,13 @@ First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 
 Dedicated version/outbox tables and append-only operation ledger need a separately tested additive migration/baseline.
 Strict atomic compare-and-set against simultaneous manual edits inside 1C requires a 1C protocol change.
 Long-lived timeout/unknown-result reconciliation and old pull-only deployments need integration QA against WMS15.
+
+## Verification / delivery, 2026-09-18
+
+- Production-base API: TypeScript and 63 tests across 6 targeted suites passed.
+- Dev API: TypeScript and 81 targeted tests across 8 suites (includes geo and offline policy).
+- Real PostgreSQL test: localhost:54329 only; export/writer mutual exclusion and rollback verified without Redis.
+- APP: production-base 77 tests; dev 98 tests; both TypeScript checks passed.
+- Branches: hotfix/order-integrity-prod (production base), integration/order-integrity-dev (forward-port).
+- No push, production deployment, OTA or 1C update performed. The incident order was not resent or modified.
+- Release next: WMS15/device end-to-end QA, approved API deployment, then compatible APP OTA. Old APKs cannot confirm destructive changes.

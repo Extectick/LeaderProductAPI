@@ -6,6 +6,13 @@ const order: any = { id: 'order', guid: 'app', revision: 3, status: 'QUEUED', sy
     { lineGuid: 'line2', product: { guid: 'product2' }, quantity: 3, package: null, isCancelled: false }] };
 const response = () => ({ item: { isPostedIn1c: true, items: order.items.map((i: any) => ({ ...i })) } });
 describe('revision-bound export acknowledgement', () => {
+  it('accepts 1C base-unit package normalization but checks base quantity', () => {
+    const expected = { ...order, items: [{ ...order.items[0], quantityBase: 2, package: { guid: 'base-unit' } }] };
+    const payload = { item: { items: [{ ...order.items[0], quantityBase: 2, package: null }] } };
+    expect(() => assertSavedOrderDidNotLoseItems(expected, payload)).not.toThrow();
+    payload.item.items[0].quantityBase = 1;
+    expect(() => assertSavedOrderDidNotLoseItems(expected, payload)).toThrow();
+  });
   it('rejects a partial nonempty 1C response', () => {
     const payload = response(); payload.item.items.pop();
     expect(() => assertSavedOrderDidNotLoseItems(order, payload)).toThrow('Состав заказа');
