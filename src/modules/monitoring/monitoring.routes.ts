@@ -2,7 +2,6 @@ import express from 'express';
 import prisma from '../../prisma/client';
 import { authenticateToken, authorizeRoles } from '../../middleware/auth';
 import { checkUserStatus } from '../../middleware/checkUserStatus';
-import { rateLimit } from '../../middleware/rateLimit';
 import { parseSentryServiceHook, verifySentrySignature } from './crashEvents';
 
 export const sentryWebhookRouter = express.Router();
@@ -14,7 +13,23 @@ const enabled = (_req: express.Request, res: express.Response, next: express.Nex
   return next();
 };
 
-sentryWebhookRouter.post('/', enabled, rateLimit({ limit: 300 }),
+// Separate budget: ingestion must not consume the shared login/tracking IP limiter.
+let hookWindowStarted = 0;
+let hookRequests = 0;
+const consumeHookBudget = (res: express.Response): boolean => {
+  const now = Date.now();
+  if (now - hookWindowStarted >= 60_000) {
+    hookWindowStarted = now;
+    hookRequests = 0;
+  }
+  if (++hookRequests > 300) {
+    res.set('Retry-After', '60').sendStatus(429);
+    return false;
+  }
+  return true;
+};
+
+sentryWebhookRouter.post('/', enabled,
   express.raw({ type: 'application/json', limit: '512kb', inflate: false }), async (req, res) => {
     const secret = process.env.SENTRY_WEBHOOK_SECRET || '';
     const project = process.env.SENTRY_PROJECT_SLUG || '';
@@ -23,6 +38,8 @@ sentryWebhookRouter.post('/', enabled, rateLimit({ limit: 300 }),
     if (!Buffer.isBuffer(req.body) || !verifySentrySignature(req.body, req.get('X-ServiceHook-Signature') || '', secret)) {
       return res.sendStatus(401);
     }
+    // Invalid signatures cannot exhaust the trusted sender's delivery budget.
+    if (!consumeHookBudget(res)) return;
     let data: ReturnType<typeof parseSentryServiceHook>;
     try {
       data = parseSentryServiceHook(JSON.parse(req.body.toString('utf8')), project, environment);

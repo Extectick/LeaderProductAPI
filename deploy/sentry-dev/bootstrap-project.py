@@ -1,4 +1,4 @@
-"""Run inside `sentry shell` once. No secrets on stdout; keep the output private."""
+"""Run with `sentry exec` once. No secrets on stdout; keep the output private."""
 import json
 import os
 import secrets
@@ -20,7 +20,7 @@ if output.exists():
     print('Dev project already bootstrapped; credentials left unchanged')
 else:
     password = secrets.token_urlsafe(32)
-    with transaction.atomic():
+    with transaction.atomic(using='default'):
         user, created = User.objects.get_or_create(
             email='dev-admin@leader-product.ru',
             defaults={'username': 'dev-admin@leader-product.ru', 'is_superuser': True, 'is_staff': True, 'is_active': True},
@@ -37,6 +37,7 @@ else:
         project.teams.add(team)
         key = ProjectKey.objects.filter(project=project).first() or ProjectKey.objects.create(project=project)
         token = ApiToken.objects.create(user=user, name='Dev local symbol upload', scope_list=['project:releases', 'project:read', 'event:read', 'org:read'], expires_at=None, refresh_token=None)
+        read_token = ApiToken.objects.create(user=user, name='Dev crash reconciliation', scope_list=['event:read', 'project:read'], expires_at=None, refresh_token=None)
         hook, _ = ServiceHook.objects.get_or_create(
             project_id=project.id, url='https://dev.leader-product.ru/integrations/sentry/events',
             defaults={'organization_id': organization.id, 'actor_id': user.id, 'events': ['event.created']},
@@ -54,8 +55,16 @@ else:
             'sentryUrl': 'http://127.0.0.1:19000',
             'adminEmail': user.email, 'adminPassword': password,
             'authToken': token.plaintext_token, 'webhookSecret': hook.secret,
+            'readToken': read_token.plaintext_token,
         }
         # Create with restrictive mode from the start; docker cp goes to a locked directory.
         with os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
             json.dump(result, stream)
     print('Dev Sentry project and hook configured; credentials saved privately')
+
+bridge_output = Path('/data/leader-dev-bridge.json')
+if not bridge_output.exists():
+    saved = json.loads(output.read_text())
+    bridge = {key: saved[key] for key in ('organization', 'project', 'readToken', 'webhookSecret')}
+    with os.fdopen(os.open(bridge_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+        json.dump(bridge, stream)

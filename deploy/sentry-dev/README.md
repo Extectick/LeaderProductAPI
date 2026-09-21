@@ -10,6 +10,13 @@ Install with upstream `install.sh --skip-user-creation --no-report-self-hosted-i
 local Docker engine. Do not run against the production Docker context.
 The installer needs its bind-mount paths to resolve identically in the Docker daemon.
 Windows checkout line endings must be LF for Linux scripts.
+Wait for the installer process to exit, not only its final success message:
+its EXIT cleanup still stops the project's containers.
+
+On this Docker Desktop host add `start_interval: 30s` to both upstream anchors
+`x-healthcheck-defaults` and `x-file-healthcheck`. Docker's frequent default startup
+probes caused a process-spawn storm with the 4-CPU WSL limit. Keep the health tests
+enabled; apply with `docker compose up -d` after installation has exited.
 
 The public dev nginx proxies only SDK ingestion via a dedicated reverse SSH tunnel.
 Use a dedicated restricted SSH account/key allowing **only** remote loopback
@@ -23,9 +30,14 @@ Create project `leader-app-dev` (platform `react-native`) and service hook
 API requires APP_CRASH_REPORTING_ENABLED=true, SENTRY_PROJECT_SLUG=leader-app-dev,
 SENTRY_EXPECTED_ENVIRONMENT=development, SENTRY_WEBHOOK_SECRET=<service hook secret>.
 The hook uses HMAC-SHA256 over the unmodified UTF-8 body, X-ServiceHook-Signature.
+`bootstrap-project.py` runs with `sentry exec`, using an explicit default-DB
+transaction required by Sentry 26.9. Its private output must never enter Git.
 Use admin-only GET /admin/crash-events to inspect summaries; SDK user IDs are claims,
-not authentication. Keep Sentry event source as truth; webhook delivery isn't an
-exactly-once guarantee and its HTTP retry behaviour must be verified before rollout.
+not authentication. Sentry is the source of truth. `compose.bridge.yml` adds a
+read-only reconciler: it pages through recent events and retries delivery to API.
+Its durable cursor advances only after every event on the page is acknowledged;
+API upserts make repeated webhook/reconciliation deliveries harmless. The bridge
+uses its own read-only Sentry token, never the build token or admin password.
 
 For APP builds use the public ingestion DSN, but SENTRY_URL=http://127.0.0.1:19000
 for local symbol/map upload. Set SENTRY_ORG/SENTRY_PROJECT and SENTRY_AUTH_TOKEN
