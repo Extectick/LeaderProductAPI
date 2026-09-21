@@ -10,7 +10,6 @@ jest.mock('../src/middleware/auth', () => ({
   authorizeRoles: () => (req: any, res: any, next: any) => req.headers.authorization === 'Bearer admin' ? next() : res.sendStatus(403),
 }));
 jest.mock('../src/middleware/checkUserStatus', () => ({ checkUserStatus: (_req: any, _res: any, next: any) => next() }));
-jest.mock('../src/middleware/rateLimit', () => ({ rateLimit: () => (_req: any, _res: any, next: any) => next() }));
 
 import prisma from '../src/prisma/client';
 import { crashEventsRouter, sentryWebhookRouter } from '../src/modules/monitoring/monitoring.routes';
