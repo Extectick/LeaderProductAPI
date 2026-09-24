@@ -21,7 +21,12 @@ import {
   OnecLpAppNetworkError,
   postOnecLpAppClientOrder,
   putOnecLpAppClientOrder,
+  pingOnecLpApp,
 } from '../modules/onec/onec.lpApp.client';
+import {
+  ATOMIC_ORDER_WRITE_PROTOCOL, OnecOrderWriteUncertainError,
+  reconcilePreviousOrderWrite, supportsAtomicOrderWrite,
+} from '../modules/onec/onec.orderWriteSafety';
 import { appendOrderEvent } from '../modules/orders/orderEvents';
 import { getLiveProductsByGuids } from '../modules/clientOrders/clientOrders.onecLive';
 
@@ -537,13 +542,15 @@ export async function markOrderExportSuccess(order: QueuedOrderForExport, payloa
   });
 }
 
-async function markOrderExportFailure(order: QueuedOrderForExport, error: unknown, context?: ExportFailureContext) {
+export async function markOrderExportFailure(order: QueuedOrderForExport, error: unknown, context?: ExportFailureContext) {
   const failedAt = new Date();
   const message = errorMessage(error).slice(0, 1000);
   const nextAttempts = (order.exportAttempts ?? 0) + 1;
   const debugPayload = context ? serializeDebugPayload(context.payload) : null;
   const isCancelExport = isCancelExportOrder(order);
   const isValidationError = error instanceof ClientOrderExportValidationError;
+  const isWriteUncertain = error instanceof OnecOrderWriteUncertainError;
+  const stopRetry = isValidationError || isWriteUncertain;
 
   await prisma.$transaction(async (tx) => {
     const current = await tx.order.findFirst({
@@ -561,7 +568,7 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
       where: { id: order.id, revision: order.revision, syncState: isCancelExport ? OrderSyncState.CANCEL_REQUESTED : OrderSyncState.QUEUED },
       data: {
         // Only this direct worker retries the same immutable operation.
-        syncState: isValidationError
+        syncState: stopRetry
           ? OrderSyncState.ERROR
           : isCancelExport
             ? OrderSyncState.CANCEL_REQUESTED
@@ -584,8 +591,9 @@ async function markOrderExportFailure(order: QueuedOrderForExport, error: unknow
         requestId: context?.requestId ?? null,
         transport: context?.transport ?? null,
         attempts: nextAttempts,
-        willRetry: !isValidationError,
-        nextRetryBackoffMs: isValidationError ? null : getBackoffMs(nextAttempts),
+        willRetry: !stopRetry,
+        nextRetryBackoffMs: stopRetry ? null : getBackoffMs(nextAttempts),
+        code: isWriteUncertain ? error.code : null,
         error: message,
         validationError: isValidationError,
         itemErrors: isValidationError ? error.itemErrors : [],
@@ -620,7 +628,7 @@ async function loadExportCandidates() {
   return orders.filter((order) => shouldAttempt(order, nowMs)).slice(0, getBatchSize());
 }
 
-async function exportOrder(order: QueuedOrderForExport) {
+export async function exportOrder(order: QueuedOrderForExport) {
   // Session-level PostgreSQL lock survives Redis outages and slow 1C requests.
   // No SQL transaction is kept open while waiting for the network.
   const connection = await pool.connect();
@@ -628,7 +636,7 @@ async function exportOrder(order: QueuedOrderForExport) {
   let acquired = false;
   let releaseOrderLock: (() => Promise<void>) | null = null;
   let requestId: string = randomUUID();
-  let payload: ReturnType<typeof buildQueuedOrderPayload> & { requestId: string } = { ...buildQueuedOrderPayload(order), requestId };
+  let payload: ReturnType<typeof buildQueuedOrderPayload> & { requestId: string; writeProtocol?: string } = { ...buildQueuedOrderPayload(order), requestId };
   let transport: ExportFailureContext['transport'] = 'POST';
 
   try {
@@ -643,8 +651,20 @@ async function exportOrder(order: QueuedOrderForExport) {
       where: { orderId: order.id, revision: order.revision, eventType: 'ORDER_EXPORT_PACKET' },
       orderBy: { createdAt: 'asc' }, select: { payload: true },
     });
+    // Look across revisions: editing/resubmitting must not bypass an uncertain
+    // earlier create. Success ACKs close an operation; PUSH_ERROR does not.
+    const previousOperation = await prisma.orderEvent.findFirst({
+      where: { orderId: order.id, eventType: { in: [
+        'ORDER_EXPORT_PACKET', 'ONEC_ORDER_PUSH_OK', 'ONEC_ORDER_PUSH_SAVED_NOT_POSTED', 'ONEC_ORDER_CANCEL_PUSH_OK',
+      ] } },
+      orderBy: { createdAt: 'desc' }, select: { eventType: true, payload: true },
+    });
     if (frozen) {
       payload = frozen.payload as unknown as typeof payload;
+      if (!payload || typeof payload.guid !== 'string' || payload.guid.toLowerCase() !== String(order.guid).toLowerCase()
+          || payload.revision !== order.revision || typeof payload.requestId !== 'string' || !payload.requestId.trim()) {
+        throw new OnecOrderWriteUncertainError('Сохраненный пакет не соответствует заказу или его ревизии.');
+      }
       requestId = payload.requestId;
     } else {
       // An existing packet may already be committed in 1C with its response lost.
@@ -652,6 +672,19 @@ async function exportOrder(order: QueuedOrderForExport) {
       validateOrderReadyForExport(order);
       await validateOrderStockBeforeExport(order);
       payload = { ...buildQueuedOrderPayload(order), requestId };
+    }
+    const atomicWriteAvailable = supportsAtomicOrderWrite(await pingOnecLpApp());
+    const previousPacket = previousOperation?.eventType === 'ORDER_EXPORT_PACKET'
+      ? previousOperation.payload : frozen?.payload;
+    if (previousPacket && !isCancelExportOrder(order)) {
+      const recovered = await reconcilePreviousOrderWrite(previousPacket, payload, atomicWriteAvailable);
+      if (recovered) {
+        await markOrderExportSuccess(order, recovered, requestId, 'GET_RECONCILED');
+        return;
+      }
+    }
+    if (!frozen) {
+      if (atomicWriteAvailable) payload.writeProtocol = ATOMIC_ORDER_WRITE_PROTOCOL;
       await appendOrderEvent(prisma as unknown as Prisma.TransactionClient, { orderId: order.id, revision: order.revision,
         source: OrderEventSource.SYSTEM, eventType: 'ORDER_EXPORT_PACKET', payload: JSON.parse(JSON.stringify(payload)) });
     }

@@ -41,6 +41,7 @@ jobs:
       - run: npm run type-check
       - run: npm run test:unit -- --runInBand __tests__/crashEvents.unit.test.ts __tests__/crashRoutes.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/onec.orderWriteSafety.unit.test.ts __tests__/clientOrdersExportRetry.unit.test.ts
 
   build-and-push:
     needs: order-integrity-check
