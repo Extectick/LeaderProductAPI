@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import prisma from '../../prisma/client';
 import type { CatalogChangesQuery, CatalogSnapshotQuery } from './catalog.schemas';
+import { getOfflineExportPolicy, scopedEpoch } from '../clientOrders/offlineExportPolicy';
 
 const STATE_ID = 'nomenclature';
 const SCHEMA_VERSION = 1;
@@ -116,9 +117,10 @@ async function imageHashesByProduct(productGuids: string[]) {
 
 export async function getCatalogManifest() {
   await pruneCatalogChangesIfNeeded();
+  const policy = await getOfflineExportPolicy();
   const [state, productCount, firstChange] = await Promise.all([
     getState(),
-    prisma.product.count({ where: { isActive: true } }),
+    prisma.product.count({ where: { isActive: true, ...(policy ? { guid: { in: policy.productGuids } } : {}) } }),
     prisma.catalogChange.findFirst({ orderBy: { revision: 'asc' }, select: { revision: true } }),
   ]);
   const minAvailableRevision = firstChange?.revision ?? state.currentRevision;
@@ -129,7 +131,7 @@ export async function getCatalogManifest() {
     });
   }
   return {
-    epoch: state.epoch,
+    epoch: scopedEpoch(state.epoch, policy),
     schemaVersion: state.schemaVersion,
     revision: state.currentRevision.toString(),
     minAvailableRevision: minAvailableRevision.toString(),
@@ -148,7 +150,9 @@ function validateEpoch(actual: string, requested?: string) {
 
 export async function getCatalogSnapshot(query: CatalogSnapshotQuery) {
   const state = await getState();
-  validateEpoch(state.epoch, query.epoch);
+  const policy = await getOfflineExportPolicy();
+  const epoch = scopedEpoch(state.epoch, policy);
+  validateEpoch(epoch, query.epoch);
   const snapshotRevision = query.snapshotRevision === undefined
     ? state.currentRevision
     : BigInt(query.snapshotRevision);
@@ -159,7 +163,7 @@ export async function getCatalogSnapshot(query: CatalogSnapshotQuery) {
   const rows = await loadProducts(
     {
       isActive: true,
-      ...(query.cursor ? { guid: { gt: query.cursor } } : {}),
+      guid: { ...(policy ? { in: policy.productGuids } : {}), ...(query.cursor ? { gt: query.cursor } : {}) },
     },
     query.limit + 1
   );
@@ -168,7 +172,7 @@ export async function getCatalogSnapshot(query: CatalogSnapshotQuery) {
   const hashes = await imageHashesByProduct(page.map((item) => item.guid));
 
   return {
-    epoch: state.epoch,
+    epoch,
     schemaVersion: state.schemaVersion,
     snapshotRevision: snapshotRevision.toString(),
     items: page.map((row) => serializeProduct(row, hashes.get(row.guid))),
@@ -179,7 +183,10 @@ export async function getCatalogSnapshot(query: CatalogSnapshotQuery) {
 
 export async function getCatalogChanges(query: CatalogChangesQuery) {
   const state = await getState();
-  validateEpoch(state.epoch, query.epoch);
+  const policy = await getOfflineExportPolicy();
+  const epoch = scopedEpoch(state.epoch, policy);
+  const allowed = policy ? new Set(policy.productGuids) : null;
+  validateEpoch(epoch, query.epoch);
   const afterRevision = BigInt(query.afterRevision);
   if (afterRevision < state.minAvailableRevision && afterRevision !== state.currentRevision) {
     throw new CatalogError(409, 'История изменений каталога устарела. Требуется полная синхронизация.');
@@ -204,7 +211,7 @@ export async function getCatalogChanges(query: CatalogChangesQuery) {
     .sort((a, b) => (a.revision < b.revision ? -1 : a.revision > b.revision ? 1 : 0))
     .map((change) => {
       const product = byGuid.get(change.productGuid);
-      const deleted = !product || product.isActive === false;
+      const deleted = !product || product.isActive === false || (allowed !== null && !allowed.has(change.productGuid));
       return {
         revision: change.revision.toString(),
         productGuid: change.productGuid,
@@ -215,7 +222,7 @@ export async function getCatalogChanges(query: CatalogChangesQuery) {
   const nextRevision = page.length ? page[page.length - 1].revision : afterRevision;
 
   return {
-    epoch: state.epoch,
+    epoch,
     schemaVersion: state.schemaVersion,
     fromRevision: afterRevision.toString(),
     nextRevision: nextRevision.toString(),

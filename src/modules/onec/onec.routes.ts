@@ -1,16 +1,19 @@
 import { Router } from 'express';
+import { offlineExportPolicySchema, saveOfflineExportPolicy } from '../clientOrders/offlineExportPolicy';
 import {
   handleAgreementsBatch,
   handleContractsBatch,
   handleCounterpartiesBatch,
   handleEntityClear,
   handleNomenclatureBatch,
+  handleManagerStockBatch,
   handleOrganizationsBatch,
   handleOrderAck,
   handleOrdersQueued,
   handleOrdersSnapshotBatch,
   handleOrdersStatusBatch,
   handleProductPricesBatch,
+  handleSellingPricesBatch,
   handleSchema,
   handleSpecialPricesBatch,
   handleSyncSessionComplete,
@@ -25,6 +28,14 @@ import {
 const router = Router();
 
 router.use(onecAuthMiddleware);
+
+router.post('/offline-policy', async (req, res, next) => {
+  const parsed = offlineExportPolicySchema.safeParse(req.body.policy);
+  if (!parsed.success) return res.status(400).json({ success: false, error: 'Некорректная область офлайн-выгрузки' });
+  try {
+    return res.json({ success: true, ...(await saveOfflineExportPolicy(parsed.data)) });
+  } catch (error) { return next(error); }
+});
 
 router.post('/sync/session/start', handleSyncSessionStart);
 router.post('/sync/session/complete', handleSyncSessionComplete);
@@ -185,6 +196,7 @@ router.post('/organizations/batch', handleOrganizationsBatch);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/stock/batch', handleStockBatch);
+router.post('/manager-stock/batch', handleManagerStockBatch);
 
 /**
  * @openapi
@@ -514,6 +526,7 @@ router.post('/agreements/batch', handleAgreementsBatch);
  *             schema: { $ref: '#/components/schemas/ApiError' }
  */
 router.post('/product-prices/batch', handleProductPricesBatch);
+router.post('/selling-prices/batch', handleSellingPricesBatch);
 
 /**
  * @openapi

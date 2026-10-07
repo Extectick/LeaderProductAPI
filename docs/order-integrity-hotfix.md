@@ -24,7 +24,7 @@ First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 
 - [x] Production-base regression suites and typechecks; real PostgreSQL lock test on isolated localhost:54329.
 - [x] Forward-port and run checks on dev; keep offline/tracking changes.
 - [ ] WMS15 end-to-end QA with loss of HTTP response, manual 1C edits and delayed responses.
-- [ ] Approved production deployment and OTA.
+- [x] Approved production deployment and OTA (2026-09-18).
 
 ## Compatibility / operational details
 
@@ -54,3 +54,23 @@ Long-lived timeout/unknown-result reconciliation and old pull-only deployments n
 - Branches: hotfix/order-integrity-prod (production base), integration/order-integrity-dev (forward-port).
 - No push, production deployment, OTA or 1C update performed. The incident order was not resent or modified.
 - Release next: WMS15/device end-to-end QA, approved API deployment, then compatible APP OTA. Old APKs cannot confirm destructive changes.
+
+## Production release, 2026-09-18 (subsequent user approval)
+
+- API main/origin: fb45be08bffe218829fa6851bfe3fb9f0ddcb9f7.
+- API workflow: https://github.com/Extectick/LeaderProductAPI/actions/runs/35329633786 — success.
+- APP main/origin: 2b865b4e7cb6b33217f4caed95cf2eebb1a0a0ec.
+- OTA workflow: https://github.com/Extectick/LeaderProductAPP/actions/runs/35330170252 — success.
+- Web APP workflow: https://github.com/Extectick/LeaderProductAPP/actions/runs/35330170313 — success.
+- APK workflow 35330170309 succeeded with APK build skipped: no native changes.
+- Production OTA: 0.1.26.4, runtime 0.1.26, updateId 810d73e8-fe05-48ca-9c3e-b602862e521e.
+- Verified public manifest, downloaded bundle (19,985,525 bytes), matching SHA-256; current update returns 204.
+- API health: production, DB/Redis/S3 OK; API container healthy; web HTTP 200.
+- Read-only in-process production smoke: reducing the incident order's 5 lines to 3 produces a review challenge; exact signed confirmation accepted. No order writes/resends during verification. This is not a device/WMS15 end-to-end test.
+- Pre-release schema diff: no difference. Queue: no QUEUED/CANCEL_REQUESTED orders; 2 pre-existing ERROR orders remained unchanged.
+- Backup: /opt/leader-api/restores/order-integrity-release-20260918-oattFs/LeaderAPI.dump (14 MB, pg_restore list validated).
+- Backup SHA-256: ebd2b9a9c3b1c25ddde6cde6022293087594baec7fc26dc22ef7729eb19034a0.
+- Previous API image: sha256:d16cef52d0a8bed79163b33bace6f0835dbf93db089cc0acebdf7e5d86ef5bb4.
+- Current API image: sha256:7356ada957366ae75e68942eac7332d9c98b288da61b37a39bcb98fba847f30c.
+- Rollback image tags retained on server: leaderproductapi:rollback-order-integrity-20260918 and leaderproductapp:rollback-order-integrity-20260918 (ghcr.io/extectick namespace).
+- No 1C source/configuration update and no dev deployment in this release. Forward-port remains in local dev.

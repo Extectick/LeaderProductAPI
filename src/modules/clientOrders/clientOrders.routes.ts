@@ -31,6 +31,9 @@ import {
   clientOrdersProductsQuerySchema,
   clientOrdersReferenceDataQuerySchema,
   clientOrdersWarehousesQuerySchema,
+  offlineChangesQuerySchema,
+  offlineDatasetParamsSchema,
+  offlineSnapshotQuerySchema,
   orderGuidParamsSchema,
   orderInvoiceParamsSchema,
 } from './clientOrders.schemas';
@@ -51,6 +54,7 @@ import {
   getClientOrderByGuid,
   getClientOrderExportDebug,
   getClientOrderDefaults,
+  getClientOrderByClientId,
   getClientOrderProductImagesStatus,
   getClientOrderReferenceDetails,
   getClientOrderSettings,
@@ -73,6 +77,11 @@ import {
   updateClientOrder,
   updateClientOrderSettings,
 } from './clientOrders.service';
+import {
+  getOfflineChanges,
+  getOfflineManifest,
+  getOfflineSnapshot,
+} from './offlineClientOrders.service';
 
 const router = express.Router();
 
@@ -90,7 +99,7 @@ const handleError = (res: express.Response, err: unknown, fallbackMessage: strin
     return res.status(err.status).json(errorResponse(err.message, ErrorCodes.CONFLICT, err.details));
   }
   if (err instanceof ClientOrdersError) {
-    return res.status(err.status).json(errorResponse(err.message, err.code));
+    return res.status(err.status).json(errorResponse(err.message, err.code, err.details));
   }
   if (err instanceof ZodError) {
     return res.status(400).json(errorResponse(validationMessage(err), ErrorCodes.VALIDATION_ERROR));
@@ -414,6 +423,65 @@ router.post('/product-images/cleanup', authorizePermissions(['manage_client_orde
     return res.json(successResponse(result, 'Очистка старых фотографий номенклатуры выполнена'));
   } catch (err) {
     return handleError(res, err, 'Ошибка очистки старых фотографий номенклатуры');
+  }
+});
+
+router.get('/offline/manifest', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  try {
+    const result = await getOfflineManifest(req.user!.userId);
+    return res.json(successResponse(result, 'Версии офлайн-данных'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения версий офлайн-данных');
+  }
+});
+
+router.get('/offline/:entity/snapshot', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = offlineDatasetParamsSchema.safeParse(req.params);
+  const query = offlineSnapshotQuerySchema.safeParse(req.query);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!query.success) {
+    return res.status(400).json(errorResponse(validationMessage(query.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await getOfflineSnapshot(req.user!.userId, params.data.entity, query.data);
+    return res.json(successResponse(result, 'Снимок офлайн-данных'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения снимка офлайн-данных');
+  }
+});
+
+router.get('/offline/:entity/changes', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = offlineDatasetParamsSchema.safeParse(req.params);
+  const query = offlineChangesQuerySchema.safeParse(req.query);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  if (!query.success) {
+    return res.status(400).json(errorResponse(validationMessage(query.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await getOfflineChanges(req.user!.userId, params.data.entity, {
+      ...query.data,
+      afterRevision: BigInt(query.data.afterRevision),
+    });
+    return res.json(successResponse(result, 'Изменения офлайн-данных'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка получения изменений офлайн-данных');
+  }
+});
+
+router.get('/by-client-id/:clientOrderId', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const params = clientOrderIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.status(400).json(errorResponse(validationMessage(params.error), ErrorCodes.VALIDATION_ERROR));
+  }
+  try {
+    const result = await getClientOrderByClientId(req.user!.userId, params.data.clientOrderId);
+    return res.json(successResponse(result, 'Заказ клиента найден'));
+  } catch (err) {
+    return handleError(res, err, 'Ошибка сверки заказа клиента');
   }
 });
 

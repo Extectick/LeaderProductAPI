@@ -87,6 +87,14 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
     isSystem: true,
     serviceKey: 'transport_tasks',
   },
+  {
+    key: 'service_tracking',
+    displayName: 'Сервис: Геомаршруты',
+    description: 'Права на запись и просмотр геомаршрутов сотрудников.',
+    sortOrder: 150,
+    isSystem: true,
+    serviceKey: 'tracking',
+  },
 ];
 
 export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
@@ -142,6 +150,11 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { name: 'view_transport_tasks', displayName: 'Просмотр заданий на перевозку', description: 'Разрешает просматривать задания на перевозку из 1С.', groupKey: 'service_transport_tasks' },
   { name: 'update_transport_route_order', displayName: 'Изменение порядка маршрута', description: 'Разрешает сохранять новый порядок точек маршрута задания на перевозку.', groupKey: 'service_transport_tasks' },
   { name: 'manage_transport_tasks', displayName: 'Управление заданиями на перевозку', description: 'Разрешает смотреть задания других водителей и управлять привязками к 1С.', groupKey: 'service_transport_tasks' },
+  { name: 'record_own_tracking', displayName: 'Запись своего маршрута', description: 'Разрешает устройству пользователя записывать собственный геомаршрут.', groupKey: 'service_tracking' },
+  { name: 'view_own_tracking', displayName: 'Просмотр своего маршрута', description: 'Разрешает просматривать собственный геомаршрут.', groupKey: 'service_tracking' },
+  { name: 'view_department_tracking', displayName: 'Маршруты своего отдела', description: 'Разрешает руководителю просматривать геомаршруты сотрудников своего отдела.', groupKey: 'service_tracking' },
+  { name: 'view_all_tracking', displayName: 'Все геомаршруты', description: 'Разрешает просматривать геомаршруты всех сотрудников.', groupKey: 'service_tracking' },
+  { name: 'request_tracking_location', displayName: 'Запрос текущей геопозиции', description: 'Разрешает запросить актуальную геопозицию доступного сотрудника.', groupKey: 'service_tracking' },
 ];
 
 export const PERMISSION_CATALOG_BY_NAME = new Map(
@@ -192,6 +205,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'create_client_order_from_counterparty',
     'view_transport_tasks',
     'update_transport_route_order',
+    'record_own_tracking',
+    'view_own_tracking',
   ],
   department_manager: [
     'assign_appeal',
@@ -207,5 +222,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'view_counterparty_contacts',
     'create_client_order_from_counterparty',
     'manage_transport_tasks',
+    'record_own_tracking',
+    'view_own_tracking',
+    'view_department_tracking',
+    'request_tracking_location',
   ],
 };

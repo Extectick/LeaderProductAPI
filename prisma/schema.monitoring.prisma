@@ -1,0 +1,28 @@
+// Diagnostic identities are claims from SDK events, not authorization identities.
+// Do not cascade business-user deletion into the technical event history.
+model AppCrashEvent {
+  id            String   @id @default(uuid())
+  project       String   @db.VarChar(100)
+  eventId       String   @db.VarChar(32)
+  issueId       String?  @db.VarChar(32)
+  environment   String   @db.VarChar(32)
+  occurredAt    DateTime
+  receivedAt    DateTime @default(now())
+  title         String   @db.VarChar(300)
+  level         String   @db.VarChar(20)
+  platform      String?  @db.VarChar(40)
+  release       String?  @db.VarChar(200)
+  dist          String?  @db.VarChar(100)
+  reportedUserId String? @db.VarChar(64)
+  appVersion    String?  @db.VarChar(40)
+  buildNumber   String?  @db.VarChar(40)
+  otaUpdateId   String?  @db.VarChar(64)
+  runtimeVersion String? @db.VarChar(40)
+  screen        String?  @db.VarChar(160)
+  deviceModel   String?  @db.VarChar(100)
+  osVersion     String?  @db.VarChar(40)
+
+  @@unique([project, eventId])
+  @@index([occurredAt, id])
+  @@index([reportedUserId, occurredAt])
+}

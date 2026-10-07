@@ -1,0 +1,26 @@
+name: leader-sentry-dev-bridge
+services:
+  bridge:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "-u", "/app/bridge.py"]
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 128m
+    cpus: 0.25
+    volumes:
+      - ./bridge.py:/app/bridge.py:ro
+      - C:/ProgramData/LeaderProduct/SentryDevTunnel/bridge.json:/run/secrets/bridge.json:ro
+      - state:/state
+    networks: [sentry]
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+networks:
+  sentry:
+    external: true
+    name: leader-sentry-dev_default
+volumes:
+  state:
+    name: leader_sentry_dev_bridge_state

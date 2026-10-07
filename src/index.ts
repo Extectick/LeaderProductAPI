@@ -19,6 +19,7 @@ import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
 import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
+import trackingV2Router from './routes/trackingV2';
 import updatesRouter from './routes/updates';
 import otaRouter from './routes/ota';
 import filesRouter from './routes/files';
@@ -32,7 +33,10 @@ import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import counterpartiesRouter from './modules/counterparties/counterparties.routes';
 import catalogRouter from './modules/catalog/catalog.routes';
+import { sentryWebhookRouter, crashEventsRouter } from './modules/monitoring/monitoring.routes';
+import { startCrashRetention, stopCrashRetention } from './modules/monitoring/crashRetention';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
+import { startTrackingMaintenance, stopTrackingMaintenance } from './services/trackingMaintenanceService';
 import {
   startClientOrdersExportWorker,
   stopClientOrdersExportWorker,
@@ -156,6 +160,8 @@ app.use(
 // ---- Common middlewares ----
 morgan.token('safe-url', (req) => redactSensitiveUrl((req as any).originalUrl || req.url || ''));
 app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]'));
+// Must precede JSON parsing and debug/Kafka logging: signature covers original bytes.
+app.use('/integrations/sentry/events', sentryWebhookRouter);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
@@ -178,6 +184,7 @@ app.use('/users', usersRouter);
 app.use('/departments', departmentsRouter);
 app.use('/qr', qrRouter);
 app.use('/password-reset', passwordResetRouter);
+app.use('/tracking', trackingV2Router);
 app.use('/tracking', trackingRouter);
 app.use('/services', servicesRouter);
 app.use('/stock-balances', stockBalancesRouter);
@@ -193,6 +200,7 @@ app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/client-orders', clientOrdersRouter);
 app.use('/api/counterparties', counterpartiesRouter);
 app.use('/api/catalog', catalogRouter);
+app.use('/admin/crash-events', crashEventsRouter);
 
 app.use(
   '/appeals',
@@ -481,6 +489,8 @@ if (ENV !== 'test') {
 
     // 4) Запускаем фоновые задачи приложения
     startScheduledJobs();
+    startTrackingMaintenance();
+    startCrashRetention();
     startClientOrdersExportWorker();
     startClientOrderInvoiceWorker();
 
@@ -534,6 +544,8 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
+  stopTrackingMaintenance();
+  stopCrashRetention();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
@@ -546,6 +558,8 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
+  stopTrackingMaintenance();
+  stopCrashRetention();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});

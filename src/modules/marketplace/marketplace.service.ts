@@ -903,8 +903,9 @@ export async function updateClientContext(userId: number, body: MeContextUpdateB
       deliveryAddress = null;
     } else if (isGuidProvided(body.activeDeliveryAddressGuid)) {
       deliveryAddress = ensureActive(
-        await prisma.deliveryAddress.findUnique({
-          where: { guid: body.activeDeliveryAddressGuid },
+        await prisma.deliveryAddress.findFirst({
+          where: { guid: body.activeDeliveryAddressGuid,
+            counterpartyId: counterparty?.id ?? agreement?.counterpartyId ?? contract?.counterpartyId ?? undefined },
           select: { id: true, guid: true, fullAddress: true, isActive: true, counterpartyId: true, isDefault: true },
         }),
         'Адрес доставки'
@@ -1220,8 +1221,9 @@ const resolveOrderContext = async (userId: number, body: OrderCreateBody): Promi
       deliveryAddress = null;
     } else if (isGuidProvided(body.deliveryAddressGuid)) {
       deliveryAddress = ensureActive(
-        await prisma.deliveryAddress.findUnique({
-          where: { guid: body.deliveryAddressGuid },
+        await prisma.deliveryAddress.findFirst({
+          where: { guid: body.deliveryAddressGuid,
+            counterpartyId: counterparty?.id ?? agreement?.counterpartyId ?? contract?.counterpartyId ?? undefined },
           select: { id: true, guid: true, fullAddress: true, isActive: true, counterpartyId: true },
         }),
         'Адрес доставки'

@@ -1,0 +1,75 @@
+name: leader-api-dev
+
+services:
+  api:
+    image: ghcr.io/extectick/leaderproductapi:${IMAGE_TAG:-dev}
+    container_name: leader_api_dev
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?DB_PASSWORD is required}@postgres-dev:5432/${DB_NAME:-LeaderAPI_dev}?schema=public
+      REDIS_URL: redis://redis-dev:6379
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-lp-dev:}
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: ${KAFKA_CLIENT_ID:-leader-api-dev}
+      KAFKA_REQUEST_TOPIC: ${KAFKA_REQUEST_TOPIC:-api-requests-dev}
+      DEBUG_REQUESTS: ${DEBUG_REQUESTS:-0}
+      ALLOW_DEBUG_IN_PROD: "0"
+    ports:
+      - 127.0.0.1:${DEV_API_HOST_PORT:-3001}:3000
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      redis-dev:
+        condition: service_healthy
+    networks:
+      - default
+      - production-infrastructure
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  postgres-dev:
+    image: postgres:16-alpine
+    container_name: leader_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-LeaderAPI_dev}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME:-LeaderAPI_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis-dev:
+    image: redis:7-alpine
+    container_name: leader_redis_dev
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  production-infrastructure:
+    external: true
+    name: leader-api_default
+
+volumes:
+  postgres_dev_data:
+    name: leader_api_dev_postgres_data
+  redis_dev_data:
+    name: leader_api_dev_redis_data

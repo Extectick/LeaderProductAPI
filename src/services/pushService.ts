@@ -6,11 +6,14 @@ const expo = new Expo({
 });
 
 type PushPayload = {
-  title: string;
-  body: string;
+  title?: string;
+  body?: string;
   data?: Record<string, any>;
   sound?: 'default' | null;
   channelId?: string;
+  dataOnly?: boolean;
+  priority?: 'default' | 'normal' | 'high';
+  ttl?: number;
 };
 
 export async function sendPushToUser(userId: number, payload: PushPayload) {
@@ -28,41 +31,43 @@ export async function sendPushToUser(userId: number, payload: PushPayload) {
 
   const messages: ExpoPushMessage[] = expoTokens.map((token) => ({
     to: token,
-    title: payload.title,
-    body: payload.body,
+    ...(!payload.dataOnly && payload.title ? { title: payload.title } : {}),
+    ...(!payload.dataOnly && payload.body ? { body: payload.body } : {}),
     data: payload.data,
-    sound: payload.sound ?? 'default',
-    channelId: payload.channelId,
+    ...(!payload.dataOnly ? { sound: payload.sound ?? 'default' } : {}),
+    ...(!payload.dataOnly && payload.channelId ? { channelId: payload.channelId } : {}),
+    ...(payload.priority ? { priority: payload.priority } : {}),
+    ...(typeof payload.ttl === 'number' ? { ttl: payload.ttl } : {}),
   }));
 
   const chunks = expo.chunkPushNotifications(messages);
   const tickets: ExpoPushTicket[] = [];
+  const invalidTokens: string[] = [];
 
   for (const chunk of chunks) {
     try {
       const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
       tickets.push(...ticketChunk);
+      ticketChunk.forEach((ticket, index) => {
+        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+          const token = chunk[index]?.to;
+          if (typeof token === 'string') invalidTokens.push(token);
+        }
+      });
     } catch (error) {
       console.error('[push] Failed to send chunk', error);
     }
   }
 
   // Remove invalid tokens immediately if Expo reports them
-  const invalidTokens: string[] = [];
-  tickets.forEach((ticket, idx) => {
-    if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
-      const token = (messages[idx]?.to as string) || '';
-      if (token) invalidTokens.push(token);
-    }
-  });
-
   if (invalidTokens.length) {
     await prisma.deviceToken.deleteMany({
       where: { token: { in: invalidTokens } },
     });
   }
 
-  return { ok: true, ticketsCount: tickets.length };
+  const acceptedCount = tickets.filter((ticket) => ticket.status === 'ok').length;
+  return { ok: acceptedCount > 0, reason: acceptedCount ? null : 'push_rejected', ticketsCount: tickets.length, acceptedCount };
 }
 
 export async function notifyProfileActivated(userId: number, profileType: string) {

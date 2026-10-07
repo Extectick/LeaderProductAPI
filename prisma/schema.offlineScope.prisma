@@ -1,0 +1,6 @@
+// Authoritative download policy from 1C; does not delete shared API records.
+model OfflineExportPolicy {
+  id        String   @id @default("client-orders")
+  payload   Json
+  updatedAt DateTime @updatedAt
+}

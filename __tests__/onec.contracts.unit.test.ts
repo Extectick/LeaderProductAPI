@@ -77,8 +77,8 @@ describe('1C route contracts', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(response.body.version).toBe('1.3.0');
-    expect(response.body.entities).toHaveLength(9);
+    expect(response.body.version).toBe('1.4.0');
+    expect(response.body.entities).toHaveLength(11);
     expect(response.body.entities.map((entity: any) => entity.code)).toEqual([
       'nomenclature',
       'warehouses',
@@ -89,6 +89,8 @@ describe('1C route contracts', () => {
       'product-prices',
       'special-prices',
       'stock',
+      'selling-prices',
+      'manager-stock',
     ]);
     expect(
       response.body.entities.find((entity: any) => entity.code === 'nomenclature').sections.map((section: any) => section.code)
