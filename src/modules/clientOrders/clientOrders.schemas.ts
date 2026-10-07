@@ -338,6 +338,7 @@ export const offlineSnapshotQuerySchema = z.object({
 
 export const offlineChangesQuerySchema = z.object({
   afterRevision: z.string().regex(/^\d+$/).default('0'),
+  untilRevision: z.string().regex(/^\d+$/).optional(),
   epoch: z.string().trim().min(1),
   limit: z.coerce.number().int().min(1).max(2000).default(500),
 });

@@ -692,6 +692,7 @@ model OfflineDatasetState {
   itemCount            Int      @default(0)
   lastSourceUpdateAt   DateTime?
   lastFullReconcileAt  DateTime?
+  sourceFingerprint   String?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
@@ -712,6 +713,18 @@ model OfflineDatasetChange {
   @@index([scopeKey, entity, revision])
   @@index([scopeKey, entity, itemKey])
   @@index([createdAt])
+}
+
+// Published, manager-scoped offline view. Unchanged source re-exports do not
+// rewrite these rows or advance the device-facing revision.
+model OfflineDatasetRow {
+  scopeKey String
+  entity   String
+  itemKey  String
+  hash     String
+  payload  Json
+
+  @@id([scopeKey, entity, itemKey])
 }
 
 model SpecialPrice {

@@ -7,12 +7,12 @@ jest.mock('../src/prisma/client', () => {
     'offlineExportPolicy', 'employeeProfile', 'counterparty', 'clientAgreement', 'clientContract',
     'deliveryAddress', 'priceType', 'sellingPrice', 'stockBalance', 'managerStockReservation',
     'organization', 'warehouse', 'offlineDatasetState', 'offlineDatasetChange', 'product',
-    'catalogState', 'catalogChange', 'productImage', 'productPrice',
+    'catalogState', 'catalogChange', 'productImage', 'productPrice', 'offlineDatasetRow',
   ].map(key => [key, model()])) };
 });
 import prisma from '../src/prisma/client';
 import { buildOfflinePolicy, priceTypeClosure, scopedEpoch, threeMonthsBefore, offlineExportPolicySchema } from '../src/modules/clientOrders/offlineExportPolicy';
-import { getOfflineSnapshot, getOfflineChanges, getOfflineManifest } from '../src/modules/clientOrders/offlineClientOrders.service';
+import { getOfflineSnapshot, getOfflineChanges, itemsForEntity, itemKey } from '../src/modules/clientOrders/offlineClientOrders.service';
 import { getCatalogSnapshot, getCatalogChanges } from '../src/modules/catalog/catalog.service';
 
 const db = prisma as any;
@@ -24,11 +24,12 @@ const payload = {
   organizationGuids: [id(30)], warehouseGuids: [id(31)],
 };
 const state = { epoch: id(99), currentRevision: 5n, minAvailableRevision: 0n, schemaVersion: 1, lastSourceUpdateAt: null, lastFullReconcileAt: new Date() };
+const source = (entity: Parameters<typeof itemsForEntity>[0], extra = {}) => itemsForEntity(entity, id(50), buildOfflinePolicy({ ...payload, ...extra }, today));
 
 beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(new Date('2026-09-17T06:00:00Z'));
   jest.clearAllMocks();
-  for (const model of Object.values(db) as any[]) {
+  for (const model of Object.values(db).filter((item: any) => item?.findMany) as any[]) {
     model.findMany.mockResolvedValue([]); model.count.mockResolvedValue(0);
   }
   db.offlineExportPolicy.findUnique.mockResolvedValue({ payload });
@@ -36,6 +37,8 @@ beforeEach(() => {
   db.offlineDatasetState.upsert.mockResolvedValue(state);
   db.catalogState.upsert.mockResolvedValue(state);
   db.clientAgreement.findMany.mockResolvedValue([{ priceType: { guid: id(10) } }]);
+  db.$transaction = jest.fn(async (fn) => fn(db));
+  db.offlineDatasetState.findUnique.mockResolvedValue({ ...state, scopeKey: `client-orders-v3:${id(50)}` });
 });
 afterEach(() => jest.useRealTimers());
 
@@ -64,8 +67,7 @@ test('rejects invalid calendar dates and non-GUID identifiers', () => {
   expect(offlineExportPolicySchema.safeParse({ ...payload, warehouseGuids: ['bad'] }).success).toBe(false);
 });
 test('counterparties are scoped to authenticated manager and active contracts/agreements', async () => {
-  await getOfflineSnapshot(7, 'counterparties', { limit: 100 });
-  expect(db.employeeProfile.findUnique).toHaveBeenCalledWith({ where: { userId: 7 }, select: { onecUserGuid: true } });
+  await source('counterparties');
   const where = db.counterparty.findMany.mock.calls[0][0].where;
   expect(where.OR).toContainEqual({ managerGuid: id(50) });
   expect(where.OR).toContainEqual({ contracts: { some: { managerGuid: id(50), isActive: true, status: 'Действует' } } });
@@ -79,6 +81,9 @@ test('delivery addresses stay manager-scoped and shared partner addresses have d
     { guid: 'partner:address', fullAddress: 'Street 1', counterparty: { guid: 'c2' } },
     { guid: 'partner:other', fullAddress: 'Street 2', counterparty: { guid: 'c2' } },
   ]);
+  const addresses = await source('delivery-addresses');
+  const materialized = addresses.map(item => ({ itemKey: itemKey('delivery-addresses', item), payload: item }));
+  db.offlineDatasetRow.findMany.mockImplementation(async ({ where, take }: any) => materialized.filter(row => !where.itemKey || row.itemKey > where.itemKey.gt).slice(0, take));
   const first = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1 });
   const second = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1, cursor: first.nextCursor });
   const third = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1, cursor: second.nextCursor });
@@ -89,19 +94,18 @@ test('delivery addresses stay manager-scoped and shared partner addresses have d
   expect(db.deliveryAddress.findMany.mock.calls[0][0].where).toMatchObject({
     isActive: true, counterpartyId: { in: ['c1', 'c2'] }, guid: { not: null },
   });
-  expect(db.offlineDatasetState.upsert.mock.calls[0][0].update.schemaVersion).toBe(2);
+  expect(db.offlineDatasetRow.findMany.mock.calls[0][0].where.scopeKey).toBe(`client-orders-v3:${id(50)}`);
+  expect(db.employeeProfile.findUnique).toHaveBeenCalledWith({ where: { userId: 7 }, select: { onecUserGuid: true } });
 });
-test('price snapshot and count use identical product and dependency filters', async () => {
-  await getOfflineSnapshot(7, 'selling-prices', { limit: 100 });
-  const count = db.sellingPrice.count.mock.calls[0][0].where;
+test('price projection uses product and dependency filters', async () => {
+  await source('selling-prices');
   const page = db.sellingPrice.findMany.mock.calls[0][0].where;
-  expect(page).toEqual(count);
   expect(page.product.guid.in).toEqual([id(1)]);
   expect(page.priceType.guid.in).toEqual([id(10), id(11), id(12)]);
 });
 test('own reserves use the same allowed goods/warehouse/organization filter', async () => {
   db.offlineExportPolicy.findUnique.mockResolvedValue({ payload: { ...payload, stockOrganizationGuid: id(30) } });
-  await getOfflineSnapshot(7, 'manager-stock', { limit: 100 });
+  await source('manager-stock', { stockOrganizationGuid: id(30) });
   const where = db.managerStockReservation.findMany.mock.calls[0][0].where;
   expect(where.managerGuid).toBe(id(50));
   expect(where.product.guid.in).toEqual([id(1)]);
@@ -112,15 +116,17 @@ test('stock uses the authoritative technical key, exposes warehouse-wide quantit
   db.offlineExportPolicy.findUnique.mockResolvedValue({ payload: { ...payload, stockOrganizationGuid: id(30) } });
   const syncKey = `${id(1)}|${id(31)}|${id(30)}|`;
   db.stockBalance.findMany.mockResolvedValue([{ syncKey, productId: 'p1', quantity: 9, reserved: 6, available: 3, product: { guid: id(1) }, warehouse: { guid: id(31) }, organization: { guid: id(30) } }]);
-  const page = await getOfflineSnapshot(7, 'stock', { limit: 100 });
+  const items = await source('stock', { stockOrganizationGuid: id(30) });
   expect(db.stockBalance.findMany.mock.calls[0][0].where.OR).toEqual([{ organization: { is: { guid: id(30) } } }]);
-  expect(page.items[0]).toMatchObject({ syncKey, organization: null, available: 3 });
-  db.offlineDatasetChange.findMany.mockResolvedValue([{ revision: 5n, itemKey: syncKey }]);
-  const changes = await getOfflineChanges(7, 'stock', { limit: 100, afterRevision: 4n, epoch: page.epoch });
-  expect(changes.changes[0]).toMatchObject({ itemKey: syncKey, operation: 'UPSERT' });
+  expect(items[0]).toMatchObject({ syncKey, organization: null, available: 3 });
+  const phoneKey = `${id(1)}|${id(31)}||`;
+  expect(itemKey('stock', items[0])).toBe(phoneKey);
+  db.offlineDatasetChange.findMany.mockResolvedValue([{ revision: 5n, itemKey: phoneKey, operation: 'DELETE' }]);
+  const changes = await getOfflineChanges(7, 'stock', { limit: 100, afterRevision: 4n, epoch: state.epoch });
+  expect(changes.changes[0]).toMatchObject({ itemKey: phoneKey, operation: 'DELETE', item: null });
 });
 test('old scope epoch requires full replacement, not a delta retaining extra rows', async () => {
-  await expect(getOfflineChanges(7, 'stock', { afterRevision: 0n, limit: 100, epoch: state.epoch })).rejects.toMatchObject({ status: 409 });
+  await expect(getOfflineChanges(7, 'stock', { afterRevision: 0n, limit: 100, epoch: 'legacy-epoch' })).rejects.toMatchObject({ status: 409 });
   expect(db.offlineDatasetChange.findMany).not.toHaveBeenCalled();
 });
 test('catalog snapshots intersect cursor and recent-movement scope', async () => {

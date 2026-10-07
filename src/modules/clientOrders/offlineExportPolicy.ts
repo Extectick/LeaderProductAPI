@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import prisma from '../../prisma/client';
+import type { Prisma } from '@prisma/client';
 
 const guid = z.string().uuid();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
@@ -61,8 +62,8 @@ export function priceTypeClosure(roots: string[], graph: OfflineExportPolicy['pr
   return [...seen].sort();
 }
 
-export async function getOfflineExportPolicy(): Promise<ResolvedOfflinePolicy | null> {
-  const row = await prisma.offlineExportPolicy.findUnique({ where: { id: 'client-orders' } });
+export async function getOfflineExportPolicy(db: Prisma.TransactionClient = prisma): Promise<ResolvedOfflinePolicy | null> {
+  const row = await db.offlineExportPolicy.findUnique({ where: { id: 'client-orders' } });
   if (!row) return null; // Old 1C versions keep working until the first policy is published.
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Omsk', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   return buildOfflinePolicy(offlineExportPolicySchema.parse(row.payload), today);

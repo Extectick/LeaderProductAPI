@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import prisma from '../../prisma/client';
+import { reconcileOfflineProjection } from './offlineProjection';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { ClientOrdersError } from './clientOrders.service';
-import { getOfflineExportPolicy, priceTypeClosure, scopedEpoch, type ResolvedOfflinePolicy } from './offlineExportPolicy';
+import { getOfflineExportPolicy, priceTypeClosure, type ResolvedOfflinePolicy } from './offlineExportPolicy';
 
 export const OFFLINE_DATASET_SCHEMA_VERSION = 1;
 export const OFFLINE_DATASET_SCOPE = 'client-orders';
@@ -82,8 +83,8 @@ const accessibleCounterpartyWhere = (managerGuid: string): Prisma.CounterpartyWh
   ],
 });
 
-async function accessibleCounterpartyIds(managerGuid: string) {
-  const items = await prisma.counterparty.findMany({
+async function accessibleCounterpartyIds(managerGuid: string, db: Tx = prisma) {
+  const items = await db.counterparty.findMany({
     where: accessibleCounterpartyWhere(managerGuid),
     select: { id: true },
   });
@@ -104,18 +105,18 @@ const activeStockWhere = (policy: ResolvedOfflinePolicy | null, managerReserve =
   ],
 });
 
-async function accessiblePriceTypeGuids(managerGuid: string, policy: ResolvedOfflinePolicy | null) {
-  const agreements = await prisma.clientAgreement.findMany({
+async function accessiblePriceTypeGuids(managerGuid: string, policy: ResolvedOfflinePolicy | null, db: Tx = prisma) {
+  const agreements = await db.clientAgreement.findMany({
     where: { ...activeAgreementWhere, counterparty: { is: accessibleCounterpartyWhere(managerGuid) }, priceTypeId: { not: null } },
     distinct: ['priceTypeId'], select: { priceType: { select: { guid: true } } },
   });
   return priceTypeClosure(agreements.flatMap(item => item.priceType ? [item.priceType.guid] : []), policy?.priceTypes ?? []);
 }
 
-async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePolicy | null) {
+async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePolicy | null, db: Tx = prisma) {
   if (!balances.length) return [];
   const productIds = [...new Set(balances.map((item) => item.productId as string))];
-  const costs = await prisma.productPrice.findMany({
+  const costs = await db.productPrice.findMany({
       where: { productId: { in: productIds }, isActive: true, priceType: { name: 'ЦенаПоступления' } },
       orderBy: [{ startDate: 'desc' }],
       distinct: ['productId'],
@@ -139,20 +140,20 @@ async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePol
   });
 }
 
-async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string, policy: ResolvedOfflinePolicy | null): Promise<Array<Record<string, unknown>>> {
+export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string, policy: ResolvedOfflinePolicy | null, db: Tx = prisma): Promise<Array<Record<string, unknown>>> {
   const counterpartyIds = entity === 'organizations' || entity === 'warehouses' || entity === 'stock' || entity === 'manager-stock'
     ? []
-    : await accessibleCounterpartyIds(managerGuid);
+    : await accessibleCounterpartyIds(managerGuid, db);
 
   switch (entity) {
     case 'organizations':
-      return prisma.organization.findMany({
+      return db.organization.findMany({
         where: { isActive: true, ...(policy ? { guid: { in: policy.organizationGuids } } : {}) },
         orderBy: { guid: 'asc' },
         select: { guid: true, name: true, code: true, isActive: true, sourceUpdatedAt: true },
       });
     case 'warehouses':
-      return prisma.warehouse.findMany({
+      return db.warehouse.findMany({
         where: { isActive: true, ...(policy ? { guid: { in: policy.warehouseGuids } } : {}) },
         orderBy: { guid: 'asc' },
         select: {
@@ -161,7 +162,7 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
         },
       });
     case 'counterparties':
-      return prisma.counterparty.findMany({
+      return db.counterparty.findMany({
         where: { id: { in: counterpartyIds }, isActive: true },
         orderBy: { guid: 'asc' },
         select: {
@@ -170,7 +171,7 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
         },
       });
     case 'agreements':
-      return prisma.clientAgreement.findMany({
+      return db.clientAgreement.findMany({
         where: { ...activeAgreementWhere, counterpartyId: { in: counterpartyIds } },
         orderBy: { guid: 'asc' },
         select: {
@@ -185,7 +186,7 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
         },
       });
     case 'contracts':
-      return prisma.clientContract.findMany({
+      return db.clientContract.findMany({
         where: { ...activeContractWhere, counterpartyId: { in: counterpartyIds } },
         orderBy: { guid: 'asc' },
         select: {
@@ -198,7 +199,7 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
         },
       });
     case 'delivery-addresses':
-      return prisma.deliveryAddress.findMany({
+      return db.deliveryAddress.findMany({
         where: { isActive: true, counterpartyId: { in: counterpartyIds }, guid: { not: null } },
         orderBy: [{ guid: 'asc' }, { counterpartyId: 'asc' }],
         select: {
@@ -209,8 +210,8 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
         },
       }) as Promise<Array<Record<string, unknown>>>;
     case 'price-types': {
-      const guids = await accessiblePriceTypeGuids(managerGuid, policy);
-      return prisma.priceType.findMany({
+      const guids = await accessiblePriceTypeGuids(managerGuid, policy, db);
+      return db.priceType.findMany({
         where: { isActive: true, guid: { in: guids } },
         orderBy: { guid: 'asc' },
         select: { guid: true, name: true, code: true, isActive: true, sourceUpdatedAt: true },
@@ -218,11 +219,11 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
     }
     case 'order-options': {
       const [agreements, contracts] = await Promise.all([
-        prisma.clientAgreement.findMany({
+        db.clientAgreement.findMany({
           where: { ...activeAgreementWhere, counterpartyId: { in: counterpartyIds } },
           select: { paymentForm: true, deliveryTerm: true, sourceUpdatedAt: true },
         }),
-        prisma.clientContract.findMany({
+        db.clientContract.findMany({
           where: { ...activeContractWhere, counterpartyId: { in: counterpartyIds } },
           select: { deliveryMethod: true, sourceUpdatedAt: true },
         }),
@@ -253,8 +254,8 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
       return [...values.values()].sort((left, right) => String(left.guid).localeCompare(String(right.guid), 'ru'));
     }
     case 'selling-prices': {
-      const guids = await accessiblePriceTypeGuids(managerGuid, policy);
-      return prisma.sellingPrice.findMany({
+      const guids = await accessiblePriceTypeGuids(managerGuid, policy, db);
+      return db.sellingPrice.findMany({
         where: { isActive: true, product: productWhere(policy), priceType: { isActive: true, guid: { in: guids } } },
         orderBy: { syncKey: 'asc' },
         select: {
@@ -267,7 +268,7 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
       }) as Promise<Array<Record<string, unknown>>>;
     }
     case 'stock': {
-      const balances = await prisma.stockBalance.findMany({
+      const balances = await db.stockBalance.findMany({
           where: activeStockWhere(policy),
           orderBy: { syncKey: 'asc' },
           select: {
@@ -281,10 +282,10 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
             organization: { select: { guid: true } },
           },
       });
-      return decorateStockBalances(balances, policy);
+      return decorateStockBalances(balances, policy, db);
     }
     case 'manager-stock': {
-      return prisma.managerStockReservation.findMany({
+      return db.managerStockReservation.findMany({
         where: {
           managerGuid,
           reserved: { gt: 0 },
@@ -304,52 +305,20 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
   }
 }
 
-async function countItemsForEntity(entity: OfflineDatasetEntity, managerGuid: string, policy: ResolvedOfflinePolicy | null) {
-  const counterpartyWhere = accessibleCounterpartyWhere(managerGuid);
-  switch (entity) {
-    case 'organizations': return prisma.organization.count({ where: { isActive: true, ...(policy ? { guid: { in: policy.organizationGuids } } : {}) } });
-    case 'warehouses': return prisma.warehouse.count({ where: { isActive: true, ...(policy ? { guid: { in: policy.warehouseGuids } } : {}) } });
-    case 'counterparties': return prisma.counterparty.count({ where: counterpartyWhere });
-    case 'agreements': return prisma.clientAgreement.count({ where: { ...activeAgreementWhere, counterparty: { is: counterpartyWhere } } });
-    case 'contracts': return prisma.clientContract.count({ where: { ...activeContractWhere, counterparty: { is: counterpartyWhere } } });
-    case 'delivery-addresses': return prisma.deliveryAddress.count({
-      where: { isActive: true, guid: { not: null }, counterparty: { is: counterpartyWhere } },
-    });
-    case 'price-types': return prisma.priceType.count({
-      where: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy) } },
-    });
-    case 'order-options': return (await itemsForEntity(entity, managerGuid, policy)).length;
-    case 'selling-prices': return prisma.sellingPrice.count({
-      where: {
-        isActive: true,
-        product: productWhere(policy),
-        priceType: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy) } },
-      },
-    });
-    case 'stock': return prisma.stockBalance.count({ where: activeStockWhere(policy) });
-    case 'manager-stock': return prisma.managerStockReservation.count({
-      where: {
-        managerGuid,
-        reserved: { gt: 0 },
-        ...activeStockWhere(policy, true),
-      },
-    });
-  }
-}
-
 async function getLargeEntityPage(
   entity: 'selling-prices' | 'stock' | 'manager-stock',
   managerGuid: string,
   cursor: string | null | undefined,
   limit: number,
-  policy: ResolvedOfflinePolicy | null
+  policy: ResolvedOfflinePolicy | null,
+  db: Tx = prisma
 ): Promise<Array<Record<string, unknown>>> {
   if (entity === 'selling-prices') {
-    return prisma.sellingPrice.findMany({
+    return db.sellingPrice.findMany({
       where: {
         isActive: true,
         product: productWhere(policy),
-        priceType: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy) } },
+        priceType: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy, db) } },
         ...(cursor ? { syncKey: { gt: cursor } } : {}),
       },
       orderBy: { syncKey: 'asc' },
@@ -364,7 +333,7 @@ async function getLargeEntityPage(
     }) as Promise<Array<Record<string, unknown>>>;
   }
   if (entity === 'manager-stock') {
-    return prisma.managerStockReservation.findMany({
+    return db.managerStockReservation.findMany({
       where: {
         managerGuid,
         reserved: { gt: 0 },
@@ -383,7 +352,7 @@ async function getLargeEntityPage(
       },
     }) as Promise<Array<Record<string, unknown>>>;
   }
-  const balances = await prisma.stockBalance.findMany({
+  const balances = await db.stockBalance.findMany({
     where: { ...activeStockWhere(policy), ...(cursor ? { syncKey: { gt: cursor } } : {}) },
     orderBy: { syncKey: 'asc' },
     take: limit,
@@ -397,82 +366,16 @@ async function getLargeEntityPage(
       organization: { select: { guid: true } },
     },
   });
-  return decorateStockBalances(balances, policy);
+  return decorateStockBalances(balances, policy, db);
 }
 
-async function getLargeItemsByKeys(
-  entity: 'selling-prices' | 'stock' | 'manager-stock',
-  managerGuid: string,
-  itemKeys: string[],
-  policy: ResolvedOfflinePolicy | null
-): Promise<Array<Record<string, unknown>>> {
-  if (!itemKeys.length) return [];
-  const keySet = new Set(itemKeys);
-  if (entity === 'selling-prices') {
-    return prisma.sellingPrice.findMany({
-      where: {
-        syncKey: { in: itemKeys },
-        isActive: true,
-        product: productWhere(policy),
-        priceType: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy) } },
-      },
-      select: {
-        syncKey: true, price: true, currency: true, packageGuid: true,
-        characteristicGuid: true, sourceRegister: true, priority: true,
-        startDate: true, endDate: true, minQty: true, isActive: true, sourceUpdatedAt: true,
-        product: { select: { guid: true } },
-        priceType: { select: { guid: true } },
-      },
-    }) as Promise<Array<Record<string, unknown>>>;
-  }
-  if (entity === 'manager-stock') {
-    return prisma.managerStockReservation.findMany({
-      where: {
-        syncKey: { in: itemKeys },
-        managerGuid,
-        reserved: { gt: 0 },
-        ...activeStockWhere(policy, true),
-      },
-      select: {
-        syncKey: true,
-        reserved: true,
-        sourceUpdatedAt: true,
-        product: { select: { guid: true } },
-        warehouse: { select: { guid: true } },
-        organization: { select: { guid: true } },
-      },
-    }) as Promise<Array<Record<string, unknown>>>;
-  }
-  const parsed = itemKeys.map((key) => key.split('|'));
-  const productGuids = [...new Set(parsed.map((parts) => parts[0]).filter(Boolean))];
-  const warehouseGuids = [...new Set(parsed.map((parts) => parts[1]).filter(Boolean))];
-  const balances = await prisma.stockBalance.findMany({
-    where: {
-      ...activeStockWhere(policy),
-      AND: [{ product: { guid: { in: productGuids } } }, { warehouse: { guid: { in: warehouseGuids } } }],
-    },
-    select: {
-      productId: true, warehouseId: true,
-      syncKey: true, quantity: true, reserved: true, inStock: true, shipping: true,
-      clientReserved: true, managerReserved: true, available: true, seriesGuid: true,
-      sourceUpdatedAt: true, updatedAt: true,
-      product: { select: { guid: true } },
-      warehouse: { select: { guid: true } },
-      organization: { select: { guid: true } },
-    },
-  });
-  const decorated = await decorateStockBalances(balances, policy);
-  return decorated.filter((item) => keySet.has(itemKey('stock', item)));
-}
-
-function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
+export function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
   if (entity === 'delivery-addresses') {
     return JSON.stringify([(item.counterparty as { guid?: string } | undefined)?.guid ?? item.counterpartyGuid ?? '', item.guid ?? '']);
   }
   if (entity === 'selling-prices') return String(item.syncKey ?? '');
   if (entity === 'manager-stock') return String(item.syncKey ?? '');
   if (entity === 'stock') {
-    if (item.syncKey) return String(item.syncKey);
     const product = item.product as { guid?: string } | undefined;
     const warehouse = item.warehouse as { guid?: string } | undefined;
     const organization = item.organization as { guid?: string } | undefined;
@@ -481,137 +384,136 @@ function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
   return String(item.guid ?? '');
 }
 
-async function ensureState(entity: OfflineDatasetEntity, itemCount: number) {
-  const schemaVersion = entity === 'delivery-addresses' ? 2 : OFFLINE_DATASET_SCHEMA_VERSION;
-  return prisma.offlineDatasetState.upsert({
-    where: { scopeKey_entity: { scopeKey: OFFLINE_DATASET_SCOPE, entity } },
-    create: {
-      scopeKey: OFFLINE_DATASET_SCOPE,
-      entity,
-      schemaVersion,
-      currentRevision: 0n,
-      minAvailableRevision: 0n,
-      itemCount,
-    },
-    update: {
-      schemaVersion,
-      itemCount,
-    },
-  });
+const projectionScope = (managerGuid: string) => `client-orders-v3:${managerGuid}`;
+const sourceDependencies: Record<OfflineDatasetEntity, OfflineDatasetEntity[]> = {
+  organizations: ['organizations'], warehouses: ['warehouses'],
+  counterparties: ['counterparties'], agreements: ['agreements'], contracts: ['contracts'],
+  'delivery-addresses': ['delivery-addresses'], 'order-options': ['order-options'],
+  'price-types': ['price-types', 'selling-prices'],
+  'selling-prices': ['selling-prices', 'agreements', 'price-types'],
+  stock: ['stock', 'warehouses', 'organizations'],
+  'manager-stock': ['manager-stock', 'warehouses', 'organizations'],
+};
+
+async function prepareOfflineProjection(managerGuid: string) {
+  // Serialize builders across API replicas. RepeatableRead prevents a snapshot
+  // mixing half of one 1C exchange with half of another. A waiter retries on 40001.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        const scopeKey = projectionScope(managerGuid);
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))`;
+        const policy = await getOfflineExportPolicy(tx);
+        const source = await tx.offlineDatasetState.findMany({ where: { scopeKey: OFFLINE_DATASET_SCOPE } });
+        if (!source.length) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Офлайн-данные ещё не подготовлены на сервере');
+        const sourceByEntity = new Map(source.map(row => [row.entity, row]));
+        const catalog = await tx.catalogState.findUnique({ where: { id: 'nomenclature' }, select: { epoch: true, currentRevision: true } });
+        const entries = [];
+        for (const entity of OFFLINE_DATASET_ENTITIES) {
+          const large = entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock';
+          const fingerprint = createHash('sha256').update(JSON.stringify({
+            version: 3, policy: policy?.fingerprint,
+            catalog: large ? jsonSafe(catalog) : undefined,
+            sources: sourceDependencies[entity].map(name => {
+              const row = sourceByEntity.get(name);
+              return row ? [name, row.epoch, row.currentRevision.toString()] : [name];
+            }),
+          })).digest('hex');
+          const state = await reconcileOfflineProjection(tx, {
+            scopeKey, entity, schemaVersion: entity === 'delivery-addresses' ? 2 : OFFLINE_DATASET_SCHEMA_VERSION,
+            fingerprint,
+            pages: async function* () {
+              if (entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock') {
+                let cursor: string | null = null;
+                while (true) {
+                  const rows = await getLargeEntityPage(entity, managerGuid, cursor, 1000, policy, tx);
+                  yield rows.map(item => ({ key: itemKey(entity, item), item: jsonSafe(item) }));
+                  if (rows.length < 1000) break;
+                  cursor = String(rows[rows.length - 1].syncKey);
+                }
+              } else {
+                const rows = await itemsForEntity(entity, managerGuid, policy, tx);
+                for (let offset = 0; offset < rows.length; offset += 1000) {
+                  yield rows.slice(offset, offset + 1000).map(item => ({ key: itemKey(entity, item), item: jsonSafe(item) }));
+                }
+              }
+            },
+          });
+          const sourceState = sourceByEntity.get(entity);
+          const verifiedAt = sourceState?.lastSourceUpdateAt ?? sourceState?.lastFullReconcileAt ?? null;
+          entries.push({ ...state, lastVerifiedAt: verifiedAt });
+        }
+        return entries;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 60_000, maxWait: 15_000 });
+    } catch (error) {
+      const failure = error as { code?: string; meta?: { code?: string } };
+      const retryable = failure.code === 'P2034' || ['40001', '40P01'].includes(failure.meta?.code ?? '');
+      if (attempt >= 2 || !retryable) throw error;
+    }
+  }
 }
 
 export async function getOfflineManifest(userId: number) {
   assertOfflineEnabled();
-  const policy = await getOfflineExportPolicy();
   const managerGuid = await managerGuidForUser(userId);
-  const entries = await Promise.all(OFFLINE_DATASET_ENTITIES.map(async (entity) => {
-    const itemCount = await countItemsForEntity(entity, managerGuid, policy);
-    const state = await ensureState(entity, itemCount);
-    return {
-      entity,
-      epoch: scopedEpoch(state.epoch, policy, managerGuid),
-      schemaVersion: state.schemaVersion,
-      revision: state.currentRevision.toString(),
-      minAvailableRevision: state.minAvailableRevision.toString(),
-      itemCount,
-      lastSourceUpdateAt: state.lastSourceUpdateAt,
-      lastFullReconcileAt: state.lastFullReconcileAt,
-    };
-  }));
-  return {
-    enabled: true,
-    schemaVersion: OFFLINE_DATASET_SCHEMA_VERSION,
-    managerScope: 'authenticated-user',
-    generatedAt: new Date(),
-    entities: entries,
-  };
+  const states = await prepareOfflineProjection(managerGuid);
+  return jsonSafe({
+    enabled: true, schemaVersion: OFFLINE_DATASET_SCHEMA_VERSION, managerScope: 'authenticated-user', generatedAt: new Date(),
+    entities: states.map(state => ({ entity: state.entity, epoch: state.epoch, schemaVersion: state.schemaVersion,
+      revision: state.currentRevision.toString(), minAvailableRevision: state.minAvailableRevision.toString(),
+      itemCount: state.itemCount, lastChangedAt: state.lastSourceUpdateAt,
+      // For balances/prices freshness means the last successful source exchange,
+      // even when values did not change. Never claim a phone check refreshed 1C.
+      lastSourceUpdateAt: ['stock', 'selling-prices', 'manager-stock'].includes(state.entity)
+        ? state.lastVerifiedAt : state.lastSourceUpdateAt,
+      lastVerifiedAt: state.lastVerifiedAt, lastFullReconcileAt: state.lastFullReconcileAt })),
+  });
 }
 
-export async function getOfflineSnapshot(
-  userId: number,
-  entity: OfflineDatasetEntity,
-  options: { cursor?: string | null; limit: number }
-) {
+async function readProjection<T>(userId: number, entity: OfflineDatasetEntity,
+  read: (tx: Tx, state: NonNullable<Awaited<ReturnType<Tx['offlineDatasetState']['findUnique']>>>) => Promise<T>) {
   assertOfflineEnabled();
-  const policy = await getOfflineExportPolicy();
-  const managerGuid = await managerGuidForUser(userId);
-  if (entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock') {
-    const itemCount = await countItemsForEntity(entity, managerGuid, policy);
-    const page = await getLargeEntityPage(entity, managerGuid, options.cursor, options.limit + 1, policy);
-    const hasMore = page.length > options.limit;
-    const items = hasMore ? page.slice(0, options.limit) : page;
-    const state = await ensureState(entity, itemCount);
-    return jsonSafe({
-      entity,
-      epoch: scopedEpoch(state.epoch, policy, managerGuid),
-      schemaVersion: state.schemaVersion,
-      snapshotRevision: state.currentRevision.toString(),
-      items,
-      nextCursor: hasMore && items.length > 0 ? String(items[items.length - 1].syncKey ?? '') : null,
-      hasMore,
-      lastSourceUpdateAt: state.lastSourceUpdateAt,
+  const scopeKey = projectionScope(await managerGuidForUser(userId));
+  return prisma.$transaction(async tx => {
+    const state = await tx.offlineDatasetState.findUnique({ where: { scopeKey_entity: { scopeKey, entity } } });
+    if (!state) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Обновите версии офлайн-данных');
+    return read(tx, state);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+
+export async function getOfflineSnapshot(userId: number, entity: OfflineDatasetEntity, options: { cursor?: string | null; limit: number }) {
+  return readProjection(userId, entity, async (tx, state) => {
+    const rows = await tx.offlineDatasetRow.findMany({
+      where: { scopeKey: state.scopeKey, entity, ...(options.cursor ? { itemKey: { gt: options.cursor } } : {}) },
+      orderBy: { itemKey: 'asc' }, take: options.limit + 1,
     });
-  }
-  const all = (await itemsForEntity(entity, managerGuid, policy)).map((item) => ({ key: itemKey(entity, item), item }));
-  const start = options.cursor ? Math.max(0, all.findIndex((entry) => entry.key === options.cursor) + 1) : 0;
-  const items = all.slice(start, start + options.limit);
-  const state = await ensureState(entity, all.length);
-  return jsonSafe({
-    entity,
-    epoch: scopedEpoch(state.epoch, policy, managerGuid),
-    schemaVersion: state.schemaVersion,
-    snapshotRevision: state.currentRevision.toString(),
-    items: items.map((entry) => entry.item),
-    nextCursor: start + items.length < all.length && items.length > 0 ? items[items.length - 1].key : null,
-    hasMore: start + items.length < all.length,
-    lastSourceUpdateAt: state.lastSourceUpdateAt,
+    const hasMore = rows.length > options.limit;
+    const page = rows.slice(0, options.limit);
+    return jsonSafe({ entity, epoch: state.epoch, schemaVersion: state.schemaVersion, snapshotRevision: state.currentRevision.toString(),
+      items: page.map(row => row.payload), hasMore, nextCursor: hasMore ? page[page.length - 1].itemKey : null,
+      lastSourceUpdateAt: state.lastSourceUpdateAt });
   });
 }
 
-export async function getOfflineChanges(
-  userId: number,
-  entity: OfflineDatasetEntity,
-  options: { afterRevision: bigint; limit: number; epoch: string }
-) {
-  assertOfflineEnabled();
-  const policy = await getOfflineExportPolicy();
-  const managerGuid = await managerGuidForUser(userId);
-  const itemCount = await countItemsForEntity(entity, managerGuid, policy);
-  const state = await ensureState(entity, itemCount);
-  if (scopedEpoch(state.epoch, policy, managerGuid) !== options.epoch || options.afterRevision < state.minAvailableRevision) {
-    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Требуется полная синхронизация офлайн-данных');
-  }
-  const rows = await prisma.offlineDatasetChange.findMany({
-    where: {
-      scopeKey: OFFLINE_DATASET_SCOPE,
-      entity,
-      revision: { gt: options.afterRevision },
-    },
-    orderBy: { revision: 'asc' },
-    take: options.limit,
-  });
-  const currentItems = entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock'
-    ? await getLargeItemsByKeys(entity, managerGuid, rows.map((row) => row.itemKey), policy)
-    : await itemsForEntity(entity, managerGuid, policy);
-  const byKey = new Map(currentItems.map((item) => [itemKey(entity, item), item]));
-  const lastRevision = rows.length > 0 ? rows[rows.length - 1].revision : options.afterRevision;
-  return jsonSafe({
-    entity,
-    epoch: scopedEpoch(state.epoch, policy, managerGuid),
-    schemaVersion: state.schemaVersion,
-    fromRevision: options.afterRevision.toString(),
-    nextRevision: lastRevision.toString(),
-    currentRevision: state.currentRevision.toString(),
-    changes: rows.map((row) => {
-      const item = byKey.get(row.itemKey) ?? null;
-      return {
-        revision: row.revision.toString(),
-        itemKey: row.itemKey,
-        operation: item ? 'UPSERT' : 'DELETE',
-        item,
-      };
-    }),
-    hasMore: lastRevision < state.currentRevision,
+export async function getOfflineChanges(userId: number, entity: OfflineDatasetEntity,
+  options: { afterRevision: bigint; limit: number; epoch: string; untilRevision?: string }) {
+  return readProjection(userId, entity, async (tx, state) => {
+    const until = options.untilRevision === undefined ? state.currentRevision : BigInt(options.untilRevision);
+    if (state.epoch !== options.epoch || options.afterRevision < state.minAvailableRevision
+      || options.afterRevision > until || until > state.currentRevision) {
+      throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Требуется повторная проверка версий офлайн-данных');
+    }
+    const rows = await tx.offlineDatasetChange.findMany({
+      where: { scopeKey: state.scopeKey, entity, revision: { gt: options.afterRevision, lte: until } },
+      orderBy: { revision: 'asc' }, take: options.limit + 1,
+    });
+    const hasMore = rows.length > options.limit;
+    const page = rows.slice(0, options.limit);
+    const nextRevision = hasMore ? page[page.length - 1].revision : until;
+    return jsonSafe({ entity, epoch: state.epoch, schemaVersion: state.schemaVersion,
+      fromRevision: options.afterRevision.toString(), nextRevision: nextRevision.toString(), currentRevision: until.toString(),
+      changes: page.map(row => ({ revision: row.revision.toString(), itemKey: row.itemKey, operation: row.operation,
+        item: row.operation === 'DELETE' ? null : row.payload })), hasMore });
   });
 }
 

@@ -88,12 +88,18 @@ const MANAGER_SCOPED_OFFLINE_ENTITIES: OfflineDatasetEntity[] = [
   'selling-prices',
 ];
 
-async function resetPromotedOfflineDatasets(tx: TxClient, entities: BatchEntityCode[], replaceMode: boolean) {
+async function resetPromotedOfflineDatasets(tx: TxClient, entities: BatchEntityCode[], replaceMode: boolean, sessionId: string) {
   const datasets = new Set<OfflineDatasetEntity>();
   if (entities.includes('organizations')) datasets.add('organizations');
   if (entities.includes('warehouses')) datasets.add('warehouses');
   if (entities.includes('stock') || entities.includes('product-prices')) datasets.add('stock');
-  if (entities.some((entity) => entity === 'counterparties' || entity === 'contracts' || entity === 'agreements')) {
+  const referenceRows = await Promise.all([
+    entities.includes('counterparties') ? tx.onecStageCounterparty.count({ where: { sessionId } }) : 0,
+    entities.includes('contracts') ? tx.onecStageContract.count({ where: { sessionId } }) : 0,
+    entities.includes('agreements') ? tx.onecStageAgreement.count({ where: { sessionId } }) : 0,
+  ]);
+  if ((replaceMode && entities.some(entity => ['counterparties', 'contracts', 'agreements'].includes(entity)))
+    || referenceRows.some(count => count > 0)) {
     MANAGER_SCOPED_OFFLINE_ENTITIES.forEach((entity) => datasets.add(entity));
   }
   if (!replaceMode) {
@@ -2311,7 +2317,7 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
   try {
     await prisma.$transaction(
       async (tx) => {
-        await resetPromotedOfflineDatasets(tx, entities, session.replaceMode);
+        await resetPromotedOfflineDatasets(tx, entities, session.replaceMode, session.id);
         if (session.replaceMode) {
           for (const entity of entities) {
             await clearEntityInTx(tx, entity);
