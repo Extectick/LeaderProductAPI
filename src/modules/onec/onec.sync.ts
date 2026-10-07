@@ -8,6 +8,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
+import { applyCounterpartyAddresses } from './onec.deliveryAddresses';
 import {
   recordOfflineDatasetChanges,
   resetOfflineDataset,
@@ -1369,37 +1370,7 @@ async function applyStagedCounterparties(
         }
       }
 
-      if (item.addresses?.length) {
-        for (const address of item.addresses) {
-          const addressGuid = address.guid?.trim() || null;
-          const addressData = {
-            counterpartyId: counterparty.id,
-            guid: addressGuid,
-            name: address.name ?? null,
-            fullAddress: address.fullAddress,
-            city: address.city ?? null,
-            street: address.street ?? null,
-            house: address.house ?? null,
-            building: address.building ?? null,
-            apartment: address.apartment ?? null,
-            postcode: address.postcode ?? null,
-            isDefault: address.isDefault ?? false,
-            isActive: address.isActive ?? true,
-            sourceUpdatedAt: address.sourceUpdatedAt ?? item.sourceUpdatedAt ?? syncedAt,
-            lastSyncedAt: syncedAt,
-          };
-
-          if (addressGuid) {
-            await tx.deliveryAddress.upsert({
-              where: { guid: addressGuid },
-              create: addressData,
-              update: addressData,
-            });
-          } else {
-            await tx.deliveryAddress.create({ data: addressData });
-          }
-        }
-      }
+      await applyCounterpartyAddresses(tx, counterparty.id, item, syncedAt);
 
       summary.resolvedStageIds.push(stage.id);
     } catch (error) {

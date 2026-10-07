@@ -949,8 +949,9 @@ router.post(
 
       const deliveryAddressRecord = activeDeliveryAddressGuid
         ? ensureEntityActive(
-            await prisma.deliveryAddress.findUnique({
-              where: { guid: activeDeliveryAddressGuid },
+            await prisma.deliveryAddress.findFirst({
+              where: { guid: activeDeliveryAddressGuid,
+                counterpartyId: counterpartyRecord?.id ?? agreementRecord?.counterpartyId ?? contractRecord?.counterpartyId ?? undefined },
               select: { id: true, guid: true, fullAddress: true, isActive: true, counterpartyId: true },
             }),
             'Адрес доставки'

@@ -1348,9 +1348,9 @@ async function loadWarehouseByGuid(tx: Tx, guid: string) {
   return warehouse;
 }
 
-async function loadDeliveryAddressByGuid(tx: Tx, guid: string) {
+async function loadDeliveryAddressByGuid(tx: Tx, guid: string, counterpartyGuid: string) {
   const address = await tx.deliveryAddress.findFirst({
-    where: { OR: [{ guid }, { id: guid }] },
+    where: { OR: [{ guid }, { id: guid }], counterparty: { guid: counterpartyGuid } },
     select: {
       id: true,
       guid: true,
@@ -1687,12 +1687,14 @@ async function upsertLiveDeliveryAddress(
 ) {
   if (!item?.guid || !counterpartyId) return null;
   return tx.deliveryAddress.upsert({
-    where: { guid: item.guid },
+    where: { counterpartyId_guid: { counterpartyId, guid: item.guid } },
     create: {
       guid: item.guid,
       counterpartyId,
       name: item.name ?? null,
       fullAddress: safeLiveName(item.fullAddress, item.guid),
+      comment: item.comment ?? item.deliveryComment ?? undefined,
+      kindName: item.kindName ?? item.contactInfoKind ?? undefined,
       isDefault: item.isDefault,
       isActive: item.isActive,
       sourceUpdatedAt,
@@ -1702,6 +1704,8 @@ async function upsertLiveDeliveryAddress(
       counterpartyId,
       name: item.name ?? null,
       fullAddress: safeLiveName(item.fullAddress, item.guid),
+      comment: item.comment ?? item.deliveryComment ?? undefined,
+      kindName: item.kindName ?? item.contactInfoKind ?? undefined,
       isDefault: item.isDefault,
       isActive: item.isActive,
       sourceUpdatedAt,
@@ -1925,10 +1929,10 @@ async function loadLiveDeliveryAddressForOrderMaterialization(guid: string, coun
     if (liveValue) return liveValue;
   } catch (error) {
     if (error instanceof ClientOrdersOnecCircuitOpenError) {
-      return findCachedDeliveryAddress(guid);
+      return findCachedDeliveryAddress(guid, counterpartyGuid);
     }
     if (!isOnecLpAppError(error)) throw error;
-    const cachedValue = await findCachedDeliveryAddress(guid);
+    const cachedValue = await findCachedDeliveryAddress(guid, counterpartyGuid);
     if (cachedValue) return cachedValue;
     throwClientOrdersOnecError(error, 'Ошибка получения адреса доставки из 1С');
   }
@@ -2090,13 +2094,15 @@ async function findCachedAgreement(guid: string): Promise<LiveAgreement | null> 
     : null;
 }
 
-async function findCachedDeliveryAddress(guid: string): Promise<LiveDeliveryAddress | null> {
-  const item = await prisma.deliveryAddress.findUnique({
-    where: { guid },
+async function findCachedDeliveryAddress(guid: string, counterpartyGuid: string): Promise<LiveDeliveryAddress | null> {
+  const item = await prisma.deliveryAddress.findFirst({
+    where: { guid, counterparty: { guid: counterpartyGuid } },
     select: {
       guid: true,
       name: true,
       fullAddress: true,
+      comment: true,
+      kindName: true,
       isDefault: true,
       isActive: true,
       counterparty: { select: { guid: true } },
@@ -2107,6 +2113,8 @@ async function findCachedDeliveryAddress(guid: string): Promise<LiveDeliveryAddr
         guid: item.guid,
         name: item.name,
         fullAddress: item.fullAddress,
+        comment: item.comment,
+        kindName: item.kindName,
         counterpartyGuid: item.counterparty.guid,
         isDefault: item.isDefault,
         isActive: item.isActive,
@@ -2390,7 +2398,7 @@ async function resolveManagerOrderContext(tx: Tx, body: ClientOrderCreateBody): 
     body.agreementGuid ? loadAgreementByGuid(tx, body.agreementGuid) : Promise.resolve(null),
     body.contractGuid ? loadContractByGuid(tx, body.contractGuid) : Promise.resolve(null),
     body.warehouseGuid ? loadWarehouseByGuid(tx, body.warehouseGuid) : Promise.resolve(null),
-    body.deliveryAddressGuid ? loadDeliveryAddressByGuid(tx, body.deliveryAddressGuid) : Promise.resolve(null),
+    body.deliveryAddressGuid ? loadDeliveryAddressByGuid(tx, body.deliveryAddressGuid, body.counterpartyGuid) : Promise.resolve(null),
     body.priceTypeGuid ? loadPriceTypeByGuid(tx, body.priceTypeGuid) : Promise.resolve(null),
   ]);
 

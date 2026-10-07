@@ -136,7 +136,7 @@ model Counterparty {
 
 model DeliveryAddress {
   id             String  @id @default(cuid())
-  guid           String? @unique
+  guid           String?
   counterpartyId String
 
   name        String?
@@ -147,6 +147,8 @@ model DeliveryAddress {
   building    String?
   apartment   String?
   postcode    String?
+  comment     String?
+  kindName    String?
 
   isDefault Boolean @default(false)
   isActive  Boolean @default(true)
@@ -164,6 +166,8 @@ model DeliveryAddress {
   updatedAt DateTime @updatedAt
 
   @@index([counterpartyId])
+  @@unique([counterpartyId, guid])
+  @@index([guid])
   @@index([isActive])
   @@index([sourceUpdatedAt])
 }

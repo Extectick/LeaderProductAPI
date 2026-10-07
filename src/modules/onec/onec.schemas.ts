@@ -80,6 +80,8 @@ const addressSchema = z.object({
   guid: z.string().optional(),
   name: z.string().optional(),
   fullAddress: z.string().min(1),
+  comment: z.string().nullable().optional(),
+  kindName: z.string().nullable().optional(),
   city: z.string().nullable().optional(),
   street: z.string().nullable().optional(),
   house: z.string().nullable().optional(),
@@ -126,7 +128,12 @@ const counterpartySchema = z.object({
   defaultDeliveryAddressGuid: z.string().optional(),
   isActive: z.boolean().optional(),
   addresses: z.array(addressSchema).optional(),
+  addressesComplete: z.boolean().optional(),
   sourceUpdatedAt: nullableDate,
+}).refine(item => !item.addressesComplete || (Array.isArray(item.addresses)
+  && item.addresses.every(address => !!address.guid?.trim())), {
+  message: 'Complete delivery address snapshot requires addresses with non-empty identifiers',
+  path: ['addresses'],
 });
 export type CounterpartyItem = z.infer<typeof counterpartySchema>;
 

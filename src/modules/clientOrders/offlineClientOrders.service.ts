@@ -200,10 +200,10 @@ async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string,
     case 'delivery-addresses':
       return prisma.deliveryAddress.findMany({
         where: { isActive: true, counterpartyId: { in: counterpartyIds }, guid: { not: null } },
-        orderBy: { guid: 'asc' },
+        orderBy: [{ guid: 'asc' }, { counterpartyId: 'asc' }],
         select: {
           guid: true, name: true, fullAddress: true, city: true, street: true,
-          house: true, building: true, apartment: true, postcode: true,
+          house: true, building: true, apartment: true, postcode: true, comment: true, kindName: true,
           isDefault: true, isActive: true, sourceUpdatedAt: true,
           counterparty: { select: { guid: true } },
         },
@@ -466,6 +466,9 @@ async function getLargeItemsByKeys(
 }
 
 function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
+  if (entity === 'delivery-addresses') {
+    return JSON.stringify([(item.counterparty as { guid?: string } | undefined)?.guid ?? item.counterpartyGuid ?? '', item.guid ?? '']);
+  }
   if (entity === 'selling-prices') return String(item.syncKey ?? '');
   if (entity === 'manager-stock') return String(item.syncKey ?? '');
   if (entity === 'stock') {
@@ -479,18 +482,19 @@ function itemKey(entity: OfflineDatasetEntity, item: Record<string, unknown>) {
 }
 
 async function ensureState(entity: OfflineDatasetEntity, itemCount: number) {
+  const schemaVersion = entity === 'delivery-addresses' ? 2 : OFFLINE_DATASET_SCHEMA_VERSION;
   return prisma.offlineDatasetState.upsert({
     where: { scopeKey_entity: { scopeKey: OFFLINE_DATASET_SCOPE, entity } },
     create: {
       scopeKey: OFFLINE_DATASET_SCOPE,
       entity,
-      schemaVersion: OFFLINE_DATASET_SCHEMA_VERSION,
+      schemaVersion,
       currentRevision: 0n,
       minAvailableRevision: 0n,
       itemCount,
     },
     update: {
-      schemaVersion: OFFLINE_DATASET_SCHEMA_VERSION,
+      schemaVersion,
       itemCount,
     },
   });

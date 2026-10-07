@@ -71,6 +71,26 @@ test('counterparties are scoped to authenticated manager and active contracts/ag
   expect(where.OR).toContainEqual({ contracts: { some: { managerGuid: id(50), isActive: true, status: 'Действует' } } });
   expect(where.OR).toContainEqual({ agreements: { some: { managerGuid: id(50), isActive: true, status: 'Действует' } } });
 });
+
+test('delivery addresses stay manager-scoped and shared partner addresses have distinct cursors', async () => {
+  db.counterparty.findMany.mockResolvedValue([{ id: 'c1' }, { id: 'c2' }]);
+  db.deliveryAddress.findMany.mockResolvedValue([
+    { guid: 'partner:address', fullAddress: 'Street 1', comment: '10–18', counterparty: { guid: 'c1' } },
+    { guid: 'partner:address', fullAddress: 'Street 1', counterparty: { guid: 'c2' } },
+    { guid: 'partner:other', fullAddress: 'Street 2', counterparty: { guid: 'c2' } },
+  ]);
+  const first = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1 });
+  const second = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1, cursor: first.nextCursor });
+  const third = await getOfflineSnapshot(7, 'delivery-addresses', { limit: 1, cursor: second.nextCursor });
+  expect(first.nextCursor).not.toBe(second.nextCursor);
+  expect(first.items[0]).toMatchObject({ comment: '10–18', counterparty: { guid: 'c1' } });
+  expect(second.items[0]).toMatchObject({ counterparty: { guid: 'c2' } });
+  expect(third.hasMore).toBe(false);
+  expect(db.deliveryAddress.findMany.mock.calls[0][0].where).toMatchObject({
+    isActive: true, counterpartyId: { in: ['c1', 'c2'] }, guid: { not: null },
+  });
+  expect(db.offlineDatasetState.upsert.mock.calls[0][0].update.schemaVersion).toBe(2);
+});
 test('price snapshot and count use identical product and dependency filters', async () => {
   await getOfflineSnapshot(7, 'selling-prices', { limit: 100 });
   const count = db.sellingPrice.count.mock.calls[0][0].where;
