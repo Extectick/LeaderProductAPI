@@ -407,6 +407,13 @@ async function prepareOfflineProjection(managerGuid: string) {
         const source = await tx.offlineDatasetState.findMany({ where: { scopeKey: OFFLINE_DATASET_SCOPE } });
         if (!source.length) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Офлайн-данные ещё не подготовлены на сервере');
         const sourceByEntity = new Map(source.map(row => [row.entity, row]));
+        // An empty successful exchange still verified the source. Do not show
+        // the last price CHANGE (possibly months ago) as its last verification.
+        const checks = await tx.onecSyncSession.findMany({
+          where: { status: 'COMPLETED', completedAt: { gte: new Date(Date.now() - 7 * 86400_000) } },
+          orderBy: { completedAt: 'desc' }, take: 100,
+          select: { selectedEntities: true, completedAt: true },
+        });
         const catalog = await tx.catalogState.findUnique({ where: { id: 'nomenclature' }, select: { epoch: true, currentRevision: true } });
         const entries = [];
         for (const entity of OFFLINE_DATASET_ENTITIES) {
@@ -440,7 +447,9 @@ async function prepareOfflineProjection(managerGuid: string) {
             },
           });
           const sourceState = sourceByEntity.get(entity);
-          const verifiedAt = sourceState?.lastSourceUpdateAt ?? sourceState?.lastFullReconcileAt ?? null;
+          const verifiedAt = checks.find(check => Array.isArray(check.selectedEntities)
+            && check.selectedEntities.includes(entity))?.completedAt
+            ?? sourceState?.lastSourceUpdateAt ?? sourceState?.lastFullReconcileAt ?? null;
           entries.push({ ...state, lastVerifiedAt: verifiedAt });
         }
         return entries;
