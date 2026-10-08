@@ -1269,6 +1269,19 @@ function mapOrderItem(record: AnyRecord, index: number): LiveClientOrder['items'
   };
 }
 
+/** Restore only a complete, identity-matching detail saved by our invoice service. */
+export function restoreClientOrderDetailSnapshot(value: unknown, documentGuid: string): LiveClientOrder | null {
+  const record = asRecord(value);
+  if (!record || typeof record.documentGuid !== 'string'
+    || record.documentGuid.toLowerCase() !== documentGuid.toLowerCase()
+    || !Array.isArray(record.items)) return null;
+  const detail = mapClientOrder(record, true);
+  if (!detail || detail.items.length !== record.items.length
+    || Number(record.itemsCount ?? 0) > detail.items.length
+    || (!detail.items.length && Number(record.totalAmount ?? 0) > 0)) return null;
+  return detail;
+}
+
 function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClientOrder | null {
   const documentGuid = entityGuid(record, ['documentGuid', 'guid', 'id', 'Ссылка']);
   const appGuid = text(record, ['appGuid', 'appOrderGuid', 'localGuid', 'sourceGuid'], null);

@@ -14,6 +14,7 @@ import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
+import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
   OnecLpAppConfigError,
@@ -48,6 +49,7 @@ import {
   getLiveDeliveryAddresses,
   findLiveClientOrder,
   getLiveClientOrder,
+  restoreClientOrderDetailSnapshot,
   getLiveClientOrders,
   getLiveClientOrderProfits,
   getLiveClientOrdersTodaySummary,
@@ -3820,17 +3822,18 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     last1cError: normalizeClientOrderPublicError(order.last1cError),
   };
   const exportValidation = latestExportValidationFromEvents(mapped.events);
+  const invoiceShadow = isInvoiceShadowOrder(order);
+  const snapshotRoot = order.last1cSnapshot && typeof order.last1cSnapshot === 'object'
+    ? order.last1cSnapshot as Record<string, unknown>
+    : null;
+  const snapshotItem = snapshotRoot?.item && typeof snapshotRoot.item === 'object'
+    ? snapshotRoot.item as Record<string, unknown>
+    : snapshotRoot;
 
   if (userId && order.number1c && !isPinnedLocalOrder(order)) {
     const managerGuid = await getManagerGuidForUser(userId);
     if (managerGuid) {
       try {
-        const snapshotRoot = order.last1cSnapshot && typeof order.last1cSnapshot === 'object'
-          ? order.last1cSnapshot as Record<string, unknown>
-          : null;
-        const snapshotItem = snapshotRoot?.item && typeof snapshotRoot.item === 'object'
-          ? snapshotRoot.item as Record<string, unknown>
-          : snapshotRoot;
         let documentGuid = typeof snapshotItem?.documentGuid === 'string'
           ? snapshotItem.documentGuid.trim()
           : '';
@@ -3862,11 +3865,26 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
                 sourceRevision: liveSummary ? liveOrderProfitRevision(liveSummary) : undefined,
               },
               liveOrderDetailCacheTtl,
-              () => getLiveClientOrder(documentGuid, { managerGuid, appGuid: order.guid })
+              async () => {
+                try {
+                  return await getLiveClientOrder(documentGuid, { managerGuid, appGuid: order.guid });
+                } catch (error) {
+                  if (invoiceShadow && error instanceof OnecLpAppHttpError && [401, 403, 404].includes(error.upstreamStatus)) {
+                    // An upstream Basic Auth error is not an expired APP login.
+                    const missing = error.upstreamStatus === 404;
+                    throw new ClientOrdersError(missing ? 404 : 403, missing ? ErrorCodes.NOT_FOUND : ErrorCodes.FORBIDDEN, 'Заказ недоступен в 1С.');
+                  }
+                  throw error;
+                }
+              },
+              { shouldOpenCircuit: error => !(error instanceof ClientOrdersError && error.status < 500) }
             ),
             'Ошибка получения заказа клиента из 1С',
             { allowCachedWhenCircuitOpen: true }
           );
+          if (invoiceShadow) {
+            return enrichOrderItemsWithImages(invoiceShadowDetail(mapped, liveDetail));
+          }
           return enrichOrderItemsWithImages({
             ...liveDetail,
             // Never attach a fresh API revision to stale/cached 1C contents.
@@ -3897,13 +3915,24 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
           });
         }
       } catch (error) {
-        if (error instanceof ClientOrdersError && error.status === 502) {
+        if (error instanceof ClientOrdersError && (error.status === 502 || (invoiceShadow && error.status === 504))) {
           // Keep local snapshot usable when 1C is slow or temporarily unavailable.
         } else if (!isOnecLpAppError(error)) {
           throw error;
         }
       }
     }
+  }
+
+  if (invoiceShadow) {
+    const documentGuid = typeof snapshotItem?.documentGuid === 'string' ? snapshotItem.documentGuid : '';
+    const matchesOrder = documentGuid.toLowerCase() === order.guid?.toLowerCase()
+      || (typeof snapshotItem?.appGuid === 'string' && snapshotItem.appGuid.toLowerCase() === order.guid?.toLowerCase());
+    const saved = documentGuid && matchesOrder ? restoreClientOrderDetailSnapshot(snapshotItem, documentGuid) : null;
+    if (!saved) {
+      throw new ClientOrdersError(502, ErrorCodes.ONEC_UNAVAILABLE, 'Не удалось загрузить товары заказа из 1С. Повторите открытие документа.');
+    }
+    return enrichOrderItemsWithImages(invoiceShadowDetail(mapped, saved, true));
   }
 
   const queuePositions = isOrderQueued(order) ? await loadQueuedOrderPositions() : undefined;
