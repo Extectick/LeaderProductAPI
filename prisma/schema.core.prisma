@@ -358,6 +358,7 @@ model User {
   transportTaskSettings         UserTransportTaskSettings?
   clientOrderRememberedDefaults ClientOrderUserCounterpartyDefaults[]
   clientOrderInvoicePreferences ClientOrderInvoicePreference[]
+  clientOrderDraftBackups       ClientOrderDraftBackup[]
 
   @@index([email])
   @@index([currentProfileType, roleId, createdAt])

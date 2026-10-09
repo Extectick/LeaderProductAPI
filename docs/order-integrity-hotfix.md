@@ -1,5 +1,16 @@
 # Order integrity hotfix (production base b6587ad)
 
+## Dev draft recovery — 2026-10-09 (prepared, not deployed)
+
+- Additive migration `20261009120000_client_order_draft_backups`: `Order.draftReview` and owner-scoped `ClientOrderDraftBackup`.
+- `PUT/GET /api/client-orders/draft-backups/:clientOrderId`: recovery JSON accepts incomplete forms, never calls 1C/export, revision/hash protected. Only the authenticated owner can read it; client-supplied user IDs are ignored. Incomplete backups are not ordinary list orders.
+- Offline SUBMIT commits its backup before live validation. A stock rejection also persists a normal `DRAFT` with lines/review, returns 422 with `draftSaved/serverGuid`, and never queues it. Direct legacy submit cannot bypass the outstanding stock review.
+- Retrying a rejected, never-submitted draft applies current prices when explicitly chosen; correcting its quantities does not change accepted 1C facts. Queued/exported orders retain the existing integrity guards.
+- APP receives structured shortages and keeps them in SQLite. Backup sync is not permission to submit; network recovery only backs up or reconciles an already attempted operation.
+- Deployment order: dev database/API first, compatible APP OTA next. No 1C change or new native dependency. Do not apply these changes to production as part of this task.
+- Real PostgreSQL test (mocked 1C/export): use the isolated local test database on `127.0.0.1:54329`, schema `draft_recovery_20261009`; `prisma db push`, then `npm run test:unit -- --runInBand --testMatch '**/clientOrderDraftRecovery.integration.test.ts'`. Test guards reject other databases/schemas.
+- Verified: 49 API unit/route tests, 6 isolated PostgreSQL scenarios (incomplete backup, shortage, successful retry, current prices, 1C outage, concurrent revisions), Prisma validation and TypeScript. No real 1C order was created; mobile physical-device QA and dev deployment remain separate.
+
 Incident: НОУТ-112398, 2026-09-17, appGuid eb9e7c06-4a52-43aa-b764-1aee8a0f78ac.
 First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 × 360), pineapple (4 × 180).
 
