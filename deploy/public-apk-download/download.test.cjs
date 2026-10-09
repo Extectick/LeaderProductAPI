@@ -4,14 +4,14 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(__dirname + '/app.js', 'utf8');
 
-function harness(responses) {
+function harness(responses, hostname = 'api.leader-product.ru') {
   const elements = Object.fromEntries(['status', 'download', 'retry'].map(id => [id, {
     hidden: true, removeAttribute(name) { delete this[name]; },
     addEventListener(_event, action) { this.click = action; },
   }]));
   const requests = [], downloads = [];
   const context = { document: { getElementById: id => elements[id] },
-    window: { location: { assign: url => downloads.push(url) } }, URL, AbortController, setTimeout, clearTimeout,
+    window: { location: { hostname, assign: url => downloads.push(url) } }, URL, AbortController, setTimeout, clearTimeout,
     fetch: async (url, options) => {
       requests.push({ url, options });
       const response = responses.shift();
@@ -23,6 +23,14 @@ function harness(responses) {
 }
 const update = (version, token) => ({ ok: true, data: { updateAvailable: true, latestVersionName: version,
   downloadUrl: `https://api.leader-product.ru/files/prod/updates/apk/${version}.apk?token=${token}` } });
+
+test('dev hostname resolves the dev channel without changing production', async () => {
+  const h = harness([{ok: true, data: {updateAvailable: true, latestVersionName: '0.1.34',
+    downloadUrl: 'https://dev.leader-product.ru/files/dev/updates/apk/test.apk?token=fresh'}}], 'dev.leader-product.ru');
+  await h.ready;
+  assert.equal(h.requests[0].url, '/updates/check?platform=android&channel=dev&versionCode=0');
+  assert.match(h.downloads[0], /^https:\/\/dev\.leader-product\.ru\//);
+});
 
 test('resolves prod at each visit and obtains a fresh URL after a new release', async () => {
   const h = harness([update('0.1.26', 'first'), update('0.1.33', 'second')]);
