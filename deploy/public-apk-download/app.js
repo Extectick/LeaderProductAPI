@@ -4,6 +4,7 @@ const statusElement = document.getElementById('status');
 const downloadElement = document.getElementById('download');
 const retryElement = document.getElementById('retry');
 let checking = false;
+const channel = window.location.hostname === 'dev.leader-product.ru' ? 'dev' : 'prod';
 
 async function downloadLatestApk() {
   if (checking) return;
@@ -16,7 +17,7 @@ async function downloadLatestApk() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch('/updates/check?platform=android&channel=prod&versionCode=0', {
+    const response = await fetch(`/updates/check?platform=android&channel=${channel}&versionCode=0`, {
       cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
     });
     if (!response.ok) throw new Error('Update check unavailable');
