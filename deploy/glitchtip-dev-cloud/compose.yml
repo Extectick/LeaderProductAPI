@@ -1,0 +1,65 @@
+name: leader-glitchtip-dev-cloud
+services:
+  postgres:
+    image: postgres:18.3-alpine@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7
+    restart: unless-stopped
+    env_file: [./private/postgres.env]
+    volumes: [database:/var/lib/postgresql]
+    mem_limit: 192m
+    cpus: 0.5
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U glitchtip -d glitchtip']
+      interval: 20s
+      timeout: 5s
+      retries: 8
+    logging: &logging
+      driver: json-file
+      options: {max-size: 5m, max-file: '2'}
+  web:
+    image: &image leader-glitchtip-dev-cloud:6.2.6-symbolic1
+    build: .
+    restart: unless-stopped
+    env_file: [./private/app.env]
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ['127.0.0.1:19002:8000']
+    volumes: [uploads:/code/uploads]
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    mem_limit: 640m
+    cpus: 1
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/_health/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    logging: *logging
+  bootstrap:
+    profiles: [tools]
+    image: *image
+    user: '0:0'
+    env_file: [./private/app.env]
+    command: [python, manage.py, shell, -c, "exec(open('/opt/leader/bootstrap.py').read())"]
+    volumes: ['./bootstrap.py:/opt/leader/bootstrap.py:ro', './private:/run/leader-private']
+    mem_limit: 256m
+    logging: *logging
+  bridge:
+    profiles: [bridge]
+    image: python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b
+    restart: unless-stopped
+    command: [python, -u, /app/bridge.py]
+    user: '5000:5000'
+    depends_on:
+      web: {condition: service_healthy}
+    read_only: true
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    mem_limit: 64m
+    cpus: 0.2
+    volumes: ['./bridge.py:/app/bridge.py:ro', './private/bridge.json:/run/secrets/bridge.json:ro', 'bridge_state:/state']
+    logging: *logging
+volumes:
+  database:
+  uploads:
+  bridge_state:

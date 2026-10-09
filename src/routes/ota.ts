@@ -11,6 +11,7 @@ import {
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { errorResponse, ErrorCodes, successResponse } from '../utils/apiResponse';
 import { deleteObject, resolveObjectUrl } from '../storage/minio';
+import { resolveOtaExpoConfig, validateOtaExpoConfig } from '../utils/otaExpoConfig';
 
 const router = express.Router();
 const DEFAULT_CHANNEL = 'prod';
@@ -145,6 +146,12 @@ function normalizePublishBody(body: any) {
   const runtimeVersion = String(body?.runtimeVersion || '').trim();
   if (!runtimeVersion) return { ok: false as const, message: 'runtimeVersion обязателен' };
 
+  try {
+    validateOtaExpoConfig(body?.metadata, runtimeVersion, platform);
+  } catch (error) {
+    return { ok: false as const, message: error instanceof Error ? error.message : 'Некорректный expoClient' };
+  }
+
   const launchAssetKey = String(body?.launchAssetKey || '').trim();
   if (!launchAssetKey) return { ok: false as const, message: 'launchAssetKey обязателен' };
 
@@ -247,6 +254,9 @@ async function buildAssetDescriptor(asset: OtaAssetInput) {
 }
 
 async function buildManifest(update: any) {
+  const expoClient = resolveOtaExpoConfig(update);
+  // Config belongs in extra.expoClient, not twice in the manifest metadata.
+  const { expoClient: _config, ...releaseMetadata } = asMetadataRecord(update.metadata);
   const launchAssetUrl = await resolveObjectUrl(update.launchAssetKey);
   const assets = normalizeAssetList(update.assets).filter((asset) => asset.key !== update.launchAssetKey);
 
@@ -262,7 +272,7 @@ async function buildManifest(update: any) {
     },
     assets: await Promise.all(assets.map(buildAssetDescriptor)),
     metadata: {
-      ...(update.metadata && typeof update.metadata === 'object' ? update.metadata : {}),
+      ...releaseMetadata,
       channel: update.channel,
       otaSequence: update.otaSequence ?? undefined,
       displayVersion: update.displayVersion ?? undefined,
@@ -270,7 +280,7 @@ async function buildManifest(update: any) {
       releaseNotes: update.releaseNotes ?? undefined,
     },
     extra: {
-      expoClient: {},
+      expoClient,
     },
   };
 }

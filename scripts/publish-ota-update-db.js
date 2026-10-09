@@ -141,9 +141,21 @@ async function main() {
   if (!payload.updateId) throw new Error('Missing updateId');
   if (!payload.launchAssetKey) throw new Error('Missing launchAssetKey');
 
+  // CI publishes directly to the DB, bypassing /ota/publish. Enforce the same guard here.
+  const compiledValidator = path.resolve(__dirname, '../dist/utils/otaExpoConfig.js');
+  let validateOtaExpoConfig;
+  if (fs.existsSync(compiledValidator)) {
+    ({ validateOtaExpoConfig } = require(compiledValidator));
+  } else {
+    require('ts-node/register/transpile-only');
+    ({ validateOtaExpoConfig } = require('../src/utils/otaExpoConfig'));
+  }
+  validateOtaExpoConfig(payload.metadata, payload.runtimeVersion, payload.platform);
+
   const databaseUrl = resolveDatabaseUrl(args);
   console.log('Publishing OTA update to database:');
-  console.log(JSON.stringify({ ...payload, databaseUrl: databaseUrl.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:***@') }, null, 2));
+  console.log(JSON.stringify({ updateId: payload.updateId, platform: payload.platform,
+    channel: payload.channel, runtimeVersion: payload.runtimeVersion }, null, 2));
 
   if (args.dryRun === 'true' || args['dry-run'] === 'true') {
     console.log('Dry run: not writing database.');
