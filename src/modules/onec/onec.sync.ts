@@ -45,6 +45,7 @@ type StageIssue = { stageId: string; message: string };
 
 type ApplySummary = {
   resolvedStageIds: string[];
+  changedStageIds?: string[];
   blocked: StageIssue[];
   errors: StageIssue[];
 };
@@ -119,17 +120,20 @@ async function recordPromotedOfflineChanges(
   tx: TxClient,
   entity: BatchEntityCode,
   sessionId: string,
-  syncedAt: Date
+  syncedAt: Date,
+  summary: ApplySummary
 ) {
+  const where = { sessionId, id: { in: summary.changedStageIds ?? summary.resolvedStageIds } };
+  if (!where.id.in.length) return;
   if (entity === 'organizations') {
-    const rows = await tx.onecStageOrganization.findMany({ where: { sessionId }, select: { guid: true } });
+    const rows = await tx.onecStageOrganization.findMany({ where, select: { guid: true } });
     await recordOfflineDatasetChanges(tx, 'organizations', rows.map((item) => item.guid), syncedAt);
   } else if (entity === 'warehouses') {
-    const rows = await tx.onecStageWarehouse.findMany({ where: { sessionId }, select: { guid: true } });
+    const rows = await tx.onecStageWarehouse.findMany({ where, select: { guid: true } });
     await recordOfflineDatasetChanges(tx, 'warehouses', rows.map((item) => item.guid), syncedAt);
   } else if (entity === 'stock') {
     const rows = await tx.onecStageStock.findMany({
-      where: { sessionId },
+      where,
       select: { productGuid: true, warehouseGuid: true, organizationGuid: true, seriesGuid: true },
     });
     await recordOfflineDatasetChanges(tx, 'stock', rows.map((item) =>
@@ -137,7 +141,7 @@ async function recordPromotedOfflineChanges(
     ), syncedAt);
   } else if (entity === 'product-prices') {
     const rows = await tx.onecStageProductPrice.findMany({
-      where: { sessionId },
+      where,
       distinct: ['productGuid'],
       select: { productGuid: true },
     });
@@ -407,14 +411,28 @@ const normalizePhone = (value: string | null | undefined): string | undefined =>
   return prepared.startsWith('+') ? `+${digits}` : digits;
 };
 
-async function touchSession(sessionId: string) {
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      status: OnecSyncSessionStatus.ACCEPTING,
-      lastActivityAt: now(),
-    },
-  });
+const SESSION_OUTCOME_SELECT = {
+  id: true, status: true, acceptedCount: true, resolvedCount: true,
+  blockedCount: true, errorCount: true, notes: true,
+} as const;
+
+async function lockSession(tx: TxClient, sessionId: string) {
+  await tx.$queryRaw`SELECT id FROM "OnecSyncSession" WHERE id = ${sessionId} FOR UPDATE`;
+}
+
+async function withStagingSession<T>(sessionId: string, stage: (tx: TxClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await lockSession(tx, sessionId);
+    const session = await tx.onecSyncSession.findUnique({ where: { id: sessionId } });
+    if (!session) throw new Error(`Sync session ${sessionId} not found`);
+    if (session.status !== 'STARTED' && session.status !== 'ACCEPTING') {
+      throw new Error(`Sync session ${sessionId} is ${session.status}; start a new session for new data`);
+    }
+    await tx.onecSyncSession.update({
+      where: { id: sessionId }, data: { status: 'ACCEPTING' },
+    });
+    return stage(tx);
+  }, { maxWait: SYNC_SESSION_TX_MAX_WAIT_MS, timeout: SYNC_SESSION_TX_TIMEOUT_MS });
 }
 
 export async function startOnecSyncSession(body: SessionStartBody) {
@@ -454,7 +472,6 @@ export async function resolveBatchSession(
     if (!session) {
       throw new Error(`Sync session ${sessionId} not found`);
     }
-    await touchSession(session.id);
     return { sessionId: session.id, implicit: false };
   }
 
@@ -475,467 +492,465 @@ export async function stageNomenclatureBatch(
   sessionId: string,
   items: NomenclatureItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageNomenclature.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.guid,
-          guid: item.guid,
-          parentGuid: item.parentGuid ?? null,
-          isGroup: item.isGroup,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          parentGuid: item.parentGuid ?? null,
-          isGroup: item.isGroup,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageNomenclature.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.guid,
+            guid: item.guid,
+            parentGuid: item.parentGuid ?? null,
+            isGroup: item.isGroup,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            parentGuid: item.parentGuid ?? null,
+            isGroup: item.isGroup,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
 export async function stageWarehousesBatch(
   sessionId: string,
   items: WarehouseItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageWarehouse.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.guid,
-          guid: item.guid,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageWarehouse.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.guid,
+            guid: item.guid,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
 export async function stageOrganizationsBatch(
   sessionId: string,
   items: OrganizationItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageOrganization.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.guid,
-          guid: item.guid,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageOrganization.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.guid,
+            guid: item.guid,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
 export async function stageCounterpartiesBatch(
   sessionId: string,
   items: CounterpartyItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageCounterparty.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.guid,
-          guid: item.guid,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageCounterparty.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.guid,
+            guid: item.guid,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
 export async function stageContractsBatch(
   sessionId: string,
   items: ContractItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageContract.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.guid,
-          guid: item.guid,
-          counterpartyGuid: item.counterpartyGuid ?? null,
-          organizationGuid: item.organizationGuid ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          counterpartyGuid: item.counterpartyGuid ?? null,
-          organizationGuid: item.organizationGuid ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageContract.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.guid,
+            guid: item.guid,
+            counterpartyGuid: item.counterpartyGuid ?? null,
+            organizationGuid: item.organizationGuid ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            counterpartyGuid: item.counterpartyGuid ?? null,
+            organizationGuid: item.organizationGuid ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.guid, status: 'ok' }));
 }
 
 export async function stageAgreementsBatch(
   sessionId: string,
   items: AgreementItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) =>
-      prisma.onecStageAgreement.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey: item.agreement.guid } },
-        create: {
-          sessionId,
-          sourceKey: item.agreement.guid,
-          agreementGuid: item.agreement.guid,
-          counterpartyGuid: item.agreement.counterpartyGuid ?? item.contract?.counterpartyGuid ?? null,
-          contractGuid: item.agreement.contractGuid ?? item.contract?.guid ?? null,
-          warehouseGuid: item.agreement.warehouseGuid ?? null,
-          priceTypeGuid: item.agreement.priceTypeGuid ?? item.priceType?.guid ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt:
-            item.agreement.sourceUpdatedAt ??
-            item.contract?.sourceUpdatedAt ??
-            item.priceType?.sourceUpdatedAt ??
-            null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          counterpartyGuid: item.agreement.counterpartyGuid ?? item.contract?.counterpartyGuid ?? null,
-          contractGuid: item.agreement.contractGuid ?? item.contract?.guid ?? null,
-          warehouseGuid: item.agreement.warehouseGuid ?? null,
-          priceTypeGuid: item.agreement.priceTypeGuid ?? item.priceType?.guid ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt:
-            item.agreement.sourceUpdatedAt ??
-            item.contract?.sourceUpdatedAt ??
-            item.priceType?.sourceUpdatedAt ??
-            null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      })
-    )
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) =>
+        prisma.onecStageAgreement.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey: item.agreement.guid } },
+          create: {
+            sessionId,
+            sourceKey: item.agreement.guid,
+            agreementGuid: item.agreement.guid,
+            counterpartyGuid: item.agreement.counterpartyGuid ?? item.contract?.counterpartyGuid ?? null,
+            contractGuid: item.agreement.contractGuid ?? item.contract?.guid ?? null,
+            warehouseGuid: item.agreement.warehouseGuid ?? null,
+            priceTypeGuid: item.agreement.priceTypeGuid ?? item.priceType?.guid ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt:
+              item.agreement.sourceUpdatedAt ??
+              item.contract?.sourceUpdatedAt ??
+              item.priceType?.sourceUpdatedAt ??
+              null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            counterpartyGuid: item.agreement.counterpartyGuid ?? item.contract?.counterpartyGuid ?? null,
+            contractGuid: item.agreement.contractGuid ?? item.contract?.guid ?? null,
+            warehouseGuid: item.agreement.warehouseGuid ?? null,
+            priceTypeGuid: item.agreement.priceTypeGuid ?? item.priceType?.guid ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt:
+              item.agreement.sourceUpdatedAt ??
+              item.contract?.sourceUpdatedAt ??
+              item.priceType?.sourceUpdatedAt ??
+              null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        })
+      )
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({ key: item.agreement.guid, status: 'ok' }));
   });
-  return items.map((item) => ({ key: item.agreement.guid, status: 'ok' }));
 }
 
 export async function stageProductPricesBatch(
   sessionId: string,
   items: ProductPriceItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  const productPriceSourceKey = (item: ProductPriceItem) =>
-    optionalGuid(item.guid) ??
-    [
-      item.productGuid,
-      item.characteristicGuid ?? '',
-      item.priceTypeGuid ?? item.priceType?.guid ?? '',
-      item.packageGuid ?? '',
-      item.startDate?.toISOString() ?? '',
-    ].join('|');
-  await Promise.all(
-    items.map((item) => {
-      const sourceKey = productPriceSourceKey(item);
-      return prisma.onecStageProductPrice.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey } },
-        create: {
-          sessionId,
-          sourceKey,
-          guid: optionalGuid(item.guid) ?? null,
-          productGuid: item.productGuid,
-          priceTypeGuid: item.priceTypeGuid ?? null,
-          startDate: item.startDate ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          guid: optionalGuid(item.guid) ?? null,
-          productGuid: item.productGuid,
-          priceTypeGuid: item.priceTypeGuid ?? null,
-          startDate: item.startDate ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      });
-    })
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    const productPriceSourceKey = (item: ProductPriceItem) =>
+      optionalGuid(item.guid) ??
+      [
+        item.productGuid,
+        item.characteristicGuid ?? '',
+        item.priceTypeGuid ?? item.priceType?.guid ?? '',
+        item.packageGuid ?? '',
+        item.startDate?.toISOString() ?? '',
+      ].join('|');
+    await Promise.all(
+      items.map((item) => {
+        const sourceKey = productPriceSourceKey(item);
+        return prisma.onecStageProductPrice.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey } },
+          create: {
+            sessionId,
+            sourceKey,
+            guid: optionalGuid(item.guid) ?? null,
+            productGuid: item.productGuid,
+            priceTypeGuid: item.priceTypeGuid ?? null,
+            startDate: item.startDate ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            guid: optionalGuid(item.guid) ?? null,
+            productGuid: item.productGuid,
+            priceTypeGuid: item.priceTypeGuid ?? null,
+            startDate: item.startDate ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        });
+      })
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({
+      key: productPriceSourceKey(item),
+      status: 'ok',
+    }));
   });
-  return items.map((item) => ({
-    key: productPriceSourceKey(item),
-    status: 'ok',
-  }));
 }
 
 export async function stageSpecialPricesBatch(
   sessionId: string,
   items: SpecialPriceItem[]
 ): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) => {
-      const sourceKey =
+  return withStagingSession(sessionId, async (prisma) => {
+    const importedAt = now();
+    await Promise.all(
+      items.map((item) => {
+        const sourceKey =
+          optionalGuid(item.guid) ??
+          `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`;
+        return prisma.onecStageSpecialPrice.upsert({
+          where: { sessionId_sourceKey: { sessionId, sourceKey } },
+          create: {
+            sessionId,
+            sourceKey,
+            guid: optionalGuid(item.guid) ?? null,
+            productGuid: item.productGuid,
+            counterpartyGuid: item.counterpartyGuid ?? null,
+            agreementGuid: item.agreementGuid ?? null,
+            priceTypeGuid: item.priceTypeGuid ?? null,
+            startDate: item.startDate ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+          update: {
+            guid: optionalGuid(item.guid) ?? null,
+            productGuid: item.productGuid,
+            counterpartyGuid: item.counterpartyGuid ?? null,
+            agreementGuid: item.agreementGuid ?? null,
+            priceTypeGuid: item.priceTypeGuid ?? null,
+            startDate: item.startDate ?? null,
+            payload: toJsonValue(item),
+            payloadHash: hashPayload(item),
+            sourceUpdatedAt: item.sourceUpdatedAt ?? null,
+            lastImportedAt: importedAt,
+            resolveStatus: OnecStageResolveStatus.PENDING,
+            lastResolveError: null,
+            resolvedAt: null,
+          },
+        });
+      })
+    );
+    await prisma.onecSyncSession.update({
+      where: { id: sessionId },
+      data: {
+        acceptedCount: { increment: items.length },
+        lastActivityAt: importedAt,
+      },
+    });
+    return items.map((item) => ({
+      key:
         optionalGuid(item.guid) ??
-        `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`;
-      return prisma.onecStageSpecialPrice.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey } },
-        create: {
-          sessionId,
-          sourceKey,
-          guid: optionalGuid(item.guid) ?? null,
-          productGuid: item.productGuid,
-          counterpartyGuid: item.counterpartyGuid ?? null,
-          agreementGuid: item.agreementGuid ?? null,
-          priceTypeGuid: item.priceTypeGuid ?? null,
-          startDate: item.startDate ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          guid: optionalGuid(item.guid) ?? null,
-          productGuid: item.productGuid,
-          counterpartyGuid: item.counterpartyGuid ?? null,
-          agreementGuid: item.agreementGuid ?? null,
-          priceTypeGuid: item.priceTypeGuid ?? null,
-          startDate: item.startDate ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.sourceUpdatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      });
-    })
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+        `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`,
+      status: 'ok',
+    }));
   });
-  return items.map((item) => ({
-    key:
-      optionalGuid(item.guid) ??
-      `${item.productGuid}|${item.counterpartyGuid ?? ''}|${item.agreementGuid ?? ''}|${item.priceTypeGuid ?? ''}|${item.startDate?.toISOString() ?? ''}`,
-    status: 'ok',
-  }));
 }
 
-export async function stageStockBatch(
-  sessionId: string,
-  items: StockItem[]
-): Promise<BatchResult[]> {
-  const importedAt = now();
-  await Promise.all(
-    items.map((item) => {
-      const sourceKey = `${item.productGuid}|${item.warehouseGuid}|${item.organizationGuid}|${item.seriesGuid ?? ''}`;
-      return prisma.onecStageStock.upsert({
-        where: { sessionId_sourceKey: { sessionId, sourceKey } },
-        create: {
-          sessionId,
-          sourceKey,
-          productGuid: item.productGuid,
-          warehouseGuid: item.warehouseGuid,
-          organizationGuid: item.organizationGuid,
-          seriesGuid: item.seriesGuid ?? null,
-          seriesNumber: item.seriesNumber ?? null,
-          seriesProductionDate: item.seriesProductionDate ?? null,
-          seriesExpiresAt: item.seriesExpiresAt ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.updatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-        update: {
-          productGuid: item.productGuid,
-          warehouseGuid: item.warehouseGuid,
-          organizationGuid: item.organizationGuid,
-          seriesGuid: item.seriesGuid ?? null,
-          seriesNumber: item.seriesNumber ?? null,
-          seriesProductionDate: item.seriesProductionDate ?? null,
-          seriesExpiresAt: item.seriesExpiresAt ?? null,
-          payload: toJsonValue(item),
-          payloadHash: hashPayload(item),
-          sourceUpdatedAt: item.updatedAt ?? null,
-          lastImportedAt: importedAt,
-          resolveStatus: OnecStageResolveStatus.PENDING,
-          lastResolveError: null,
-          resolvedAt: null,
-        },
-      });
-    })
-  );
-  await prisma.onecSyncSession.update({
-    where: { id: sessionId },
-    data: {
-      acceptedCount: { increment: items.length },
-      lastActivityAt: importedAt,
-    },
+export async function stageStockBatch(sessionId: string, items: StockItem[]): Promise<BatchResult[]> {
+  return withStagingSession(sessionId, async (tx) => {
+    const importedAt = now();
+    const keyed = new Map(items.map(item => [
+      `${item.productGuid}|${item.warehouseGuid}|${item.organizationGuid}|${item.seriesGuid ?? ''}`, item,
+    ]));
+    const rows = [...keyed.entries()];
+    // One bounded SQL upsert per chunk instead of a query for every balance.
+    // Deduplication also avoids ON CONFLICT updating the same row twice.
+    for (let offset = 0; offset < rows.length; offset += 250) {
+      const values = rows.slice(offset, offset + 250).map(([sourceKey, item]) => Prisma.sql`(
+        ${randomUUID()}, ${sessionId}, ${sourceKey}, ${item.productGuid}, ${item.warehouseGuid},
+        ${item.organizationGuid}, ${item.seriesGuid ?? null}, ${item.seriesNumber ?? null},
+        ${item.seriesProductionDate ?? null}::timestamp, ${item.seriesExpiresAt ?? null}::timestamp,
+        ${JSON.stringify(item)}::jsonb, ${hashPayload(item)}, ${item.updatedAt ?? null}::timestamp,
+        ${importedAt}::timestamp, 'PENDING'::"OnecStageResolveStatus"
+      )`);
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO "OnecStageStock" (id, "sessionId", "sourceKey", "productGuid", "warehouseGuid",
+          "organizationGuid", "seriesGuid", "seriesNumber", "seriesProductionDate", "seriesExpiresAt",
+          payload, "payloadHash", "sourceUpdatedAt", "lastImportedAt", "resolveStatus")
+        VALUES ${Prisma.join(values)}
+        ON CONFLICT ("sessionId", "sourceKey") DO UPDATE SET
+          "productGuid" = EXCLUDED."productGuid", "warehouseGuid" = EXCLUDED."warehouseGuid",
+          "organizationGuid" = EXCLUDED."organizationGuid", "seriesGuid" = EXCLUDED."seriesGuid",
+          "seriesNumber" = EXCLUDED."seriesNumber", "seriesProductionDate" = EXCLUDED."seriesProductionDate",
+          "seriesExpiresAt" = EXCLUDED."seriesExpiresAt", payload = EXCLUDED.payload,
+          "payloadHash" = EXCLUDED."payloadHash", "sourceUpdatedAt" = EXCLUDED."sourceUpdatedAt",
+          "lastImportedAt" = EXCLUDED."lastImportedAt", "resolveStatus" = 'PENDING',
+          "lastResolveError" = NULL, "resolvedAt" = NULL
+      `);
+    }
+    await tx.onecSyncSession.update({
+      where: { id: sessionId }, data: { acceptedCount: { increment: rows.length }, lastActivityAt: importedAt },
+    });
+    return items.map(item => ({
+      key: `${item.productGuid}:${item.warehouseGuid}:${item.organizationGuid}:${item.seriesGuid ?? ''}`,
+      status: 'ok',
+    }));
   });
-  return items.map((item) => ({
-    key: `${item.productGuid}:${item.warehouseGuid}:${item.organizationGuid}:${item.seriesGuid ?? ''}`,
-    status: 'ok',
-  }));
 }
 
 async function clearEntityInTx(tx: TxClient, entity: BatchEntityCode) {
@@ -2086,19 +2101,31 @@ async function applyStagedOrganizations(
 
 async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date): Promise<ApplySummary> {
   const stages = await tx.onecStageStock.findMany({ where: { sessionId }, orderBy: { lastImportedAt: 'asc' } });
-  const summary: ApplySummary = { resolvedStageIds: [], blocked: [], errors: [] };
+  const summary: ApplySummary = { resolvedStageIds: [], changedStageIds: [], blocked: [], errors: [] };
+  if (!stages.length) return summary;
+  const [products, warehouses, organizations] = await Promise.all([
+    tx.product.findMany({ where: { guid: { in: [...new Set(stages.map(row => row.productGuid))] } }, select: { id: true, guid: true } }),
+    tx.warehouse.findMany({ where: { guid: { in: [...new Set(stages.map(row => row.warehouseGuid))] } }, select: { id: true, guid: true } }),
+    tx.organization.findMany({ where: { guid: { in: [...new Set(stages.flatMap(row => row.organizationGuid ? [row.organizationGuid] : []))] } }, select: { id: true, guid: true } }),
+  ]);
+  const productMap = new Map(products.map(row => [row.guid, row]));
+  const warehouseMap = new Map(warehouses.map(row => [row.guid, row]));
+  const organizationMap = new Map(organizations.map(row => [row.guid, row]));
+  const balances = await tx.stockBalance.findMany({ where: {
+    productId: { in: products.map(row => row.id) }, warehouseId: { in: warehouses.map(row => row.id) },
+    organizationId: { in: organizations.map(row => row.id) },
+  } });
+  const current = new Map(balances.map(row => [row.syncKey, row]));
+  const comparable = (value: unknown): string | null => value == null ? null
+    : value instanceof Date ? value.toISOString() : String(value);
 
   for (const stage of stages) {
     const item = stage.payload as unknown as StockItem;
     try {
       const organizationGuid = stage.organizationGuid ?? item.organizationGuid ?? null;
-      const [product, warehouse, organization] = await Promise.all([
-        tx.product.findUnique({ where: { guid: item.productGuid }, select: { id: true } }),
-        tx.warehouse.findUnique({ where: { guid: item.warehouseGuid }, select: { id: true } }),
-        organizationGuid
-          ? tx.organization.findUnique({ where: { guid: organizationGuid }, select: { id: true } })
-          : Promise.resolve(null),
-      ]);
+      const product = productMap.get(item.productGuid);
+      const warehouse = warehouseMap.get(item.warehouseGuid);
+      const organization = organizationMap.get(organizationGuid ?? '');
 
       if (!product) {
         summary.blocked.push({ stageId: stage.id, message: `Product ${item.productGuid} not found` });
@@ -2121,46 +2148,35 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
       const reserved = item.reserved ?? ((item.clientReserved ?? 0) + (item.managerReserved ?? 0));
 
       const syncKey = `${product.id}|${warehouse.id}|${organization.id}|${item.seriesGuid ?? ''}`;
-      await tx.stockBalance.upsert({
-        where: { syncKey },
-        create: {
-          syncKey,
-          productId: product.id,
-          warehouseId: warehouse.id,
-          organizationId: organization.id,
-          quantity: toDecimal(quantity) ?? new Prisma.Decimal(0),
-          reserved: toDecimal(reserved),
-          inStock: toDecimal(item.inStock ?? quantity),
-          shipping: toDecimal(item.shipping),
-          clientReserved: toDecimal(item.clientReserved),
-          managerReserved: toDecimal(item.managerReserved),
-          available: toDecimal(item.available ?? (quantity - reserved)),
-          updatedAt: item.updatedAt ?? syncedAt,
-          seriesGuid: item.seriesGuid ?? null,
-          seriesNumber: item.seriesNumber ?? null,
-          seriesProductionDate: item.seriesProductionDate ?? null,
-          seriesExpiresAt: item.seriesExpiresAt ?? null,
-          sourceUpdatedAt: item.updatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
-        update: {
-          organizationId: organization.id,
-          quantity: toDecimal(quantity) ?? new Prisma.Decimal(0),
-          reserved: toDecimal(reserved),
-          inStock: toDecimal(item.inStock ?? quantity),
-          shipping: toDecimal(item.shipping),
-          clientReserved: toDecimal(item.clientReserved),
-          managerReserved: toDecimal(item.managerReserved),
-          available: toDecimal(item.available ?? (quantity - reserved)),
-          updatedAt: item.updatedAt ?? syncedAt,
-          seriesGuid: item.seriesGuid ?? null,
-          seriesNumber: item.seriesNumber ?? null,
-          seriesProductionDate: item.seriesProductionDate ?? null,
-          seriesExpiresAt: item.seriesExpiresAt ?? null,
-          sourceUpdatedAt: item.updatedAt ?? syncedAt,
-          lastSyncedAt: syncedAt,
-        },
-      });
+      const existing = current.get(syncKey);
+      const sourceUpdatedAt = item.updatedAt ? new Date(item.updatedAt) : stage.lastImportedAt;
+      if (existing?.sourceUpdatedAt && existing.sourceUpdatedAt > sourceUpdatedAt) {
+        summary.resolvedStageIds.push(stage.id);
+        continue;
+      }
+      const data = {
+        quantity: toDecimal(quantity) ?? new Prisma.Decimal(0), reserved: toDecimal(reserved),
+        inStock: toDecimal(item.inStock ?? quantity), shipping: toDecimal(item.shipping),
+        clientReserved: toDecimal(item.clientReserved), managerReserved: toDecimal(item.managerReserved),
+        available: toDecimal(item.available ?? (quantity - reserved)),
+        seriesGuid: item.seriesGuid ?? null, seriesNumber: item.seriesNumber ?? null,
+        seriesProductionDate: item.seriesProductionDate ? new Date(item.seriesProductionDate) : null,
+        seriesExpiresAt: item.seriesExpiresAt ? new Date(item.seriesExpiresAt) : null,
+      };
+      const changed = !existing || Object.entries(data).some(([key, value]) =>
+        value !== undefined && comparable(existing[key as keyof typeof existing]) !== comparable(value));
+      if (!changed && existing) {
+        // Preserve freshness without emitting an offline change for identical balances.
+        await tx.stockBalance.update({ where: { id: existing.id }, data: { sourceUpdatedAt, lastSyncedAt: syncedAt } });
+      } else {
+        await tx.stockBalance.upsert({
+          where: { syncKey },
+          create: { syncKey, productId: product.id, warehouseId: warehouse.id, organizationId: organization.id,
+            ...data, updatedAt: sourceUpdatedAt, sourceUpdatedAt, lastSyncedAt: syncedAt },
+          update: { ...data, updatedAt: sourceUpdatedAt, sourceUpdatedAt, lastSyncedAt: syncedAt },
+        });
+        summary.changedStageIds!.push(stage.id);
+      }
 
       summary.resolvedStageIds.push(stage.id);
     } catch (error) {
@@ -2175,6 +2191,7 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
 }
 
 async function updateStageStatuses(
+  tx: TxClient,
   sessionId: string,
   entity: BatchEntityCode,
   summary: ApplySummary,
@@ -2187,55 +2204,55 @@ async function updateStageStatuses(
   if (resolvedIds.length) {
     switch (entity) {
       case 'nomenclature':
-        await prisma.onecStageNomenclature.updateMany({
+        await tx.onecStageNomenclature.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'organizations':
-        await prisma.onecStageOrganization.updateMany({
+        await tx.onecStageOrganization.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'warehouses':
-        await prisma.onecStageWarehouse.updateMany({
+        await tx.onecStageWarehouse.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'counterparties':
-        await prisma.onecStageCounterparty.updateMany({
+        await tx.onecStageCounterparty.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'contracts':
-        await prisma.onecStageContract.updateMany({
+        await tx.onecStageContract.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'agreements':
-        await prisma.onecStageAgreement.updateMany({
+        await tx.onecStageAgreement.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'product-prices':
-        await prisma.onecStageProductPrice.updateMany({
+        await tx.onecStageProductPrice.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'special-prices':
-        await prisma.onecStageSpecialPrice.updateMany({
+        await tx.onecStageSpecialPrice.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
         break;
       case 'stock':
-        await prisma.onecStageStock.updateMany({
+        await tx.onecStageStock.updateMany({
           where: { sessionId, id: { in: resolvedIds } },
           data: { resolveStatus: OnecStageResolveStatus.RESOLVED, lastResolveError: null, resolvedAt },
         });
@@ -2246,31 +2263,31 @@ async function updateStageStatuses(
   const applyIssue = async (stageId: string, status: OnecStageResolveStatus, message: string) => {
     switch (entity) {
       case 'nomenclature':
-        await prisma.onecStageNomenclature.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageNomenclature.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'organizations':
-        await prisma.onecStageOrganization.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageOrganization.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'warehouses':
-        await prisma.onecStageWarehouse.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageWarehouse.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'counterparties':
-        await prisma.onecStageCounterparty.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageCounterparty.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'contracts':
-        await prisma.onecStageContract.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageContract.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'agreements':
-        await prisma.onecStageAgreement.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageAgreement.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'product-prices':
-        await prisma.onecStageProductPrice.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageProductPrice.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'special-prices':
-        await prisma.onecStageSpecialPrice.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageSpecialPrice.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
       case 'stock':
-        await prisma.onecStageStock.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
+        await tx.onecStageStock.update({ where: { id: stageId }, data: { resolveStatus: status, lastResolveError: message, resolvedAt: null } });
         return;
     }
   };
@@ -2284,19 +2301,40 @@ async function updateStageStatuses(
 }
 
 export async function completeOnecSyncSession(body: SessionCompleteBody): Promise<SessionOutcome> {
-  const session = await prisma.onecSyncSession.findUnique({
-    where: { id: body.sessionId },
-    select: {
-      id: true,
-      replaceMode: true,
-      acceptedCount: true,
-      selectedEntities: true,
-    },
-  });
+  // Claim under the same row lock as batch ingestion. The durable COMPLETING
+  // fence survives process death; it must never be silently replayed.
+  const claim = await prisma.$transaction(async (tx) => {
+    await lockSession(tx, body.sessionId);
+    const session = await tx.onecSyncSession.findUnique({ where: { id: body.sessionId } });
+    if (!session) throw new Error(`Sync session ${body.sessionId} not found`);
+    if (['COMPLETED', 'PARTIAL', 'FAILED'].includes(session.status)) {
+      return { session, acquired: false };
+    }
+    if (session.status === 'COMPLETING') {
+      throw new Error(`Sync session ${session.id} is already completing; retry later`);
+    }
+    const where = { sessionId: session.id };
+    const counts = await Promise.all([
+      tx.onecStageNomenclature.count({ where }), tx.onecStageOrganization.count({ where }),
+      tx.onecStageWarehouse.count({ where }), tx.onecStageCounterparty.count({ where }),
+      tx.onecStageContract.count({ where }), tx.onecStageAgreement.count({ where }),
+      tx.onecStageProductPrice.count({ where }), tx.onecStageSpecialPrice.count({ where }),
+      tx.onecStageStock.count({ where }),
+    ]);
+    const claimed = await tx.onecSyncSession.update({
+      where: { id: session.id },
+      data: { status: 'COMPLETING', acceptedCount: counts.reduce((sum, n) => sum + n, 0), lastActivityAt: now() },
+    });
+    return { session: claimed, acquired: true };
+  }, { maxWait: SYNC_SESSION_TX_MAX_WAIT_MS, timeout: 30_000 });
 
-  if (!session) {
-    throw new Error(`Sync session ${body.sessionId} not found`);
-  }
+  const session = claim.session;
+  const toOutcome = (row: Pick<typeof session,
+    'id' | 'status' | 'acceptedCount' | 'resolvedCount' | 'blockedCount' | 'errorCount' | 'notes'>): SessionOutcome => ({
+    sessionId: row.id, status: row.status, acceptedCount: row.acceptedCount,
+    resolvedCount: row.resolvedCount, blockedCount: row.blockedCount, errorCount: row.errorCount, notes: row.notes,
+  });
+  if (!claim.acquired) return toOutcome(session);
 
   const rawSelected = (session.selectedEntities as string[] | null) ?? [];
   const selected = normalizeSelectedEntities(rawSelected);
@@ -2304,19 +2342,15 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
     ? RECONCILE_ORDER.filter((entity) => selected.includes(entity))
     : RECONCILE_ORDER;
   const syncedAt = now();
-
-  await prisma.onecSyncSession.update({
-    where: { id: session.id },
-    data: { status: OnecSyncSessionStatus.COMPLETING, lastActivityAt: syncedAt },
-  });
-
   const summaries = new Map<BatchEntityCode, ApplySummary>();
-  let notes: string | null = null;
-  let status: OnecSyncSessionStatus = OnecSyncSessionStatus.COMPLETED;
-
+  let outcome: SessionOutcome;
   try {
-    await prisma.$transaction(
-      async (tx) => {
+    outcome = await prisma.$transaction(async (tx) => {
+      await lockSession(tx, session.id);
+      // Serialize overlapping stock promotes, including replace-mode clears.
+      if (entities.includes('stock')) {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('onec-stock-promote'))::text`;
+      }
         await resetPromotedOfflineDatasets(tx, entities, session.replaceMode, session.id);
         if (session.replaceMode) {
           for (const entity of entities) {
@@ -2357,7 +2391,7 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
           }
           summaries.set(entity, summary);
           if (!session.replaceMode) {
-            await recordPromotedOfflineChanges(tx, entity, session.id, syncedAt);
+            await recordPromotedOfflineChanges(tx, entity, session.id, syncedAt, summary);
           }
         }
 
@@ -2369,84 +2403,41 @@ export async function completeOnecSyncSession(body: SessionCompleteBody): Promis
           );
         }
 
-        const blockedCount = [...summaries.values()].reduce((sum, item) => sum + item.blocked.length, 0);
-        const errorCount = [...summaries.values()].reduce((sum, item) => sum + item.errors.length, 0);
-        if (session.replaceMode && (blockedCount > 0 || errorCount > 0)) {
-          notes =
-            blockedCount > 0
-              ? 'Session has unresolved references. Final promote rolled back.'
-              : 'Session failed during promote.';
-          throw new Error(notes);
-        }
-      },
-      {
-        maxWait: SYNC_SESSION_TX_MAX_WAIT_MS,
-        timeout: SYNC_SESSION_TX_TIMEOUT_MS,
+      const resolvedCount = [...summaries.values()].reduce((sum, item) => sum + item.resolvedStageIds.length, 0);
+      const blockedCount = [...summaries.values()].reduce((sum, item) => sum + item.blocked.length, 0);
+      const errorCount = [...summaries.values()].reduce((sum, item) => sum + item.errors.length, 0);
+      if (session.replaceMode && (blockedCount > 0 || errorCount > 0)) {
+        throw new Error(`Replace promote rolled back: ${blockedCount} unresolved references, ${errorCount} errors.`);
       }
-    );
+      for (const entity of entities) {
+        await updateStageStatuses(tx, session.id, entity, summaries.get(entity) ?? emptyApplySummary(), syncedAt);
+      }
+      const status = errorCount > 0 && resolvedCount === 0 ? 'FAILED'
+        : blockedCount > 0 || errorCount > 0 ? 'PARTIAL' : 'COMPLETED';
+      // Payloads, row statuses, offline revisions and summary commit together.
+      return toOutcome(await tx.onecSyncSession.update({
+        where: { id: session.id },
+        data: { status, resolvedCount, blockedCount, errorCount, notes: null, completedAt: now(), lastActivityAt: now() },
+        select: SESSION_OUTCOME_SELECT,
+      }));
+    }, { maxWait: SYNC_SESSION_TX_MAX_WAIT_MS, timeout: SYNC_SESSION_TX_TIMEOUT_MS });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to complete sync session';
-    notes =
-      notes ??
-      (message.includes('expired transaction')
-        ? `Session promote transaction timed out after ${SYNC_SESSION_TX_TIMEOUT_MS} ms.`
-        : message);
+    const notes = error instanceof Error ? error.message : 'Failed to complete sync session';
+    // No RESOLVED markers survive a rolled-back transaction. Preserve payloads
+    // and the terminal failure for diagnosis; retry uses a new source snapshot.
+    outcome = toOutcome(await prisma.onecSyncSession.update({
+      where: { id: session.id, status: 'COMPLETING' },
+      data: { status: 'FAILED', resolvedCount: 0, blockedCount: 0, errorCount: 1,
+        notes, completedAt: now(), lastActivityAt: now() },
+      select: SESSION_OUTCOME_SELECT,
+    }));
   }
-
-  let resolvedCount = 0;
-  let blockedCount = 0;
-  let errorCount = 0;
-  for (const entity of entities) {
-    const summary = summaries.get(entity) ?? { resolvedStageIds: [], blocked: [], errors: [] };
-    await updateStageStatuses(session.id, entity, summary, syncedAt);
-    resolvedCount += summary.resolvedStageIds.length;
-    blockedCount += summary.blocked.length;
-    errorCount += summary.errors.length;
+  if (outcome.status !== 'FAILED' && entities.some(entity =>
+    ['stock', 'nomenclature', 'warehouses', 'organizations'].includes(entity))) {
+    await cacheDelPrefix(STOCK_BALANCES_CACHE_PREFIX).catch(error =>
+      console.warn('[onec-sync] cache invalidation failed after committed promote', error));
   }
-
-  if (notes && session.replaceMode) {
-    status = blockedCount > 0 || resolvedCount > 0 ? OnecSyncSessionStatus.PARTIAL : OnecSyncSessionStatus.FAILED;
-  } else if (errorCount > 0 && resolvedCount === 0) {
-    status = OnecSyncSessionStatus.FAILED;
-  } else if (blockedCount > 0 || errorCount > 0) {
-    status = OnecSyncSessionStatus.PARTIAL;
-  }
-
-  const outcome = await prisma.onecSyncSession.update({
-    where: { id: session.id },
-    data: {
-      status,
-      resolvedCount,
-      blockedCount,
-      errorCount,
-      notes,
-      completedAt: syncedAt,
-      lastActivityAt: syncedAt,
-    },
-    select: {
-      id: true,
-      status: true,
-      acceptedCount: true,
-      resolvedCount: true,
-      blockedCount: true,
-      errorCount: true,
-      notes: true,
-    },
-  });
-
-  if (entities.some((entity) => entity === 'stock' || entity === 'nomenclature' || entity === 'warehouses' || entity === 'organizations')) {
-    await cacheDelPrefix(STOCK_BALANCES_CACHE_PREFIX);
-  }
-
-  return {
-    sessionId: outcome.id,
-    status: outcome.status,
-    acceptedCount: outcome.acceptedCount,
-    resolvedCount: outcome.resolvedCount,
-    blockedCount: outcome.blockedCount,
-    errorCount: outcome.errorCount,
-    notes: outcome.notes,
-  };
+  return outcome;
 }
 
 export function getSyncEntityType(entity: BatchEntityCode): SyncEntityType {

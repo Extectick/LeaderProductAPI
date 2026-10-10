@@ -135,28 +135,37 @@ async function completeSyncRun(
   const errorCount = results.length - successCount;
   const status = calcRunStatus(successCount, errorCount);
 
-  if (results.length > 0) {
-    await prisma.syncRunItem.createMany({
-      data: results.map((r) => ({
-        runId,
-        key: r.key,
-        status: mapItemStatus(r.status),
-        error: r.error,
-      })),
+  await prisma.$transaction(async (tx) => {
+    const run = await tx.syncRun.findUniqueOrThrow({
+      where: { id: runId }, select: { entity: true, direction: true },
     });
-  }
-
-  await prisma.syncRun.update({
-    where: { id: runId },
-    data: {
-      totalCount: results.length,
-      successCount,
-      errorCount,
-      status,
-      notes,
-      meta: meta ? (meta as Prisma.InputJsonValue) : undefined,
-      finishedAt: now(),
-    },
+    // A successful stock batch is an acknowledgement, not an audit trail.
+    // Keep totals on SyncRun and retain every error; don't journal each balance.
+    const details = run.entity === 'STOCK' && run.direction === 'IMPORT'
+      ? results.filter(result => result.status !== 'ok') : results;
+    if (details.length > 0) {
+      await tx.syncRunItem.createMany({
+        data: details.map((r) => ({
+          runId,
+          key: r.key,
+          status: mapItemStatus(r.status),
+          error: r.error,
+        })),
+      });
+    }
+    await tx.syncRun.update({
+      where: { id: runId },
+      data: {
+        totalCount: results.length,
+        successCount,
+        errorCount,
+        status,
+        notes,
+        meta: { ...meta, storedItemCount: details.length,
+          successDetailsOmitted: results.length - details.length } as Prisma.InputJsonValue,
+        finishedAt: now(),
+      },
+    });
   });
 }
 
@@ -220,6 +229,9 @@ async function completeImplicitSessionIfNeeded(
       secret: process.env.ONEC_SECRET ?? '',
       sessionId,
     });
+    if (outcome.status === 'FAILED') {
+      throw new Error(outcome.notes ?? 'Sync promote failed; data was not committed');
+    }
     return outcome;
   } catch (error) {
     console.error(`Failed to auto-complete implicit sync session ${sessionId}`, error);

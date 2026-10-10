@@ -1,0 +1,69 @@
+name: Verify and build 1C retention API fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: LeaderAPI_retention_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['54329:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_retention_ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Guard pinned production overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=e670d284f758630304ce3622672a2e994ec41275
+          git merge-base --is-ancestor "$base" "$GITHUB_SHA"
+          unexpected=$(git diff --name-only "$base" "$GITHUB_SHA" | grep -Ev '^(src/index.ts|src/modules/onec/onec\.(sync|controllers).ts|src/services/onecSyncMaintenanceService.ts|scripts/onec-sync-retention.js|__tests__/onecSyncRetention.test.ts|jest.onec-retention.config.ts|\.github/workflows/onec-retention.yml|deploy/onec-retention/Dockerfile|docs/onec-sync-retention.md)$' || true)
+          test -z "$unexpected" || { echo "Outside reviewed scope: $unexpected"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run type-check
+      - run: npx prisma db push
+      - run: npx jest --config jest.onec-retention.config.ts --runInBand
+      - run: npm run test:unit -- --runInBand __tests__/ota.manifest.unit.test.ts __tests__/onec.orderWriteSafety.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.service.unit.test.ts
+      - run: npm run build
+      - name: Stage only reviewed runtime files
+        run: |
+          mkdir -p .onec-retention/dist/modules/onec .onec-retention/dist/services .onec-retention/scripts
+          cp dist/index.js .onec-retention/dist/
+          cp dist/modules/onec/onec.sync.js dist/modules/onec/onec.controllers.js .onec-retention/dist/modules/onec/
+          cp dist/services/onecSyncMaintenanceService.js .onec-retention/dist/services/
+          cp scripts/onec-sync-retention.js .onec-retention/scripts/
+          cp deploy/onec-retention/Dockerfile .onec-retention/Dockerfile
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .onec-retention
+          push: true
+          platforms: linux/amd64
+          build-args: SOURCE_REVISION=${{ github.sha }}
+          tags: ghcr.io/extectick/leaderproductapi:${{ github.sha }}
