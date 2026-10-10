@@ -41,6 +41,20 @@ test('customer/owner change or order deletion permanently revokes access', async
   expect(db.orderShareLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { revokedAt: expect.any(Date) } }));
 });
 
+test('only explicitly public WhatsApp and email are exposed and invalidate ETag when changed', async () => {
+  const owner = { firstName: 'Иван', lastName: 'Менеджер', phone: 79001234567n, email: 'private-login@example.com', clientContacts: null };
+  db.user.findFirst.mockResolvedValue(owner);
+  const empty = await resolvePublicShare('token');
+  expect(empty.data.manager).toMatchObject({ whatsappUrl: null, email: null });
+  expect(JSON.stringify(empty.data)).not.toContain(owner.email);
+  db.user.findFirst.mockResolvedValue({ ...owner, clientContacts: { phones: [], whatsappUrl: '+79001234567', email: 'sales@example.com' } });
+  const publicContacts = await resolvePublicShare('token');
+  expect(publicContacts.data.manager).toMatchObject({ whatsappUrl: 'https://wa.me/79001234567', email: 'sales@example.com' });
+  expect(publicContacts.etag).not.toBe(empty.etag);
+  expect(JSON.stringify(publicContacts.data)).not.toContain(owner.email);
+  expect(db.user.findFirst.mock.lastCall[0].select).not.toHaveProperty('email');
+});
+
 test('delivery details are allowlisted, updated live and invalidate the ETag', async () => {
   expect(publicOrderSelect.deliveryAddress).toEqual({ select: { fullAddress: true } });
   expect(publicOrderSelect.deliveryMethod).toBe(true);

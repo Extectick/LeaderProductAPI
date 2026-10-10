@@ -1,12 +1,42 @@
-import { clientContactsSchema, normalizeContactPhone, normalizeMessenger, resolveClientContacts } from '../src/modules/orderShare/clientContacts';
+import { clientContactsSchema, normalizeContactPhone, normalizeMessenger, normalizeWhatsApp, parseClientContactsUpdate, resolveClientContacts } from '../src/modules/orderShare/clientContacts';
 import { createShareToken, encryptShareToken, decryptShareToken, isShareToken, projectShareOrder, shareTokenHash } from '../src/modules/orderShare/orderShare.model';
 
 test('customer contacts use default phone only when custom phones are absent', () => {
   expect(resolveClientContacts(null, 79001234567n).phones).toEqual([{ label: '', number: '+79001234567' }]);
   expect(resolveClientContacts({ phones: [{ label: 'Рабочий', number: '8 (900) 765-43-21' }], telegramUrl: '@manager_one', maxUrl: null }, 79001234567n))
-    .toEqual({ phones: [{ label: 'Рабочий', number: '+79007654321' }], telegramUrl: 'https://t.me/manager_one', maxUrl: null });
+    .toEqual({ phones: [{ label: 'Рабочий', number: '+79007654321' }], telegramUrl: 'https://t.me/manager_one', maxUrl: null, whatsappUrl: null, email: null });
   expect(normalizeContactPhone('9001234567')).toBe('+79001234567');
   expect(normalizeContactPhone('tel:79001234567')).toBeNull();
+});
+
+test('WhatsApp accepts phones or official international links, never arbitrary URLs', () => {
+  for (const value of ['8 (900) 123-45-67', '+7 900 123 45 67', '9001234567', 'https://wa.me/79001234567/']) {
+    expect(normalizeWhatsApp(value)).toBe('https://wa.me/79001234567');
+  }
+  expect(normalizeWhatsApp('https://wa.me/14155552671')).toBe('https://wa.me/14155552671');
+  for (const value of ['123', 'https://wa.me.evil.test/79001234567', 'http://wa.me/79001234567', 'https://user@wa.me/79001234567',
+    'https://wa.me/+79001234567', 'https://wa.me/079001234567', 'https://wa.me/79001234567?text=secret', 'https://wa.me/79001234567#x', 'javascript:alert(1)']) {
+    expect(normalizeWhatsApp(value)).toBeNull();
+    expect(clientContactsSchema.safeParse({ phones: [], whatsappUrl: value }).success).toBe(false);
+  }
+});
+
+test('public email is explicit, validated, trimmed and can be cleared', () => {
+  expect(clientContactsSchema.parse({ phones: [], email: ' manager+sales@example.com ' }).email).toBe('manager+sales@example.com');
+  for (const email of ['bad', 'mailto:manager@example.com', 'a@example.com,b@example.com', 'a@example.com\r\nBcc:secret@example.com']) {
+    expect(clientContactsSchema.safeParse({ phones: [], email }).success).toBe(false);
+  }
+  for (const value of [undefined, null, '', '  ']) {
+    expect(clientContactsSchema.parse({ phones: [], email: value, whatsappUrl: value })).toMatchObject({ email: null, whatsappUrl: null });
+  }
+});
+
+test('legacy editors preserve new contact fields; explicit clearing and malformed input are respected', () => {
+  const previous = { phones: [], whatsappUrl: 'https://wa.me/79001234567', email: 'manager@example.com' };
+  expect(parseClientContactsUpdate({ phones: [], telegramUrl: '@manager_one' }, previous)).toMatchObject({ success: true, data: previous });
+  expect(parseClientContactsUpdate({ phones: [], whatsappUrl: null, email: '' }, previous)).toMatchObject({ success: true, data: { whatsappUrl: null, email: null } });
+  expect(parseClientContactsUpdate({ phones: [], email: 'new@example.com' }, previous)).toMatchObject({ success: true, data: { whatsappUrl: previous.whatsappUrl, email: 'new@example.com' } });
+  for (const input of [null, [], 'invalid', { phones: [], unknown: 'value' }]) expect(parseClientContactsUpdate(input, previous).success).toBe(false);
 });
 test('rejects invalid phones, duplicate normalized phones, arbitrary or credential-bearing links', () => {
   expect(clientContactsSchema.safeParse({ phones: [{ number: '123' }] }).success).toBe(false);
