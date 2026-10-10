@@ -44,6 +44,16 @@ test('capability token is random-sized, encrypted, tamper-resistant and cannot b
   expect(shareTokenHash(token)).toHaveLength(64);
 });
 
+test('shares only the selected delivery address and hides retained address for pickup', () => {
+  const order = { items: [{ product: { guid: 'p', name: 'Товар' }, quantity: 1, price: 10 }],
+    deliveryMethod: 'До клиента', deliveryAddress: { fullAddress: '  Омск, ул. Тестовая, 1  ', comment: 'private', latitude: 50 } };
+  expect(projectShareOrder(order)).toMatchObject({ deliveryMethod: 'До клиента', deliveryAddress: 'Омск, ул. Тестовая, 1' });
+  expect(JSON.stringify(projectShareOrder(order))).not.toMatch(/private|latitude/);
+  expect(projectShareOrder({ ...order, deliveryMethod: ' Самовывоз ' })).toMatchObject({ deliveryMethod: 'Самовывоз', deliveryAddress: null });
+  expect(projectShareOrder({ ...order, deliveryAddress: 'Омск, ул. Тестовая, 2' }).deliveryAddress).toBe('Омск, ул. Тестовая, 2');
+  expect(projectShareOrder({ ...order, deliveryMethod: null, deliveryAddress: null })).toMatchObject({ deliveryMethod: null, deliveryAddress: null });
+});
+
 test('new share codes have exactly 12 cryptographic URL-safe characters; old links remain valid', () => {
   process.env.ORDER_SHARE_SECRET = 'unit-test-only-32-byte-secret-not-live';
   const codes = Array.from({ length: 100 }, createShareToken);

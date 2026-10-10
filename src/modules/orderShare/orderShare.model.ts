@@ -55,12 +55,18 @@ export function projectShareOrder(order: any) {
     };
   });
   if (!items.length && order.status !== 'CANCELLED') throw new Error('В заказе нет действующих товаров');
+  const deliveryMethod = text(order.deliveryMethod, 100);
+  const isPickup = deliveryMethod.toLocaleLowerCase('ru-RU') === 'самовывоз';
   return {
     number: text(order.number1c || 'Черновик', 80),
     date: iso(order.date1c || order.createdAt),
     customer: text(order.counterparty?.name),
     counterpartyGuid: text(order.counterparty?.guid, 100), // Server-private binding, never public.
     deliveryDate: iso(order.deliveryDate),
+    deliveryMethod: isPickup ? 'Самовывоз' : deliveryMethod || null,
+    // Only the selected order address, never the customer's address book/comments.
+    // A pickup order may retain a former delivery address internally; don't expose it.
+    deliveryAddress: isPickup ? null : text(typeof order.deliveryAddress === 'string' ? order.deliveryAddress : order.deliveryAddress?.fullAddress, 1000) || null,
     currency: /^[A-Z]{3}$/.test(order.currency) ? String(order.currency) : 'RUB',
     cancelled: order.status === 'CANCELLED',
     total: decimal(order.totalAmount ?? items.reduce((sum: Prisma.Decimal, item: any) => sum.add(item.amount), new Prisma.Decimal(0))).toDecimalPlaces(2).toFixed(2),

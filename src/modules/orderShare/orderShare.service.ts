@@ -7,7 +7,8 @@ import { createShareToken, decryptShareToken, encryptShareToken, projectShareOrd
 // This select is intentionally independent of the employee order DTO.
 export const publicOrderSelect = {
   id: true, guid: true, createdByUserId: true, number1c: true, date1c: true, createdAt: true,
-  updatedAt: true, deliveryDate: true, status: true, totalAmount: true, currency: true,
+  updatedAt: true, deliveryDate: true, deliveryMethod: true, status: true, totalAmount: true, currency: true,
+  deliveryAddress: { select: { fullAddress: true } },
   counterparty: { select: { name: true, guid: true } },
   items: { orderBy: { createdAt: 'asc' as const }, select: {
     id: true, lineGuid: true, quantity: true, price: true, lineAmount: true, isCancelled: true,
@@ -107,6 +108,7 @@ export async function resolvePublicShare(token: string) {
   for (const image of images) if (!imageByProduct.has(image.productGuid)) imageByProduct.set(image.productGuid, image);
   const data = {
     number: snapshot.number, date: snapshot.date, customer: snapshot.customer, deliveryDate: snapshot.deliveryDate,
+    deliveryMethod: snapshot.deliveryMethod ?? null, deliveryAddress: snapshot.deliveryAddress ?? null,
     currency: snapshot.currency, cancelled: snapshot.cancelled, total: snapshot.total, updatedAt: updatedAt.toISOString(),
     manager: { name: [owner.firstName, owner.lastName].filter(Boolean).join(' '), ...resolveClientContacts(owner.clientContacts, owner.phone) },
     items: snapshot.items.map(({ productGuid, ...item }) => {

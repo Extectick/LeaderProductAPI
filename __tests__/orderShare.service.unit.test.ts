@@ -4,7 +4,7 @@ jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
 } }));
 jest.mock('../src/modules/clientOrders/clientOrders.service', () => ({ getClientOrderByGuid: jest.fn() }));
 import prisma from '../src/prisma/client';
-import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey } from '../src/modules/orderShare/orderShare.service';
+import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey, publicOrderSelect } from '../src/modules/orderShare/orderShare.service';
 import { encryptShareToken } from '../src/modules/orderShare/orderShare.model';
 const db = prisma as any;
 const link = { id: 'share', ownerId: 1, orderGuid: 'order', localOrderId: 'local', tokenHash: 'hash', counterpartyGuid: 'client',
@@ -39,6 +39,27 @@ test('customer/owner change or order deletion permanently revokes access', async
   db.order.findUnique.mockResolvedValue({ createdByUserId: 1, counterparty: { guid: 'another' } });
   await expect(resolvePublicShare('token')).rejects.toMatchObject({ status: 410 });
   expect(db.orderShareLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { revokedAt: expect.any(Date) } }));
+});
+
+test('delivery details are allowlisted, updated live and invalidate the ETag', async () => {
+  expect(publicOrderSelect.deliveryAddress).toEqual({ select: { fullAddress: true } });
+  expect(publicOrderSelect.deliveryMethod).toBe(true);
+  const order = await db.order.findUnique();
+  db.order.findUnique.mockResolvedValue({ ...order, deliveryMethod: 'До клиента', deliveryAddress: { fullAddress: 'Омск, Тестовая, 1' } });
+  const delivery = await resolvePublicShare('token');
+  expect(delivery.data).toMatchObject({ deliveryMethod: 'До клиента', deliveryAddress: 'Омск, Тестовая, 1' });
+  db.order.findUnique.mockResolvedValue({ ...order, deliveryMethod: 'Самовывоз', deliveryAddress: { fullAddress: 'Омск, Тестовая, 1' } });
+  const pickup = await resolvePublicShare('token');
+  expect(pickup.data).toMatchObject({ deliveryMethod: 'Самовывоз', deliveryAddress: null });
+  expect(pickup.etag).not.toBe(delivery.etag);
+});
+
+test('old saved snapshots without delivery fields stay readable', async () => {
+  db.orderShareLink.findUnique.mockResolvedValue({ ...link, localOrderId: null, snapshot: {
+    counterpartyGuid: 'client', number: 'Черновик', customer: 'Клиент', currency: 'RUB', total: '100', items: [],
+  } });
+  const result = await resolvePublicShare('token');
+  expect(result.data).toMatchObject({ deliveryMethod: null, deliveryAddress: null });
 });
 test('cannot publish another managers order', async () => {
   await expect(publishOrder('order', 2, false)).rejects.toMatchObject({ status: 404 });
