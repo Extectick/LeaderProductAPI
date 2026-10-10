@@ -191,6 +191,9 @@ export const clientOrdersProductsQuerySchema = pagedSearchQuerySchema.extend({
   warehouseGuid: z.string().trim().min(1).optional(),
   priceTypeGuid: z.string().trim().min(1).optional(),
   inStockOnly: optionalBooleanFromQuery,
+  purchasedOnly: optionalBooleanFromQuery,
+}).refine(value => !value.purchasedOnly || (!!value.organizationGuid && !!value.counterpartyGuid), {
+  message: 'Для истории покупок нужны организация и контрагент', path: ['purchasedOnly'],
 });
 
 export const clientOrdersBatchProductsSchema = z.object({

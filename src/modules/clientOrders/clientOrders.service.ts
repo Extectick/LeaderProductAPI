@@ -5158,7 +5158,7 @@ export async function getClientOrdersProducts(query: ClientOrdersProductsQuery, 
   );
 
   const search = normalizeSearch(query.search);
-  if (search && search.length >= 3 && result.items.length < query.limit) {
+  if (!query.purchasedOnly && search && search.length >= 3 && result.items.length < query.limit) {
     try {
       const fuzzy = await getFuzzyLiveProducts(query, search, managerGuid);
       const knownGuids = new Set(result.items.map((item) => item.guid.toLocaleLowerCase('ru')));
