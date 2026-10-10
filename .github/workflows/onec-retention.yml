@@ -33,7 +33,7 @@ jobs:
           set -euo pipefail
           base=e670d284f758630304ce3622672a2e994ec41275
           git merge-base --is-ancestor "$base" "$GITHUB_SHA"
-          unexpected=$(git diff --name-only "$base" "$GITHUB_SHA" | grep -Ev '^(src/index.ts|src/modules/onec/onec\.(sync|controllers).ts|src/services/onecSyncMaintenanceService.ts|scripts/onec-sync-retention.js|__tests__/onecSyncRetention.test.ts|jest.onec-retention.config.ts|\.github/workflows/onec-retention.yml|deploy/onec-retention/Dockerfile|docs/onec-sync-retention.md)$' || true)
+          unexpected=$(git diff --name-only "$base" "$GITHUB_SHA" | grep -Ev '^(src/index.ts|src/modules/onec/onec\.(sync|controllers).ts|src/services/onecSyncMaintenanceService.ts|scripts/onec-sync-retention.js|__tests__/onecSyncRetention.integration.ts|jest.onec-retention.config.ts|\.github/workflows/onec-retention.yml|deploy/onec-retention/Dockerfile|docs/onec-sync-retention.md)$' || true)
           test -z "$unexpected" || { echo "Outside reviewed scope: $unexpected"; exit 1; }
       - uses: actions/setup-node@v4
         with:
