@@ -1,5 +1,16 @@
 # Order integrity hotfix (production base b6587ad)
 
+## Dev customer purchase history — 2026-10-10 (deployed to dev)
+
+- Code commit `3c302e27bb11adf34000086200b043770630e9ea`; workflow `38044110811` succeeded, production job skipped. Running dev image matches CI: `sha256:5717852ec2eb06984e867da1a2629945f374c11a81e14cee11c3a29d970cf166`.
+- Added authenticated `GET /api/client-orders/purchase-history` and `purchasedOnly` product filter. Exact customer/organization context, history protocol validation, five-minute user-scoped cache; filtering occurs in 1C before pagination, without fuzzy results escaping the filter.
+- Cloud dev reaches **WMS15** with `clientOrdersApiVersion=2026-10-09-customer-purchases-v55`, `purchaseHistoryApiVersion=customer-purchases-v1`. The previously authorized WMS15 update was already installed; no 1C update in this release.
+- No Prisma/schema change. Fresh dev backup streamed off-server: `C:\Share\Backups\leader-api-dev\20261010-purchase-history\LeaderAPI_dev.dump`, 202314808 bytes, SHA-256 `dbfd3a303319fa7df5a2af329638762733aa1e7292fbae866a1879e0e24542ba`; `pg_restore --list` validated (1017 entries). Private backup, never commit it.
+- Prior running image retained as `ghcr.io/extectick/leaderproductapi:rollback-dev-purchase-history-20261010`, image ID `1e7716137978a741a054cb702c42e8857dc14a3944bc57b9c355f6c88c7441f1`. `DB_ACCEPT_DATA_LOSS=0`; rollback the application without destructive schema changes.
+- Typecheck and 75 targeted API tests passed, followed by the complete CI order-integrity gate. Public dev HTTP checks: anonymous 401; missing history/filter context 400; 26 purchased products over two pages without duplicates/non-purchased rows; search plus stock plus purchase filter returns 3 matching products; a real second organization returns empty history and empty filtered products; old unfiltered products still load; cached history is reused. No business order created or submitted.
+- Dev database schema and server-local Compose overrides unchanged. Production container image/start time, schema and release metadata unchanged. About 2.4 GiB free after deploy; no image/data/cache cleanup performed.
+- APP OTA release is documented separately in `LeaderProductAPP/docs/offline-order-workflow-20260924.md`; physical-device UI acceptance remains separate from API checks.
+
 ## Dev draft recovery — 2026-10-09 (deployed to dev)
 
 - Additive migration `20261009120000_client_order_draft_backups`: `Order.draftReview` and owner-scoped `ClientOrderDraftBackup`.
