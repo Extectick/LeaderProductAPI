@@ -1,4 +1,5 @@
 import express from 'express';
+import { getCustomerPurchaseHistory, purchaseHistoryQuerySchema } from './customerPurchaseHistory';
 import { OrderIntegrityError } from '../orders/orderIntegrity';
 import { draftBackupSchema, DraftBackupConflict, getDraftBackup, saveDraftBackup } from './clientOrderDraftBackups';
 import { ZodError } from 'zod';
@@ -341,6 +342,18 @@ router.get('/price-types', authorizePermissions(['view_client_orders']), async (
     );
   } catch (err) {
     return handleError(res, err, 'Ошибка получения типов цен для заказов клиентов');
+  }
+});
+
+router.get('/purchase-history', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = purchaseHistoryQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
+  try {
+    return res.json(successResponse(await getCustomerPurchaseHistory(parsed.data, req.user!.userId), 'История покупок'));
+  } catch {
+    // Upstream validation is not a client input error and must not become an
+    // apparently valid empty history on older 1C extensions.
+    return res.status(503).json(errorResponse('История покупок временно недоступна', ErrorCodes.INTERNAL_ERROR));
   }
 });
 

@@ -421,6 +421,7 @@ function normalizeQuery(query: {
   priceTypeGuid?: string;
   receiptPriceAt?: string;
   inStockOnly?: boolean;
+  purchasedOnly?: boolean;
   managerGuid?: string;
   status?: string;
   statuses?: string[];
@@ -454,6 +455,7 @@ function normalizeQuery(query: {
     priceTypeGuid: query.priceTypeGuid,
     receiptPriceAt: query.receiptPriceAt,
     inStockOnly: query.inStockOnly,
+    purchasedOnly: query.purchasedOnly,
     managerGuid: query.managerGuid,
     status: query.status,
     statuses: Array.isArray(query.statuses) && query.statuses.length ? query.statuses.join(',') : undefined,
@@ -1522,6 +1524,16 @@ export async function findLiveDeliveryAddress(guid: string, counterpartyGuid?: s
 }
 
 export async function getLiveProducts(query: ClientOrdersProductsQuery & { managerGuid?: string | null }) {
+  if (query.purchasedOnly) {
+    if (!query.counterpartyGuid || !query.organizationGuid) throw new Error('Purchase history requires customer and organization');
+    // Keep pagination in 1C, not in a bounded fuzzy-search union. Also reject
+    // old extensions which silently ignore unknown filters.
+    const normalized = normalizeQuery({ ...query, managerGuid: query.managerGuid || undefined });
+    const raw = await getOnecLpAppNomenclature(normalized);
+    if (asRecord(raw)?.purchaseHistoryVersion !== 'customer-purchases-v1') throw new Error('Purchase history filter is not supported by 1C');
+    return visiblePage(paged(raw, ['nomenclature', 'products'], mapProduct,
+      { limit: query.limit, offset: query.offset }), query.includeInactive);
+  }
   return liveSmartPaged(query, getOnecLpAppNomenclature, ['nomenclature', 'products'], mapProduct);
 }
 

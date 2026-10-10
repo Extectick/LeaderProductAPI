@@ -1,5 +1,9 @@
 import express from 'express';
 import request from 'supertest';
+import { getCustomerPurchaseHistory } from '../src/modules/clientOrders/customerPurchaseHistory';
+jest.mock('../src/modules/clientOrders/customerPurchaseHistory', () => ({
+  ...jest.requireActual('../src/modules/clientOrders/customerPurchaseHistory'), getCustomerPurchaseHistory: jest.fn(),
+}));
 
 jest.mock('../src/modules/clientOrders/clientOrderDraftBackups', () => ({
   ...jest.requireActual('../src/modules/clientOrders/clientOrderDraftBackups'),
@@ -95,6 +99,22 @@ function expectPagedResponse(body: any, expectedItems: number, expectedMeta: { t
 }
 
 describe('/api/client-orders live reference routes', () => {
+  it('validates history scope, uses the authenticated user and distinguishes unavailable from empty', async () => {
+    const context = { organizationGuid: 'dd57a5c7-0b23-11e8-8817-001e676f7f9b', counterpartyGuid: '299c99f7-593e-11ef-8325-1c98ec138053' };
+    jest.mocked(getCustomerPurchaseHistory).mockResolvedValue({ ...context, version: 'customer-purchases-v1', items: [] } as any);
+    const success = await request(app).get('/api/client-orders/purchase-history').query({ ...context, userId: 999 });
+    expect(success.status).toBe(200);
+    expect(success.body.data.items).toEqual([]);
+    expect(getCustomerPurchaseHistory).toHaveBeenCalledWith(context, 1);
+    const invalid = await request(app).get('/api/client-orders/purchase-history').query({ counterpartyGuid: context.counterpartyGuid });
+    expect(invalid.status).toBe(400);
+    jest.mocked(getCustomerPurchaseHistory).mockRejectedValueOnce(new Error('old extension'));
+    const unavailable = await request(app).get('/api/client-orders/purchase-history').query(context);
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.body.ok).toBe(false);
+    const badFilter = await request(app).get('/api/client-orders/products').query({ purchasedOnly: true });
+    expect(badFilter.status).toBe(400);
+  });
   beforeEach(() => {
     jest.clearAllMocks();
   });

@@ -80,6 +80,18 @@ function expectFilledEntity(entity: { guid?: unknown; name?: unknown; number?: u
 }
 
 describe('clientOrders 1C live adapter', () => {
+  it('forwards the combined purchase/stock/search filter before pagination and rejects an old extension', async () => {
+    nomenclatureMock.mockReset();
+    const query = { limit: 2, offset: 2, search: 'сыр мягкий', includeInactive: false,
+      counterpartyGuid: 'client', organizationGuid: 'org', inStockOnly: true, purchasedOnly: true };
+    nomenclatureMock.mockResolvedValueOnce({ ...paged([{ guid: 'bought', name: 'Сыр мягкий' }], { offset: 2 }), purchaseHistoryVersion: 'customer-purchases-v1' });
+    expect((await getLiveProducts(query)).items[0].guid).toBe('bought');
+    expect(nomenclatureMock).toHaveBeenCalledTimes(1);
+    expect(nomenclatureMock).toHaveBeenCalledWith(expect.objectContaining(query));
+    nomenclatureMock.mockResolvedValueOnce(paged([{ guid: 'unfiltered', name: 'Wrong' }]));
+    await expect(getLiveProducts(query)).rejects.toThrow('not supported');
+    await expect(getLiveProducts({ ...query, organizationGuid: undefined })).rejects.toThrow('requires');
+  });
   beforeEach(() => {
     jest.clearAllMocks();
   });
