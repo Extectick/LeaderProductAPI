@@ -14,6 +14,8 @@ import prisma from './prisma/client';
 // Routers
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
+import clientContactsRouter from './modules/orderShare/clientContacts.routes';
+import { orderShareManagerRouter, publicOrderRouter } from './modules/orderShare/orderShare.routes';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
@@ -165,6 +167,10 @@ app.use('/integrations/sentry/events', sentryWebhookRouter);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+// Customer links and contact details must not enter body/debug request logs.
+app.use('/public/order', publicOrderRouter);
+app.use('/api/order-sharing', orderShareManagerRouter);
+app.use('/users', clientContactsRouter);
 app.use(kafkaRequestLogger);
 
 const allowDebugInProd = process.env.ALLOW_DEBUG_IN_PROD === '1';

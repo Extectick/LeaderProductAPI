@@ -296,6 +296,7 @@ model User {
   middleName           String? // Отчество
   phone                BigInt?               @unique // Телефон пользователя в формате 79612231345
   phoneVerifiedAt      DateTime?
+  clientContacts       Json? // Public customer contact details; independent of account/bot credentials.
   avatarUrl            String? // (устар.) Ссылка на аватар пользователя
   telegramId           BigInt?               @unique
   telegramUsername     String?
