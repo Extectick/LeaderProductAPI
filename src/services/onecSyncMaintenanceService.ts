@@ -47,9 +47,10 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
     locked = lock.rows[0].locked;
     if (!locked) return { ...result, skipped: true };
     const deadline = Date.now() + budgetMs;
-    const targets = [...ONEC_STAGE_TABLES, 'SyncRunItem'];
+    let targets: string[] = [...ONEC_STAGE_TABLES, 'SyncRunItem'];
     for (;;) {
       let passTotal = 0;
+      const exhausted = new Set<string>();
       for (const table of targets) {
         if (!dryRun && (Date.now() >= deadline || result.total >= maxRows)) {
           result.bounded = true;
@@ -96,12 +97,18 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
           counts[table] = (counts[table] ?? 0) + count;
           result.total += count;
           passTotal += count;
+          if (count === 0) exhausted.add(table);
         } catch (error) {
           await client.query('ROLLBACK');
-          throw error;
+          const failure = new Error(`Retention stopped at ${table}: ${error instanceof Error ? error.message : String(error)}`);
+          Object.assign(failure, { progress: { ...result, failedTable: table } });
+          throw failure;
         }
       }
       if (dryRun || passTotal === 0) return result;
+      // The cutoff is fixed for this run. Do not repeatedly scan already-empty
+      // historical partitions while draining another table's large backlog.
+      targets = targets.filter(table => !exhausted.has(table));
       // Yield between rounds for normal imports/HTTP traffic and WAL flushing.
       await new Promise(resolve => setTimeout(resolve, 50));
     }
