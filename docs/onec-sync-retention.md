@@ -20,6 +20,7 @@
 - Cleanup uses an advisory lock across instances and short batch transactions with row locks/SKIP LOCKED, a 250ms lock timeout, 5s statement timeout, <=2000 rows/batch and a bounded execution budget. No long transaction spans a backlog.
 - Exhausted tables are skipped for the rest of the pass. On failure the CLI reports the table and already committed counts; repeating the command is safe.
 - Parent eligibility probes deliberately remain correlated (`LIMIT 1 OFFSET 0`), using the existing session/status and run indexes; maintenance disables JIT locally. On the production backlog the flattened plan scanned 208k heap buffers per probe, versus approximately 6k buffers with indexed probes. No global planner settings are changed.
+- Journal batches can lock up to 100 finalized parent runs together while still deleting no more than the row limit, avoiding repeated scans for historical one-item runs. Their summaries and errors remain intact.
 
 ## Operations
 
