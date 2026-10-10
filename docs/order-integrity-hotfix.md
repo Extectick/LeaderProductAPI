@@ -1,5 +1,16 @@
 # Order integrity hotfix (production base b6587ad)
 
+## Production customer purchase history — 2026-10-10
+
+- User explicitly authorized production API/application release. Ported only the reviewed purchase-history change from dev onto current production `f8c7052`; retained all 1C retention fixes. Code commit `ee594848b05cda17f67b79000be690472108a680`, workflow `38045260473` succeeded (development job skipped).
+- User updated the torg2026 LP extension separately. This release did not modify 1C or terminate sessions. Verified from the cloud production API: `2026-10-09-customer-purchases-v55`, `customer-purchases-v1`.
+- All 75 dependency/schema/startup files compared with the running production image matched before deployment. No API dependency or Prisma/schema change. `DB_ACCEPT_DATA_LOSS=0`; before/after schema fingerprint unchanged.
+- Fresh PostgreSQL backup: `C:\Share\Backups\leader-api-prod\20261010-purchase-history\LeaderAPI.dump`, 121133934 bytes, SHA-256 `e1dce26769f2734b8306cf4fa2e8bd850a016086bc697551f327a981f850f0e0`; `pg_restore --list` validated (1012 entries). Private backup, not committed.
+- Prior production image retained as `ghcr.io/extectick/leaderproductapi:rollback-prod-purchase-history-20261010`, image ID `bd18ee29f671ec933bb65a0fe08dd28d565db940df8fa6fde9a7e82a9e5e494f`.
+- New running image matches CI: `sha256:5be4648cd22ab531b8987bc3e5ff4b5c679f57b1ed5e4df679415dbffeedf1ed`. Server `.env` IMAGE_TAG pinned to `ee594848b05cda17f67b79000be690472108a680` for later restarts; every other env line preserved. Private original saved at `/var/backups/leader-release-20261010-purchases/env-before-image-pin` with mode 0600. Compose files unchanged.
+- Typecheck and 73 targeted API tests passed, then CI order-integrity checks. Public production HTTP smoke: 32 historical/purchased products over two pages without duplicates or unpurchased rows; real second organization has empty history/filter; anonymous 401; missing filter/history context 400; legacy product selection works; cache reused. Search plus stock plus purchase filter correctly returns an empty result for the selected test warehouse. No business documents created or submitted.
+- Production `/health`: 200, DB/Redis/S3 healthy. Dev image/start time preserved. Disk about 2.4 GiB free; no cleanup performed. APP OTA is released separately for existing production runtime 0.1.33; no native/APK changes required.
+
 Incident: НОУТ-112398, 2026-09-17, appGuid eb9e7c06-4a52-43aa-b764-1aee8a0f78ac.
 First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 × 360), pineapple (4 × 180).
 
