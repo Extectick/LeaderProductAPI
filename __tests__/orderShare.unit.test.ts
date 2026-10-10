@@ -1,5 +1,5 @@
 import { clientContactsSchema, normalizeContactPhone, normalizeMessenger, resolveClientContacts } from '../src/modules/orderShare/clientContacts';
-import { encryptShareToken, decryptShareToken, isShareToken, projectShareOrder, shareTokenHash } from '../src/modules/orderShare/orderShare.model';
+import { createShareToken, encryptShareToken, decryptShareToken, isShareToken, projectShareOrder, shareTokenHash } from '../src/modules/orderShare/orderShare.model';
 
 test('customer contacts use default phone only when custom phones are absent', () => {
   expect(resolveClientContacts(null, 79001234567n).phones).toEqual([{ label: '', number: '+79001234567' }]);
@@ -42,4 +42,17 @@ test('capability token is random-sized, encrypted, tamper-resistant and cannot b
   expect(isShareToken(token)).toBe(true);
   expect(isShareToken('one.two.three')).toBe(false);
   expect(shareTokenHash(token)).toHaveLength(64);
+});
+
+test('new share codes have exactly 12 cryptographic URL-safe characters; old links remain valid', () => {
+  process.env.ORDER_SHARE_SECRET = 'unit-test-only-32-byte-secret-not-live';
+  const codes = Array.from({ length: 100 }, createShareToken);
+  expect(new Set(codes).size).toBe(codes.length);
+  for (const code of codes) {
+    expect(code).toMatch(/^[A-Za-z0-9_-]{12}$/);
+    expect(isShareToken(code)).toBe(true);
+    expect(decryptShareToken(encryptShareToken(code))).toBe(code);
+  }
+  expect(isShareToken('a'.repeat(43))).toBe(true);
+  for (const value of ['a'.repeat(8), 'a'.repeat(11), 'a'.repeat(13), 'a'.repeat(44), '../bad/token', 'a'.repeat(12) + '\n']) expect(isShareToken(value)).toBe(false);
 });

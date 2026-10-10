@@ -47,7 +47,7 @@ publicOrderRouter.use(noStore);
 // A bounded per-process safety net; edge limits are also applied by nginx.
 const windows = new Map<string, { expires: number; count: number }>();
 publicOrderRouter.use((req, res, next) => {
-  const token = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : undefined;
   if (!isShareToken(token)) { res.status(410).json(unavailable); return; }
   const key = shareTokenHash(token);
   const now = Date.now();

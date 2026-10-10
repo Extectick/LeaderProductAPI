@@ -5,6 +5,7 @@ jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
 jest.mock('../src/modules/clientOrders/clientOrders.service', () => ({ getClientOrderByGuid: jest.fn() }));
 import prisma from '../src/prisma/client';
 import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey } from '../src/modules/orderShare/orderShare.service';
+import { encryptShareToken } from '../src/modules/orderShare/orderShare.model';
 const db = prisma as any;
 const link = { id: 'share', ownerId: 1, orderGuid: 'order', localOrderId: 'local', tokenHash: 'hash', counterpartyGuid: 'client',
   expiresAt: new Date(Date.now() + 86400000), revokedAt: null, refreshedAt: new Date() };
@@ -47,4 +48,18 @@ test('image access is scoped to non-cancelled rows of this order', async () => {
   db.order.findUnique.mockResolvedValue({ createdByUserId: 1, counterparty: { guid: 'client' }, items: [] });
   expect(await sharedImageKey('token', 'image')).toBeNull();
   expect(db.order.findUnique).toHaveBeenCalledWith(expect.objectContaining({ select: expect.objectContaining({ items: expect.objectContaining({ where: { isCancelled: false, product: { guid: 'other-product' } } }) }) }));
+});
+
+test('publishes short links for API drafts and preserves previously shared long links until rotation', async () => {
+  process.env.ORDER_SHARE_SECRET = 'unit-test-only-32-byte-secret-not-live';
+  process.env.ORDER_SHARE_PUBLIC_ORIGIN = 'https://dev.leader-product.ru';
+  db.$executeRaw = jest.fn(async () => undefined);
+  db.orderShareLink.upsert = jest.fn(async ({ create }: any) => ({ id: 'new-share', ...create }));
+  db.orderShareLink.findUnique.mockResolvedValue(null);
+  const fresh = await publishOrder('order', 1, false);
+  expect(new URL(fresh.url).hash.slice(1)).toHaveLength(12);
+  const oldToken = 'x'.repeat(43);
+  db.orderShareLink.findUnique.mockResolvedValue({ ...link, tokenEncrypted: encryptShareToken(oldToken) });
+  expect(new URL((await publishOrder('order', 1, false)).url).hash.slice(1)).toBe(oldToken);
+  expect(new URL((await publishOrder('order', 1, true)).url).hash.slice(1)).toHaveLength(12);
 });

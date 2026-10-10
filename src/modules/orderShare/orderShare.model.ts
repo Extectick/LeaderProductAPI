@@ -19,7 +19,10 @@ export function decryptShareToken(value: string) {
   decipher.setAuthTag(data.subarray(12, 28));
   return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
 }
-export const isShareToken = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+// 9 cryptographic bytes encode to exactly 12 URL-safe characters (72 bits).
+// Continue accepting the original 32-byte tokens so sent links keep working.
+export const createShareToken = () => randomBytes(9).toString('base64url');
+export const isShareToken = (value: unknown): value is string => typeof value === 'string' && (value.length === 12 || value.length === 43) && /^[A-Za-z0-9_-]+$/.test(value) && !/\s/.test(value);
 const text = (value: unknown, max = 400) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const decimal = (value: unknown, fallback = 0) => {
   try { const d = new Prisma.Decimal(String(value ?? fallback)); return d.isFinite() ? d : new Prisma.Decimal(fallback); }

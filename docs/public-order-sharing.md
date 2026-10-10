@@ -16,6 +16,8 @@
 
 The shared view shows saved document prices, quantities, photos and totals, not current catalog prices or warehouse availability. Local-only drafts must first be explicitly saved to API; sharing must not enqueue an order or submit to 1C. The link is stable until revoked/rotated/expired. Default lifetime: 30 days, renewed explicitly by manager.
 
+New/rotated link codes use 12 URL-safe characters from 9 cryptographically random bytes. Existing 43-character links remain valid and stable; explicit rotation replaces them with a short code and invalidates the previous link. Both lengths use the same hashed lookup, encrypted storage, expiry/revocation and nginx rate limits.
+
 Only declared public fields leave the server. Internal order DTO, notes, cost/profit, stock, geolocation, bot identifiers and credentials must never be included. A URL fragment carries the capability token; API uses Authorization headers and does not log sharing bodies. Public channels cannot join employee sockets/rooms.
 
 Client contact settings are separate from login, verified phone and Telegram/MAX account linking. Empty custom phone list falls back to the standard phone. Up to five labelled custom numbers; optional explicit Telegram/MAX profile links. Self-edit and manage_users admin edit use the same validated contract. Changing customer invalidates previous access.

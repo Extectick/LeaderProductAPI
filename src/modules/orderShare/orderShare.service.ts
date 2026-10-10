@@ -1,9 +1,8 @@
-import { randomBytes } from 'node:crypto';
 import { Prisma, type OrderShareLink } from '@prisma/client';
 import prisma from '../../prisma/client';
 import { getClientOrderByGuid } from '../clientOrders/clientOrders.service';
 import { resolveClientContacts } from './clientContacts';
-import { decryptShareToken, encryptShareToken, projectShareOrder, shareTokenHash, shareVersion, type ShareSnapshot } from './orderShare.model';
+import { createShareToken, decryptShareToken, encryptShareToken, projectShareOrder, shareTokenHash, shareVersion, type ShareSnapshot } from './orderShare.model';
 
 // This select is intentionally independent of the employee order DTO.
 export const publicOrderSelect = {
@@ -45,7 +44,7 @@ export async function publishOrder(orderGuid: string, ownerId: number, rotate: b
   const existing = await tx.orderShareLink.findUnique({ where: { ownerId_orderGuid: { ownerId, orderGuid } } });
   const replaceToken = rotate || !existing || !!existing.revokedAt || existing.expiresAt.getTime() <= Date.now()
     || existing.counterpartyGuid !== snapshot.counterpartyGuid;
-  const token = replaceToken ? randomBytes(32).toString('base64url') : decryptShareToken(existing!.tokenEncrypted);
+  const token = replaceToken ? createShareToken() : decryptShareToken(existing!.tokenEncrypted);
   const data = { localOrderId: local?.id ?? null, counterpartyGuid: snapshot.counterpartyGuid,
     tokenHash: shareTokenHash(token), tokenEncrypted: encryptShareToken(token), snapshot,
     version: shareVersion(snapshot), revokedAt: null, refreshedAt: new Date(), expiresAt: new Date(Date.now() + 30 * 86400_000) };
