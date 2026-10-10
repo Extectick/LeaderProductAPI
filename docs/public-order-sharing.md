@@ -4,13 +4,13 @@
 
 - [x] Agreed UI: 4 desktop / 2 mobile photo cards; total beside delivery at bottom; manager phones, MAX and Telegram.
 - [x] Inspect clean dev branches and existing order persistence, images, profile/admin and release pipelines.
-- [ ] Add dedicated client-facing contact settings, own-profile and admin editing.
-- [ ] Add revocable, expiring order links and strictly allowlisted read model.
-- [ ] Add scoped realtime notifications and reconnect/fallback reconciliation.
-- [ ] Add lightweight responsive public web entry, not the employee application shell.
-- [ ] Add share/manage actions to mobile and web order editors, explicitly SAVE (never SUBMIT).
-- [ ] Unit/type/build checks, API integration checks and desktop/mobile browser QA.
-- [ ] Back up dev database, deploy only dev API/web/OTA and verify published artifacts.
+- [x] Add dedicated client-facing contact settings, own-profile and admin editing.
+- [x] Add revocable, expiring order links and strictly allowlisted read model.
+- [x] Add conditional polling (ETag, 5 seconds while visible), reconnect reconciliation and last-good display on network errors. No public access to employee sockets.
+- [x] Add lightweight responsive public web entry, not the employee application shell.
+- [x] Add share/manage actions to mobile and web order editors, explicitly SAVE (never SUBMIT).
+- [x] Unit/type/build checks, API integration checks and desktop/mobile browser QA.
+- [x] Back up dev database, deploy only dev API/web/OTA and verify published artifacts.
 
 ## Contract
 
@@ -25,3 +25,14 @@ Use current saved API order rows for manager documents. A cached public snapshot
 ## Rollout boundary
 
 APP and API have separate commits. Production, production 1C and unrelated dirty primary worktrees remain untouched. Public web has a separate static dev deployment under /order/ on dev.leader-product.ru. No new native modules are required.
+
+## Verification and deployment, 2026-10-10
+
+- Dev DB backup: `/opt/leader-api-dev/backups/before-public-order-20261010.dump` (193 MB, `pg_restore --list` checked), protected configuration backup alongside it.
+- API commit `53263d9`; GitHub run `38052075239` passed tests, build and development deployment. Production job skipped. Sharing enabled only in dev.
+- API unit tests: 9 passed. APP workspace regression tests: 65 passed, including explicit server SAVE and preventing a queued document from being downgraded for sharing.
+- `scripts/test-public-order-dev.cjs` executed in the dev container. Passed contact editing permissions/validation, stable concurrent publication, strict public projection, image scoping, ETag/quantity update, token rotation/revocation/expiry and credential separation. Demo order remains DRAFT with no 1C queue entry.
+- Dev OTA run `38052271825`: runtime `0.1.34`, update `0.1.34.3`, update ID `ff071ada-5195-478a-863e-f011bf4e044e`. No APK needed.
+- Public web uses a separate static workflow and an atomic release symlink. Nginx configuration validated before reload; rate limits and no-index/no-referrer policy enabled.
+- Demo fixtures use `@example.invalid` users without passwords and order GUID `qa-public-order-demo`. Prices/contact numbers are fictitious; product photos come from the dev catalog. Do not send this order to 1C.
+- The detailed responsive visual QA report lives in the APP worktree at `design-qa.md`. Android device interaction with the new profile/share controls has not been manually tested in this run.
