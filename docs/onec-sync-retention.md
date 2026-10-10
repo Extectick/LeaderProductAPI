@@ -19,6 +19,7 @@
 - Stock staging is a parameterized bulk upsert in chunks of 250, with duplicate keys normalized before SQL; timestamps and series are retained.
 - Cleanup uses an advisory lock across instances and short batch transactions with row locks/SKIP LOCKED, a 250ms lock timeout, 5s statement timeout, <=2000 rows/batch and a bounded execution budget. No long transaction spans a backlog.
 - Exhausted tables are skipped for the rest of the pass. On failure the CLI reports the table and already committed counts; repeating the command is safe.
+- Parent eligibility probes deliberately remain correlated (`LIMIT 1 OFFSET 0`), using the existing session/status and run indexes; maintenance disables JIT locally. On the production backlog the flattened plan scanned 208k heap buffers per probe, versus approximately 6k buffers with indexed probes. No global planner settings are changed.
 
 ## Operations
 

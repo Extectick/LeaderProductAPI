@@ -59,6 +59,8 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
         await client.query('BEGIN');
         try {
           await client.query("SET LOCAL lock_timeout = '250ms'");
+          // Small indexed batches must not pay a JIT compilation cost each time.
+          await client.query('SET LOCAL jit = off');
           await client.query(`SET LOCAL statement_timeout = '${dryRun ? 30000 : 5000}ms'`);
           const limit = Math.min(batchSize, maxRows - result.total);
           let sql: string;
@@ -69,7 +71,7 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
               WITH parent AS MATERIALIZED (
                 SELECT r.id FROM "SyncRun" r JOIN "OnecSyncSession" s ON s.id = r.meta->>'sessionId'
                 WHERE ${successfulRun} AND EXISTS (
-                  SELECT 1 FROM "SyncRunItem" t WHERE t."runId" = r.id AND ${successfulItem})
+                  SELECT 1 FROM "SyncRunItem" t WHERE t."runId" = r.id AND ${successfulItem} LIMIT 1 OFFSET 0)
                 ORDER BY r."startedAt", r.id LIMIT 1 FOR UPDATE OF r, s SKIP LOCKED
               ), candidates AS MATERIALIZED (
                 SELECT t.id FROM "SyncRunItem" t JOIN parent p ON p.id = t."runId"
@@ -82,7 +84,7 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
               JOIN "OnecSyncSession" s ON s.id = t."sessionId" WHERE ${closedSession} AND ${resolvedRow}` : `
               WITH parent AS MATERIALIZED (
                 SELECT s.id FROM "OnecSyncSession" s WHERE ${closedSession} AND EXISTS (
-                  SELECT 1 FROM "${table}" t WHERE t."sessionId" = s.id AND ${resolvedRow})
+                  SELECT 1 FROM "${table}" t WHERE t."sessionId" = s.id AND ${resolvedRow} LIMIT 1 OFFSET 0)
                 ORDER BY s."completedAt", s.id LIMIT 1 FOR UPDATE SKIP LOCKED
               ), candidates AS MATERIALIZED (
                 SELECT t.id FROM "${table}" t JOIN parent p ON p.id = t."sessionId"
