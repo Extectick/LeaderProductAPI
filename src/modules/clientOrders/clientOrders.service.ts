@@ -15,6 +15,7 @@ import { appendOrderEvent } from '../orders/orderEvents';
 import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
+import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
   OnecLpAppConfigError,
@@ -3818,6 +3819,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
 
   const mapped = {
     ...mapOrderDetail(order),
+    draftReview: order.draftReview,
     lastExportError: normalizeClientOrderPublicError(order.lastExportError),
     last1cError: normalizeClientOrderPublicError(order.last1cError),
   };
@@ -5769,6 +5771,7 @@ export async function putClientOrderByClientId(
       guid: true,
       clientRevision: true,
       clientPayloadHash: true,
+      draftReview: true,
       submitRequestedAt: true,
       status: true,
       syncState: true,
@@ -5780,7 +5783,10 @@ export async function putClientOrderByClientId(
       return getClientOrderByGuid(committed.guid!, userId);
     }
     if (body.clientRevision === committedRevision) {
-      if (committed.clientPayloadHash && committed.clientPayloadHash !== requestedPayloadHash) {
+      const rejectedBackup = committed.draftReview && body.offlineReview ? await getDraftBackup(userId, clientOrderId) : null;
+      const sameRejectedContents = rejectedBackup?.clientRevision === body.clientRevision
+        && rejectedBackup.payloadHash === draftBackupHash(JSON.parse(JSON.stringify(body)));
+      if (committed.clientPayloadHash && committed.clientPayloadHash !== requestedPayloadHash && !sameRejectedContents) {
         throw new ClientOrdersError(
           409,
           ErrorCodes.CONFLICT,
@@ -5792,8 +5798,28 @@ export async function putClientOrderByClientId(
       }
     }
   }
+  // A committed retry must win over an older/newer recovery copy. Otherwise commit
+  // the recovery copy BEFORE any dependency on 1C. This is not an export queue.
+  if (body.offlineReview) await saveDraftBackup(userId, clientOrderId, {
+    clientRevision: body.clientRevision, payload: JSON.parse(JSON.stringify(body)),
+  });
   const managerGuid = await getManagerGuidForUser(userId);
-  body = await validateOfflineSubmission(body, managerGuid);
+  let rejectedSubmission: ClientOrdersError | null = null;
+  let draftReview: Prisma.InputJsonValue | undefined;
+  try {
+    body = await validateOfflineSubmission(body, managerGuid);
+  } catch (error) {
+    if (!(error instanceof ClientOrdersError)) throw error;
+    const review = { code: error.code, message: error.message, details: error.details ?? null,
+      warehouseGuid: body.warehouseGuid ?? null, clientRevision: body.clientRevision, checkedAt: now().toISOString() };
+    if (body.offlineReview) await recordDraftReview(userId, clientOrderId, body.clientRevision, review);
+    if (error.code !== ErrorCodes.STOCK_SHORTAGE) throw error;
+    // Valid header/items but insufficient stock: retain an ordinary API draft as well.
+    // A rejected attempt must never queue a document or downgrade a submitted order.
+    rejectedSubmission = error;
+    draftReview = JSON.parse(JSON.stringify(review));
+    body = { ...body, intent: 'SAVE' };
+  }
   // Idempotency belongs to the user's request, not to prices normalized by the
   // server. A retry after a lost response must compare equal.
   const payloadHash = requestedPayloadHash;
@@ -5823,6 +5849,7 @@ export async function putClientOrderByClientId(
         revision: true,
         clientRevision: true,
         clientPayloadHash: true,
+        draftReview: true,
         submitRequestedAt: true,
         status: true,
         syncState: true,
@@ -5839,11 +5866,24 @@ export async function putClientOrderByClientId(
     });
 
     const storedClientRevision = existing?.clientRevision ?? 0;
+    if (rejectedSubmission && existing && (existing.submitRequestedAt || isOrderQueued(existing) || existing.hasRealization
+      || existing.syncState !== OrderSyncState.DRAFT || existing.status !== OrderStatus.DRAFT)) {
+      return { guid: existing.guid!, queued: false };
+    }
     if (existing && body.clientRevision < storedClientRevision) {
       return { guid: existing.guid!, queued: isOrderQueued(existing) };
     }
 
-    if (existing && body.clientRevision === storedClientRevision) {
+    if (existing && body.clientRevision === storedClientRevision && existing.draftReview
+      && existing.clientPayloadHash && existing.clientPayloadHash !== payloadHash) {
+      const backup = body.offlineReview ? await tx.clientOrderDraftBackup.findUnique({
+        where: { userId_clientOrderId: { userId, clientOrderId } },
+      }) : null;
+      if (backup?.clientRevision !== body.clientRevision || backup.payloadHash !== draftBackupHash(JSON.parse(JSON.stringify(requestedBody)))) {
+        throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Одна версия документа содержит разные данные. Обновите документ.');
+      }
+    }
+    if (existing && body.clientRevision === storedClientRevision && !existing.draftReview) {
       if (existing.clientPayloadHash && existing.clientPayloadHash !== payloadHash) {
         throw new ClientOrdersError(
           409,
@@ -5852,6 +5892,8 @@ export async function putClientOrderByClientId(
         );
       }
       if (body.intent === 'SAVE' || isOrderQueued(existing) || existing.submitRequestedAt) {
+        if (rejectedSubmission) await tx.order.update({ where: { id: existing.id },
+          data: { draftReview, lastExportError: rejectedSubmission.message } });
         return { guid: existing.guid!, queued: isOrderQueued(existing) };
       }
 
@@ -5871,6 +5913,7 @@ export async function putClientOrderByClientId(
           exportAttempts: 0,
           lastExportError: null,
           last1cError: null,
+          draftReview: Prisma.DbNull,
           ...(trackingSnapshot
             ? { trackingRoutePointId: trackingSnapshot.routePointId, trackingSnapshot: trackingSnapshot.snapshot }
             : {}),
@@ -5890,14 +5933,19 @@ export async function putClientOrderByClientId(
       return { guid: existing.guid!, queued: true };
     }
 
-    if (existing) await guardAndAuditOrderChange(tx, existing.id, body, userId);
+    // Correcting a rejected, never-submitted draft cannot reduce accepted 1C facts.
+    // All queued/exported orders retain the normal integrity confirmation guard.
+    if (existing && (!existing.draftReview || existing.submitRequestedAt
+      || existing.syncState !== OrderSyncState.DRAFT || existing.status !== OrderStatus.DRAFT)) {
+      await guardAndAuditOrderChange(tx, existing.id, body, userId);
+    }
     await materializeLiveOrderReferences(tx, liveReferences, body, sourceUpdatedAt);
     const context = await resolveManagerOrderContext(tx, body);
     const prepared = await prepareOrderItems(tx, body, context, sourceUpdatedAt);
     const deliveryDate = body.deliveryDate ?? defaultDeliveryDate();
-    const shouldQueue = body.intent === 'SUBMIT'
+    const shouldQueue = !rejectedSubmission && (body.intent === 'SUBMIT'
       || (!body.integrity && (!!existing?.submitRequestedAt
-        || (!!existing && (existing.status === OrderStatus.QUEUED || existing.status === OrderStatus.SENT_TO_1C))));
+        || (!!existing && (existing.status === OrderStatus.QUEUED || existing.status === OrderStatus.SENT_TO_1C)))));
     if (shouldQueue) {
       assertClientOrderCanBeSubmitted({
         organizationId: context.organization.id,
@@ -5944,8 +5992,9 @@ export async function putClientOrderByClientId(
           : null,
       generalDiscountAmount: prepared.generalDiscountAmount,
       exportAttempts: shouldQueue ? 0 : undefined,
-      lastExportError: null,
+      lastExportError: rejectedSubmission?.message ?? null,
       last1cError: null,
+      draftReview: draftReview ?? Prisma.DbNull,
       sourceUpdatedAt,
     } satisfies Prisma.OrderUncheckedUpdateInput;
 
@@ -6012,7 +6061,15 @@ export async function putClientOrderByClientId(
     return { guid: order.guid!, queued: shouldQueue };
   });
 
-  if (result.queued) requestClientOrdersExportWakeup();
+  if (rejectedSubmission) {
+    throw new ClientOrdersError(rejectedSubmission.status, rejectedSubmission.code, rejectedSubmission.message, {
+      ...(rejectedSubmission.details as Record<string, unknown>), draftSaved: true, serverGuid: result.guid,
+    });
+  }
+  if (result.queued) {
+    requestClientOrdersExportWakeup();
+    if (body.offlineReview) await markDraftSubmitted(userId, clientOrderId, body.clientRevision, result.guid);
+  }
   return getClientOrderByGuid(result.guid, userId);
 }
 
@@ -6433,6 +6490,7 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         status: true,
         source: true,
         isPostedIn1c: true,
+        draftReview: true,
         hasRealization: true,
         organizationId: true,
         agreementId: true,
@@ -6456,6 +6514,13 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
 
     ensureEditable(order);
     assertRevision(order.revision, body.revision);
+
+    const review = order.draftReview as { code?: string; details?: Record<string, unknown> } | null;
+    if (review?.code === ErrorCodes.STOCK_SHORTAGE) {
+      throw new ClientOrdersError(422, ErrorCodes.STOCK_SHORTAGE,
+        'Заказ сохранён как черновик. Откройте документ и повторите проверку остатков перед отправкой.',
+        { ...review.details, draftSaved: true, serverGuid: guid });
+    }
 
     if (order.status === OrderStatus.CANCELLED) {
       throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отмененный заказ нельзя отправить');

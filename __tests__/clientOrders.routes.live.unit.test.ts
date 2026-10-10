@@ -5,6 +5,11 @@ jest.mock('../src/modules/clientOrders/customerPurchaseHistory', () => ({
   ...jest.requireActual('../src/modules/clientOrders/customerPurchaseHistory'), getCustomerPurchaseHistory: jest.fn(),
 }));
 
+jest.mock('../src/modules/clientOrders/clientOrderDraftBackups', () => ({
+  ...jest.requireActual('../src/modules/clientOrders/clientOrderDraftBackups'),
+  saveDraftBackup: jest.fn(), getDraftBackup: jest.fn(),
+}));
+
 jest.mock('../src/middleware/auth', () => ({
   authenticateToken: (req: any, _res: any, next: any) => {
     req.user = { userId: 1, permissions: [], profileStatus: 'ACTIVE' };
@@ -67,6 +72,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
 import clientOrdersRouter from '../src/modules/clientOrders/clientOrders.routes';
 import * as service from '../src/modules/clientOrders/clientOrders.service';
 import { OrderIntegrityError } from '../src/modules/orders/orderIntegrity';
+import { saveDraftBackup, getDraftBackup } from '../src/modules/clientOrders/clientOrderDraftBackups';
 
 const app = express();
 app.use(express.json());
@@ -111,6 +117,23 @@ describe('/api/client-orders live reference routes', () => {
   });
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it('stores incomplete backups as the authenticated user, without creating or submitting orders', async () => {
+    jest.mocked(saveDraftBackup).mockResolvedValue({ clientRevision: 1, savedAt: new Date().toISOString(), submittedOrderGuid: null });
+    const response = await request(app).put('/api/client-orders/draft-backups/client-backup')
+      .send({ userId: 999, clientRevision: 1, payload: { items: [] }, order: { comment: 'Incomplete' } });
+    expect(response.status).toBe(200);
+    expect(saveDraftBackup).toHaveBeenCalledWith(1, 'client-backup', { clientRevision: 1, payload: { items: [] }, order: { comment: 'Incomplete' } });
+    expect(service.putClientOrderByClientId).not.toHaveBeenCalled();
+    expect(service.submitClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('reads backups only in the authenticated owner scope', async () => {
+    jest.mocked(getDraftBackup).mockResolvedValue(null);
+    const response = await request(app).get('/api/client-orders/draft-backups/foreign-backup?userId=999');
+    expect(response.status).toBe(404);
+    expect(getDraftBackup).toHaveBeenCalledWith(1, 'foreign-backup');
   });
 
   it('returns mixed orders list metadata and passes authenticated user id to service', async () => {

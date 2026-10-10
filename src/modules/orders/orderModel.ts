@@ -68,6 +68,7 @@ export const orderDetailSelect = {
   cancelReason: true,
   last1cError: true,
   last1cSnapshot: true,
+  draftReview: true,
   trackingRoutePointId: true,
   trackingSnapshot: true,
   trackingRoutePoint: {
@@ -290,6 +291,7 @@ export function mapOrderDetail(order: OrderDetailRecord) {
     cancelReason: order.cancelReason,
     last1cError: order.last1cError,
     last1cSnapshot: order.last1cSnapshot,
+    draftReview: order.draftReview,
     tracking: order.trackingSnapshot
       ? {
           routePointId: order.trackingRoutePointId,

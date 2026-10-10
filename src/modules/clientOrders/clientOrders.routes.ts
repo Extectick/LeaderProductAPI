@@ -1,6 +1,7 @@
 import express from 'express';
 import { getCustomerPurchaseHistory, purchaseHistoryQuerySchema } from './customerPurchaseHistory';
 import { OrderIntegrityError } from '../orders/orderIntegrity';
+import { draftBackupSchema, DraftBackupConflict, getDraftBackup, saveDraftBackup } from './clientOrderDraftBackups';
 import { ZodError } from 'zod';
 import { authenticateToken, authorizePermissions, type AuthRequest } from '../../middleware/auth';
 import { checkUserStatus } from '../../middleware/checkUserStatus';
@@ -96,6 +97,9 @@ const validationMessage = (error: ZodError) => {
 };
 
 const handleError = (res: express.Response, err: unknown, fallbackMessage: string) => {
+  if (err instanceof DraftBackupConflict) {
+    return res.status(409).json(errorResponse(err.message, ErrorCodes.CONFLICT));
+  }
   if (err instanceof OrderIntegrityError) {
     return res.status(err.status).json(errorResponse(err.message, ErrorCodes.CONFLICT, err.details));
   }
@@ -597,6 +601,24 @@ router.post('/', authorizePermissions(['manage_client_orders']), async (req: Aut
   } catch (err) {
     return handleError(res, err, 'Ошибка создания заказа клиента');
   }
+});
+
+// These endpoints never call 1C or the export worker, even when the form is incomplete.
+router.put('/draft-backups/:clientOrderId', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  try {
+    const { clientOrderId } = clientOrderIdParamsSchema.parse(req.params);
+    const body = draftBackupSchema.parse(req.body);
+    return res.json(successResponse(await saveDraftBackup(req.user!.userId, clientOrderId, body), 'Черновик сохранён в API'));
+  } catch (error) { return handleError(res, error, 'Не удалось сохранить резервную копию черновика'); }
+});
+
+router.get('/draft-backups/:clientOrderId', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  try {
+    const { clientOrderId } = clientOrderIdParamsSchema.parse(req.params);
+    const backup = await getDraftBackup(req.user!.userId, clientOrderId);
+    if (!backup) return res.status(404).json(errorResponse('Черновик не найден', ErrorCodes.NOT_FOUND));
+    return res.json(successResponse(backup, 'Резервная копия черновика'));
+  } catch (error) { return handleError(res, error, 'Не удалось прочитать резервную копию черновика'); }
 });
 
 router.put('/by-client-id/:clientOrderId', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {

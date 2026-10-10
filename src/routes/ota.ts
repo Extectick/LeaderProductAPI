@@ -255,6 +255,7 @@ async function buildAssetDescriptor(asset: OtaAssetInput) {
 
 async function buildManifest(update: any) {
   const expoClient = resolveOtaExpoConfig(update);
+  // Config belongs in extra.expoClient, not twice in the manifest metadata.
   const { expoClient: _config, ...releaseMetadata } = asMetadataRecord(update.metadata);
   const launchAssetUrl = await resolveObjectUrl(update.launchAssetKey);
   const assets = normalizeAssetList(update.assets).filter((asset) => asset.key !== update.launchAssetKey);

@@ -11,6 +11,39 @@
 - Typecheck and 73 targeted API tests passed, then CI order-integrity checks. Public production HTTP smoke: 32 historical/purchased products over two pages without duplicates or unpurchased rows; real second organization has empty history/filter; anonymous 401; missing filter/history context 400; legacy product selection works; cache reused. Search plus stock plus purchase filter correctly returns an empty result for the selected test warehouse. No business documents created or submitted.
 - Production `/health`: 200, DB/Redis/S3 healthy. Dev image/start time preserved. Disk about 2.4 GiB free; no cleanup performed. APP OTA is released separately for existing production runtime 0.1.33; no native/APK changes required.
 
+## Dev customer purchase history — 2026-10-10 (deployed to dev)
+
+- Code commit `3c302e27bb11adf34000086200b043770630e9ea`; workflow `38044110811` succeeded, production job skipped. Running dev image matches CI: `sha256:5717852ec2eb06984e867da1a2629945f374c11a81e14cee11c3a29d970cf166`.
+- Added authenticated `GET /api/client-orders/purchase-history` and `purchasedOnly` product filter. Exact customer/organization context, history protocol validation, five-minute user-scoped cache; filtering occurs in 1C before pagination, without fuzzy results escaping the filter.
+- Cloud dev reaches **WMS15** with `clientOrdersApiVersion=2026-10-09-customer-purchases-v55`, `purchaseHistoryApiVersion=customer-purchases-v1`. The previously authorized WMS15 update was already installed; no 1C update in this release.
+- No Prisma/schema change. Fresh dev backup streamed off-server: `C:\Share\Backups\leader-api-dev\20261010-purchase-history\LeaderAPI_dev.dump`, 202314808 bytes, SHA-256 `dbfd3a303319fa7df5a2af329638762733aa1e7292fbae866a1879e0e24542ba`; `pg_restore --list` validated (1017 entries). Private backup, never commit it.
+- Prior running image retained as `ghcr.io/extectick/leaderproductapi:rollback-dev-purchase-history-20261010`, image ID `1e7716137978a741a054cb702c42e8857dc14a3944bc57b9c355f6c88c7441f1`. `DB_ACCEPT_DATA_LOSS=0`; rollback the application without destructive schema changes.
+- Typecheck and 75 targeted API tests passed, followed by the complete CI order-integrity gate. Public dev HTTP checks: anonymous 401; missing history/filter context 400; 26 purchased products over two pages without duplicates/non-purchased rows; search plus stock plus purchase filter returns 3 matching products; a real second organization returns empty history and empty filtered products; old unfiltered products still load; cached history is reused. No business order created or submitted.
+- Dev database schema and server-local Compose overrides unchanged. Production container image/start time, schema and release metadata unchanged. About 2.4 GiB free after deploy; no image/data/cache cleanup performed.
+- APP OTA release is documented separately in `LeaderProductAPP/docs/offline-order-workflow-20260924.md`; physical-device UI acceptance remains separate from API checks.
+
+## Dev draft recovery — 2026-10-09 (deployed to dev)
+
+- Additive migration `20261009120000_client_order_draft_backups`: `Order.draftReview` and owner-scoped `ClientOrderDraftBackup`.
+- `PUT/GET /api/client-orders/draft-backups/:clientOrderId`: recovery JSON accepts incomplete forms, never calls 1C/export, revision/hash protected. Only the authenticated owner can read it; client-supplied user IDs are ignored. Incomplete backups are not ordinary list orders.
+- Offline SUBMIT commits its backup before live validation. A stock rejection also persists a normal `DRAFT` with lines/review, returns 422 with `draftSaved/serverGuid`, and never queues it. Direct legacy submit cannot bypass the outstanding stock review.
+- Retrying a rejected, never-submitted draft applies current prices when explicitly chosen; correcting its quantities does not change accepted 1C facts. Queued/exported orders retain the existing integrity guards.
+- APP receives structured shortages and keeps them in SQLite. Backup sync is not permission to submit; network recovery only backs up or reconciles an already attempted operation.
+- Deployment order: dev database/API first, compatible APP OTA next. No 1C change or new native dependency. Do not apply these changes to production as part of this task.
+- Real PostgreSQL test (mocked 1C/export): use the isolated local test database on `127.0.0.1:54329`, schema `draft_recovery_20261009`; `prisma db push`, then `npm run test:unit -- --runInBand --testMatch '**/clientOrderDraftRecovery.integration.test.ts'`. Test guards reject other databases/schemas.
+- Verified: 49 API unit/route tests, 6 isolated PostgreSQL scenarios (incomplete backup, shortage, successful retry, current prices, 1C outage, concurrent revisions), Prisma validation and TypeScript. No real 1C order was created; mobile physical-device QA remains separate.
+
+### Approved dev release, 2026-10-09
+
+- API commit `e923710adb25e7a2c9227d64b1f86e570056019b`; workflow `37933022747` passed tests, built and deployed **development only**. Production job skipped.
+- Running dev image digest: `sha256:1e7716137978a741a054cb702c42e8857dc14a3944bc57b9c355f6c88c7441f1`, matches the CI-published image.
+- Dev DB backup streamed off-server to `C:\Share\Backups\leader-api-dev\20261009-draft-recovery\LeaderAPI_dev.dump`: 202311112 bytes, SHA-256 `48ef61a5688b1d7a65754596de3978e924a84847e44ea7ddccc6dffd0652aba5`; `pg_restore --list` validated (1012 entries). Contains private data; do not commit/upload publicly.
+- Previous running dev image retained as `ghcr.io/extectick/leaderproductapi:rollback-dev-draft-recovery-20261009` (image ID `64a4948457d1bc826f9065f5ba5f794e5b4234457dfd159e2c0008d0af0c3dee`). Preserve the additive schema on application rollback; do not run old `db push` with data loss allowed.
+- `DB_ACCEPT_DATA_LOSS=0`; schema applied by the existing safe `db push` startup. Post-deploy `prisma migrate diff --from-config-datasource --to-schema ./prisma --exit-code`: no difference.
+- Public dev `/health`: 200, development, DB/Redis/S3 healthy. Seven real HTTP smoke assertions passed: incomplete backup/readback, owner isolation 404, anonymous 401, old revision 409, conflicting revision 409, no business order created. Only the synthetic backup was removed afterward.
+- Existing order status counts unchanged. Production container image/start time unchanged; production `/health` remained healthy. 1C was not updated and no order was sent to it by these checks.
+- User-approved cleanup removed only three verified unreferenced API images (`d76204a`, `abe8e93`, untagged `e99153a`). Running/rollback images, containers, volumes, data and build cache preserved. Disk remains low (~1.2 GiB after the new image); plan capacity expansion separately.
+
 Incident: НОУТ-112398, 2026-09-17, appGuid eb9e7c06-4a52-43aa-b764-1aee8a0f78ac.
 First export had 7 lines, next client revision had 5. Missing: mustard sauce (2 × 360), pineapple (4 × 180).
 

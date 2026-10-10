@@ -1,5 +1,36 @@
 # Dev crash reporting (Sentry self-hosted)
 
+## Current dev deployment: 2026-10-09
+
+Supersedes the initial infrastructure notes below: dev now uses lightweight
+GlitchTip 6.2.6 (not the full Sentry stack), privately on the cloud API host.
+Production ingestion and the old local diagnostic database are unchanged.
+
+- Compose directory `/opt/leader-diagnostics-dev`, project `leader-glitchtip-dev-cloud`.
+- Reviewed deployment files: `deploy/glitchtip-dev-cloud`; private secrets are
+  provisioned separately, excluded from Git, never passed in command arguments.
+- Web only on `127.0.0.1:19002`; admin/read/symbol upload through SSH forwarding.
+- Public dev nginx accepts only SDK ingestion for the dedicated dev project;
+  rate/body limits, no access logs, all other `/sentry/` paths return 404.
+- Dedicated PostgreSQL volume, capped memory/CPU, bounded logs. Events: 14 days;
+  diagnostic files: 60 days. Private object storage prefix `dev/diagnostics/storage`.
+- `initialize-private.ps1` refuses to overwrite existing secrets. Provision files,
+  build/start PostgreSQL and web, run bootstrap once, then start the bridge profile.
+  `configure-storage.py` reads dev API S3 credentials internally. Run
+  `verify-storage.py` through `manage.py shell`, then `install-ingress.py` and
+  `smoke.py`. Ingress script preserves a dated rollback copy and validates nginx.
+- Ingress backup: `/var/backups/leader-crash-dev-cloud/20261009T090116Z`.
+- Synthetic event `d2640535e8f64934b9db63510da92ce3` stored through public HTTPS.
+  S3 write/read, signed URL and denied anonymous object access verified.
+- GitHub APP **development** secrets point to this private project. Production
+  secrets remain unchanged. CI uses private port 19002 for dev, 19001 for prod.
+- APP 0.1.34/build33 adds early native Java/NDK/ANR and Android 11+ exit history,
+  installation/session/user attribution, order action names and bounded SDK queue.
+  Phone/native/offline acceptance is user-run; synthetic ingress is not that test.
+
+Do not stop the old Windows GlitchTip or its tunnel: production still uses it.
+Monitor cloud disk space; diagnostics are intentionally bounded and symbols use S3.
+
 ## Scope and status
 
 Only development. Production API, database, APP releases and monitoring stay unchanged.

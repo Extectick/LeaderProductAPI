@@ -141,7 +141,7 @@ async function main() {
   if (!payload.updateId) throw new Error('Missing updateId');
   if (!payload.launchAssetKey) throw new Error('Missing launchAssetKey');
 
-  // Direct database publication must enforce the same config guard as the API.
+  // CI publishes directly to the DB, bypassing /ota/publish. Enforce the same guard here.
   const compiledValidator = path.resolve(__dirname, '../dist/utils/otaExpoConfig.js');
   let validateOtaExpoConfig;
   if (fs.existsSync(compiledValidator)) {
