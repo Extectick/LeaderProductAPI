@@ -37,6 +37,7 @@ import { sentryWebhookRouter, crashEventsRouter } from './modules/monitoring/mon
 import { startCrashRetention, stopCrashRetention } from './modules/monitoring/crashRetention';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
 import { startTrackingMaintenance, stopTrackingMaintenance } from './services/trackingMaintenanceService';
+import { startOnecSyncMaintenance, stopOnecSyncMaintenance } from './services/onecSyncMaintenanceService';
 import {
   startClientOrdersExportWorker,
   stopClientOrdersExportWorker,
@@ -490,6 +491,7 @@ if (ENV !== 'test') {
     // 4) Запускаем фоновые задачи приложения
     startScheduledJobs();
     startTrackingMaintenance();
+    startOnecSyncMaintenance();
     startCrashRetention();
     startClientOrdersExportWorker();
     startClientOrderInvoiceWorker();
@@ -545,6 +547,7 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
   stopScheduledJobs();
   stopTrackingMaintenance();
+  stopOnecSyncMaintenance();
   stopCrashRetention();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
@@ -559,6 +562,7 @@ process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
   stopScheduledJobs();
   stopTrackingMaintenance();
+  stopOnecSyncMaintenance();
   stopCrashRetention();
   stopClientOrdersExportWorker();
   stopClientOrderInvoiceWorker();
