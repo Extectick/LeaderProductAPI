@@ -72,7 +72,7 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
                 SELECT r.id FROM "SyncRun" r JOIN "OnecSyncSession" s ON s.id = r.meta->>'sessionId'
                 WHERE ${successfulRun} AND EXISTS (
                   SELECT 1 FROM "SyncRunItem" t WHERE t."runId" = r.id AND ${successfulItem} LIMIT 1 OFFSET 0)
-                ORDER BY r."startedAt", r.id LIMIT 1 FOR UPDATE OF r, s SKIP LOCKED
+                ORDER BY r."startedAt", r.id LIMIT 100 FOR UPDATE OF r, s SKIP LOCKED
               ), candidates AS MATERIALIZED (
                 SELECT t.id FROM "SyncRunItem" t JOIN parent p ON p.id = t."runId"
                 WHERE ${successfulItem} LIMIT $2 FOR UPDATE OF t SKIP LOCKED

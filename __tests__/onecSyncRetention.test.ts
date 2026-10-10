@@ -177,6 +177,23 @@ test('retention skips a locked session and excludes concurrent workers', async (
   expect((await runOnecSyncMaintenance({ dryRun: false, now: clock })).total).toBe(1);
 });
 
+test('journal cleanup batches many small runs while preserving their summaries and errors', async () => {
+  const target = await fixture('COMPLETED');
+  const runs = Array.from({ length: 120 }, () => ({ id: randomUUID(), requestId: randomUUID(),
+    entity: 'STOCK' as const, direction: 'IMPORT' as const, status: 'COMPLETED' as const,
+    finishedAt: old, meta: { sessionId: target.session.id }, totalCount: 2, successCount: 1, errorCount: 1 }));
+  await prisma.syncRun.createMany({ data: runs });
+  await prisma.syncRunItem.createMany({ data: runs.flatMap(run => [
+    { runId: run.id, key: 'ok', status: 'OK' as const, createdAt: old },
+    { runId: run.id, key: 'error', status: 'ERROR' as const, error: 'preserve', createdAt: old },
+  ]) });
+  const result = await runOnecSyncMaintenance({ dryRun: false, now: clock, batchSize: 25, budgetMs: 45_000 });
+  expect(result.counts.SyncRunItem).toBe(120);
+  expect(await prisma.syncRun.count()).toBe(120);
+  expect(await prisma.syncRunItem.count()).toBe(120);
+  expect(await prisma.syncRunItem.count({ where: { status: 'OK' } })).toBe(0);
+});
+
 test('successful stock HTTP batch journals totals rather than one item per balance', async () => {
   const response: any = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   await handleStockBatch({ body: { secret: 'test', items: [stock] } } as any, response);
