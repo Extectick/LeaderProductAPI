@@ -79,12 +79,24 @@ function signature(value: string): string {
   return createHmac('sha256', secret).update(`order-change-v1:${value}`).digest('hex');
 }
 
+/** Only a positively identified, never-exported manager draft has no accepted 1C contents to protect. */
+export function isUnsubmittedManagerDraft(order: any): boolean {
+  return order.source === 'MANAGER_APP' && order.status === 'DRAFT' && order.syncState === 'DRAFT'
+    && order.submitRequestedAt === null && order.queuedAt === null && order.sentTo1cAt === null
+    && order.number1c === null && order.date1c === null && order.exportAttempts === 0
+    && order.isPostedIn1c === false && order.postedAt1c === null && order.hasRealization === false
+    && order.last1cSnapshot === null;
+}
+
 export function assertOrderIntegrity(order: any, body: any, userId: number, now = Date.now()) {
   const contentToken = orderContentToken(order);
   const expected = body.integrity?.baseContentToken;
   if (expected && expected !== contentToken) {
     throw new OrderIntegrityError('Заказ уже изменился. Откройте актуальную версию и согласуйте изменения; ваши правки не отправлены.', { kind: 'ORDER_CONTENT_CONFLICT' });
   }
+  // Editing a draft (including 60 -> 20 kg before its first SUBMIT) is normal.
+  // Still reject stale content above; never exempt queued/ambiguous/exported orders.
+  if (isUnsubmittedManagerDraft(order)) return;
   const changes = findOrderReductions(order, body.items);
   if (!changes.length) return;
   const bound = `${userId}:${order.id}:${order.revision}:${contentToken}:${orderMutationDigest(body)}`;

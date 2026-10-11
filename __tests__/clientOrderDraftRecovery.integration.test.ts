@@ -84,6 +84,43 @@ it('persists an incomplete recovery copy without 1C or export and isolates owner
   await expect(saveDraftBackup(userId, id, data)).rejects.toBeInstanceOf(DraftBackupConflict);
 });
 
+it('edits an ordinary API draft from 60 to 20 before first submission, without losing conflict/export protection', async () => {
+  const id = randomUUID();
+  product.stock.available = 1000;
+  const initial = { ...body(), intent: 'SAVE' as const,
+    items: [{ ...body().items[0], quantity: 60 }, { ...body().items[1], quantity: 1 }] };
+  const draft = await putClientOrderByClientId(userId, id, initial);
+  expect(draft.syncState).toBe('DRAFT');
+  expect(draft).toMatchObject({ draftReview: null });
+  if (!('contentToken' in draft) || !draft.contentToken) throw new Error('Local draft must expose its content token');
+  expect(requestClientOrdersExportWakeup).not.toHaveBeenCalled();
+  const request = { ...initial, clientRevision: 2, intent: 'SUBMIT' as const,
+    integrity: { baseContentToken: draft.contentToken },
+    items: [{ ...initial.items[0], quantity: 20 }, initial.items[1],
+      { ...initial.items[1], lineGuid: 'line-c' }, { ...initial.items[1], lineGuid: 'line-d' }] };
+  await expect(putClientOrderByClientId(userId, id, {
+    ...request, integrity: { baseContentToken: 'stale' },
+  })).rejects.toMatchObject({ details: { kind: 'ORDER_CONTENT_CONFLICT' } });
+  const unchanged = await prisma.order.findFirstOrThrow({ where: { clientOrderId: id }, include: { items: true } });
+  expect(unchanged.clientRevision).toBe(1);
+  expect(unchanged.items).toHaveLength(2);
+  const sent = await putClientOrderByClientId(userId, id, request);
+  if (!('contentToken' in sent) || !sent.contentToken) throw new Error('Queued order must expose its content token');
+  expect(sent.guid).toBe(draft.guid);
+  expect(sent.syncState).toBe('QUEUED');
+  const saved = await prisma.order.findFirstOrThrow({ where: { clientOrderId: id }, include: { items: true } });
+  expect(saved.items).toHaveLength(4);
+  expect(Number(saved.items.find(i => i.lineGuid === 'line-a')?.quantity)).toBe(20);
+  expect(saved.submitRequestedAt).not.toBeNull();
+  expect(saved.clientRevision).toBe(2);
+  expect((await putClientOrderByClientId(userId, id, request)).guid).toBe(sent.guid);
+  expect(await prisma.order.count({ where: { clientOrderId: id } })).toBe(1);
+  await expect(putClientOrderByClientId(userId, id, { ...request, clientRevision: 3,
+    integrity: { baseContentToken: sent.contentToken }, items: request.items.slice(0, 2),
+  })).rejects.toMatchObject({ details: { kind: 'ORDER_CHANGE_REVIEW_REQUIRED' } });
+  expect(await prisma.orderItem.count({ where: { orderId: saved.id } })).toBe(4);
+});
+
 it('keeps both backup and normal DRAFT on shortage, then queues the same order without duplicates', async () => {
   const id = randomUUID();
   const request = body();
