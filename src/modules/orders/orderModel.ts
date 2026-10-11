@@ -39,6 +39,7 @@ export const orderDetailSelect = {
   generalDiscountPercent: true,
   generalDiscountAmount: true,
   queuedAt: true,
+  submitRequestedAt: true,
   sentTo1cAt: true,
   lastStatusSyncAt: true,
   exportAttempts: true,

@@ -1,10 +1,14 @@
-import { assertOrderIntegrity, findOrderReductions, lockOrderMutation, orderContentToken, orderMutationDigest, OrderIntegrityError } from '../src/modules/orders/orderIntegrity';
+import { assertOrderIntegrity, findOrderReductions, isUnsubmittedManagerDraft, lockOrderMutation, orderContentToken, orderMutationDigest, OrderIntegrityError } from '../src/modules/orders/orderIntegrity';
+import { orderDetailSelect } from '../src/modules/orders/orderModel';
 
 const order = () => ({ id: 'order-1', status: 'CONFIRMED', revision: 2,
   organization: { guid: 'org' }, counterparty: { guid: 'client' },
   items: Array.from({ length: 7 }, (_, index) => ({ lineGuid: `line-${index}`, product: { guid: `p-${index}`, name: `Товар ${index}` },
     package: null, quantity: 2, quantityBase: 2, price: 360, basePrice: 360, isCancelled: false })) });
 const body = (o = order()) => ({ items: o.items.map(i => ({ lineGuid: i.lineGuid, productGuid: i.product.guid, quantity: i.quantity })) });
+const draft = () => ({ ...order(), source: 'MANAGER_APP', status: 'DRAFT', syncState: 'DRAFT',
+  submitRequestedAt: null, queuedAt: null, sentTo1cAt: null, number1c: null, date1c: null,
+  exportAttempts: 0, isPostedIn1c: false, postedAt1c: null, hasRealization: false, last1cSnapshot: null });
 const review = (o: any, b: any) => {
   try { assertOrderIntegrity(o, b, 37, 1000); throw new Error('Expected review'); }
   catch (e) { expect(e).toBeInstanceOf(OrderIntegrityError); return (e as OrderIntegrityError).details; }
@@ -12,6 +16,39 @@ const review = (o: any, b: any) => {
 
 describe('order content protection', () => {
   beforeAll(() => { process.env.ACCESS_TOKEN_SECRET = 'test-only-order-review-secret'; });
+  it('allows 60 -> 20 kg while adding lines before the first submission', () => {
+    const o = draft(); o.items[0].quantity = 60;
+    const b: any = body(o); b.items[0].quantity = 20;
+    b.items.push({ lineGuid: 'extra', productGuid: 'extra', quantity: 25 });
+    b.integrity = { baseContentToken: orderContentToken(o) };
+    b.intent = 'SUBMIT';
+    expect(() => assertOrderIntegrity(o, b, 37)).not.toThrow();
+    expect(orderDetailSelect.submitRequestedAt).toBe(true);
+  });
+  it.each(['quantity', 'remove', 'replace', 'cancel'])('allows ordinary draft %s edits without a confirmation challenge', kind => {
+    const o = draft(); const b: any = body(o);
+    if (kind === 'quantity') b.items[0].quantity = 1;
+    if (kind === 'remove') b.items.pop();
+    if (kind === 'replace') b.items[0].productGuid = 'other';
+    if (kind === 'cancel') b.items[0].isCancelled = true;
+    expect(() => assertOrderIntegrity(o, b, 37)).not.toThrow();
+  });
+  it('still rejects a stale draft rather than silently rebasing it', () => {
+    const o = draft(); const b: any = body(o); b.items.pop();
+    b.integrity = { baseContentToken: 'stale' };
+    expect(review(o, b).kind).toBe('ORDER_CONTENT_CONFLICT');
+  });
+  it.each([
+    ['source', 'ONEC'], ['status', 'QUEUED'], ['syncState', 'QUEUED'],
+    ['submitRequestedAt', new Date()], ['queuedAt', new Date()], ['sentTo1cAt', new Date()],
+    ['number1c', 'НОУТ-1'], ['date1c', new Date()], ['exportAttempts', 1],
+    ['isPostedIn1c', true], ['postedAt1c', new Date()], ['hasRealization', true],
+    ['last1cSnapshot', {}], ['submitRequestedAt', undefined], ['exportAttempts', undefined],
+  ])('retains protection when %s indicates export or incomplete state (%s)', (field, value) => {
+    const o = { ...draft(), [field as string]: value }; const b = body(o); b.items.pop();
+    expect(isUnsubmittedManagerDraft(o)).toBe(false);
+    expect(review(o, b).kind).toBe('ORDER_CHANGE_REVIEW_REQUIRED');
+  });
   it('incident: rejects 7 -> 5 without changing either list', () => {
     const o = order(); const b = body(o); b.items.splice(3, 2);
     const r = review(o, b);
