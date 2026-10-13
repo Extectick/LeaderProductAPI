@@ -395,6 +395,7 @@ model StockBalance {
   @@index([organizationId])
   @@index([warehouseId])
   @@index([warehouseId, productId])
+  @@index([productId])
   @@index([seriesGuid])
   @@index([updatedAt])
   @@index([sourceUpdatedAt])
