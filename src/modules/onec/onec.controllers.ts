@@ -19,6 +19,7 @@ import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
 import { lockOrderMutation } from '../orders/orderIntegrity';
+import { canRetryDuplicateLineSnapshot } from './onec.orderSnapshotRecovery';
 import { buildQueuedOrderPayload, clientOrderDirectPushLockKey, queuedOrderSelect } from './onec.orderQueuePayload';
 import {
   agreementsBatchSchema,
@@ -1215,21 +1216,21 @@ async function replaceOrderItemsFromSnapshot(
   }>
 ) {
   const usedLineGuids = new Set<string>();
-  for (const item of items) {
+  const preparedItems = items.map(item => {
     const lineGuid = item.lineGuid?.trim() || item.appLineGuid?.trim() || randomUUID();
     const lineGuidKey = lineGuid.toLowerCase();
     if (usedLineGuids.has(lineGuidKey)) {
       throw new Error(`Duplicate lineGuid ${lineGuid} in order snapshot`);
     }
     usedLineGuids.add(lineGuidKey);
-  }
-
-  await tx.orderItem.deleteMany({ where: { orderId } });
+    return { ...item, lineGuid };
+  });
 
   let computedTotal = new Prisma.Decimal(0);
+  const rows: Prisma.OrderItemCreateManyInput[] = [];
 
-  for (const item of items) {
-    const lineGuid = item.lineGuid?.trim() || item.appLineGuid?.trim() || randomUUID();
+  for (const item of preparedItems) {
+    const lineGuid = item.lineGuid;
     const product = await tx.product.findUnique({
       where: { guid: item.product.guid },
       select: {
@@ -1285,8 +1286,7 @@ async function replaceOrderItemsFromSnapshot(
       computedTotal = computedTotal.add(lineAmount);
     }
 
-    await tx.orderItem.create({
-      data: {
+    rows.push({
         orderId,
         lineGuid,
         productId: product.id,
@@ -1321,10 +1321,13 @@ async function replaceOrderItemsFromSnapshot(
         lineAmount,
         comment: item.comment ?? null,
         sourceUpdatedAt: now(),
-      },
     });
   }
 
+  // Validate every reference and prepare every line before replacing the old
+  // contents. A missing product must not commit a partially emptied order.
+  await tx.orderItem.deleteMany({ where: { orderId } });
+  await tx.orderItem.createMany({ data: rows });
   return computedTotal;
 }
 
@@ -1349,7 +1352,8 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
         await lockOrderMutation(tx, item.guid, true);
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
-          select: { id: true, guid: true, revision: true, source: true, status: true, syncState: true },
+          select: { id: true, guid: true, number1c: true, revision: true, source: true, status: true,
+            syncState: true, last1cError: true, lastExportError: true, cancelRequestedAt: true, last1cSnapshot: true },
         });
 
         if (!order) {
@@ -1357,9 +1361,10 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
           continue;
         }
 
+        const isSnapshotErrorRetry = canRetryDuplicateLineSnapshot(order, item);
         const isAckAlignedSnapshot =
           order.source === OrderSource.MANAGER_APP &&
-          order.syncState === OrderSyncState.SYNCED &&
+          (order.syncState === OrderSyncState.SYNCED || isSnapshotErrorRetry) &&
           (order.status === OrderStatus.SENT_TO_1C ||
             order.status === OrderStatus.CONFIRMED ||
             order.status === OrderStatus.CANCELLED) &&
@@ -1368,7 +1373,7 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
 
         // In particular, an old 1C snapshot must not turn a pending direct retry
         // into CONFLICT and stop delivery of the immutable packet.
-        if (order.syncState !== OrderSyncState.SYNCED) {
+        if (order.syncState !== OrderSyncState.SYNCED && !isSnapshotErrorRetry) {
           await appendOrderEvent(tx, { orderId: order.id, revision: order.revision,
             source: OrderEventSource.ONEC_IMPORT, eventType: 'ONEC_ORDER_SNAPSHOT_DEFERRED',
             payload: item as unknown as Prisma.InputJsonValue,
