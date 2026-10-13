@@ -66,10 +66,16 @@ const queryInteger = z.preprocess(
 
 const saveReasonSchema = z.enum(['manual', 'autosave']).optional().default('manual');
 
+// Clearing the search field means "all documents", not an invalid filter.
+const optionalSearchQuery = z.preprocess(
+  (value) => typeof value === 'string' && !value.trim() ? undefined : value,
+  z.string().trim().min(1).optional()
+);
+
 const pagedSearchQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   offset: z.coerce.number().int().min(0).default(0),
-  search: z.string().trim().min(1).optional(),
+  search: optionalSearchQuery,
   includeInactive: booleanFromQuery,
 });
 
@@ -114,7 +120,7 @@ export const clientOrdersListQuerySchema = z.object({
   status: clientOrderStatusSchema.optional(),
   statuses: clientOrderStatusesQuerySchema,
   syncState: z.nativeEnum(OrderSyncState).optional(),
-  search: z.string().trim().min(1).optional(),
+  search: optionalSearchQuery,
   counterpartyGuid: z.string().trim().min(1).optional(),
   organizationGuid: z.string().trim().min(1).optional(),
   warehouseGuid: z.string().trim().min(1).optional(),

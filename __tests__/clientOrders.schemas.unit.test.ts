@@ -16,6 +16,19 @@ import {
 } from '../src/modules/onec/onec.schemas';
 
 describe('client orders query schemas', () => {
+  it.each(['', ' ', '\t\n'])('treats cleared search %j as no filter', (search) => {
+    for (const schema of [clientOrdersListQuerySchema, clientOrdersCounterpartiesQuerySchema, clientOrdersProductsQuerySchema]) {
+      expect(schema.parse({ search }).search).toBeUndefined();
+    }
+  });
+
+  it('trims real search terms and still rejects malformed search types', () => {
+    expect(clientOrdersListQuerySchema.parse({ search: ' 123746 ' }).search).toBe('123746');
+    for (const search of [42, ['x'], {}, null]) {
+      expect(clientOrdersListQuerySchema.safeParse({ search }).success).toBe(false);
+    }
+  });
+
   it('parses inStockOnly=false as false', () => {
     const result = clientOrdersProductsQuerySchema.parse({ inStockOnly: 'false' });
     expect(result.inStockOnly).toBe(false);
