@@ -8,6 +8,7 @@ import { checkUserStatus } from '../middleware/checkUserStatus';
 import { ErrorCodes, errorResponse, successResponse } from '../utils/apiResponse';
 import { enrichProductsWithImages } from '../modules/clientOrders/clientOrders.productImages';
 import { getOnecLpAppStock } from '../modules/onec/onec.lpApp.client';
+import { enrichStockWarehouseGroups } from '../modules/clientOrders/stockWarehouseGroups';
 import { availableStockForManager } from '../modules/clientOrders/stockAvailability';
 
 export const stockProductsQuery = z.object({
@@ -145,7 +146,7 @@ router.get('/filters', ...access, async (_req, res) => {
       prisma.warehouse.findMany({ where: { stocks: { some: {} } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
       prisma.organization.findMany({ where: { stocks: { some: {} } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
-    res.json(successResponse({ warehouses, organizations }));
+    res.json(successResponse({ warehouses: await enrichStockWarehouseGroups(warehouses), organizations }));
   } catch { res.status(500).json(errorResponse('Не удалось загрузить фильтры остатков', ErrorCodes.INTERNAL_ERROR)); }
 });
 router.get('/products', ...access, async (req: AuthRequest, res) => {

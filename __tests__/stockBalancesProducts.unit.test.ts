@@ -4,6 +4,7 @@ import prisma from '../src/prisma/client';
 import router, { listStockProducts, listWarehouseBalances, listSeriesBalances, stockProductsQuery, stockScope, stockMetrics, managerStockAvailability } from '../src/routes/stockBalancesProducts';
 import { getOnecLpAppStock } from '../src/modules/onec/onec.lpApp.client';
 jest.mock('../src/modules/onec/onec.lpApp.client', () => ({ getOnecLpAppStock: jest.fn() }));
+jest.mock('../src/modules/clientOrders/stockWarehouseGroups', () => ({ enrichStockWarehouseGroups: jest.fn(async rows => rows) }));
 import { enrichProductsWithImages } from '../src/modules/clientOrders/clientOrders.productImages';
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
   product: { findMany: jest.fn() }, stockBalance: { findMany: jest.fn() },
