@@ -1,3 +1,4 @@
+import { availableStockForManager } from './stockAvailability';
 import {
   getOnecLpAppAgreements,
   getOnecLpAppClientOrder,
@@ -193,6 +194,7 @@ export type LiveProductStock = {
   reserved?: number | null;
   available?: number | null;
   freeAvailable?: number | null;
+  freeAvailableRaw?: number | null;
   myReserved?: number | null;
 };
 
@@ -1062,7 +1064,10 @@ function mapStock(record: AnyRecord | null | undefined) {
   const reserved = numberValue(record, ['reserved'], null);
   const freeAvailable = numberValue(record, ['freeAvailable'], null);
   const myReserved = numberValue(record, ['myReserved'], null);
-  const available = numberValue(record, ['available'], freeAvailable ?? quantity);
+  const freeAvailableRaw = numberValue(record, ['freeAvailableRaw'],
+    quantity !== null && reserved !== null ? quantity - reserved : freeAvailable);
+  const available = availableStockForManager({ quantity, freeAvailableRaw, myReserved,
+    available: numberValue(record, ['available'], freeAvailableRaw === null ? freeAvailable ?? quantity : null) });
   if (
     quantity === null &&
     reserved === null &&
@@ -1072,7 +1077,7 @@ function mapStock(record: AnyRecord | null | undefined) {
   ) {
     return null;
   }
-  return { quantity, reserved, available, freeAvailable, myReserved };
+  return { quantity, reserved, available, freeAvailable, freeAvailableRaw, myReserved };
 }
 
 function mapProduct(record: AnyRecord): LiveProduct | null {

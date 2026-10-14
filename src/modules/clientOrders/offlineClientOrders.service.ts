@@ -126,7 +126,10 @@ async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePol
   return balances.map((item) => {
     const quantity = numberValue(item.quantity) ?? 0;
     const totalReserved = numberValue(item.reserved) ?? 0;
-    const freeAvailable = numberValue(item.available) ?? Math.max(quantity - totalReserved, 0);
+    // Bulk reserved excludes shipping; online stock's reserved includes it.
+    // Keep the signed balance for the phone to add only this manager's reserve.
+    const freeAvailableRaw = quantity - totalReserved - (numberValue(item.shipping) ?? 0);
+    const freeAvailable = Math.max(freeAvailableRaw, 0);
     const { productId: _productId, warehouseId: _warehouseId, ...publicItem } = item;
     return {
       ...publicItem,
@@ -134,6 +137,7 @@ async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePol
       ...(policy?.stockOrganizationGuid ? { organization: null } : {}),
       receiptPrice: costByProduct.get(item.product.guid) ?? null,
       freeAvailable,
+      freeAvailableRaw,
       ownReserve: 0,
       available: Math.max(freeAvailable, 0),
     };
@@ -419,7 +423,7 @@ async function prepareOfflineProjection(managerGuid: string) {
         for (const entity of OFFLINE_DATASET_ENTITIES) {
           const large = entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock';
           const fingerprint = createHash('sha256').update(JSON.stringify({
-            version: 3, policy: policy?.fingerprint,
+            version: 3, availabilityVersion: entity === 'stock' ? 2 : undefined, policy: policy?.fingerprint,
             catalog: large ? jsonSafe(catalog) : undefined,
             sources: sourceDependencies[entity].map(name => {
               const row = sourceByEntity.get(name);
