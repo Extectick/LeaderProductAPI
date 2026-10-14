@@ -8,6 +8,7 @@ import { checkUserStatus } from '../middleware/checkUserStatus';
 import { ErrorCodes, errorResponse, successResponse } from '../utils/apiResponse';
 import { enrichProductsWithImages } from '../modules/clientOrders/clientOrders.productImages';
 import { getOnecLpAppStock } from '../modules/onec/onec.lpApp.client';
+import { availableStockForManager } from '../modules/clientOrders/stockAvailability';
 
 export const stockProductsQuery = z.object({
   search: z.string().trim().max(200).default(''),
@@ -39,6 +40,10 @@ export function stockMetrics(row: { quantity: unknown; reserved?: unknown; inSto
 export async function stockManagerGuid(userId?: number) {
   if (!userId) return null;
   return (await prisma.employeeProfile.findUnique({ where: { userId }, select: { onecUserGuid: true } }))?.onecUserGuid?.trim() || null;
+}
+export function managerStockAvailability(metrics: ReturnType<typeof stockMetrics>, myReserved: number) {
+  return availableStockForManager({ quantity: metrics.quantity - metrics.shipping,
+    freeAvailableRaw: metrics.quantity - metrics.reserved - metrics.shipping, myReserved }) ?? 0;
 }
 async function personalReserves(query: Query, managerGuid: string | null, productIds: string[]) {
   if (!managerGuid || !productIds.length) return [];
@@ -83,7 +88,7 @@ export async function listStockProducts(query: Query, userId?: number) {
     const total = byId.get(id);
     const metrics = stockMetrics(total ?? { quantity: 0 });
     const myReserved = own.filter(row => row.productId === id).reduce((sum, row) => sum + Number(row._sum?.reserved ?? 0), 0);
-    return { ...product, ...metrics, myReserved, availableForManager: metrics.available + myReserved, updatedAt: total?.updatedAt ?? null };
+    return { ...product, ...metrics, myReserved, availableForManager: managerStockAvailability(metrics, myReserved), updatedAt: total?.updatedAt ?? null };
   });
   return { items: await enrichProductsWithImages(items, { lazySyncMissing: false }),
     offset: query.offset, nextOffset: query.offset + page.length, hasMore: products.length > query.limit };
@@ -94,6 +99,7 @@ export async function listWarehouseBalances(guid: string, query: Query, userId?:
     SELECT w.id AS "warehouseId", w.guid, w.name, SUM(s.quantity) AS quantity,
       SUM(COALESCE(s."inStock",s.quantity)) AS "inStock", SUM(COALESCE(s.reserved,0)) AS reserved,
       SUM(COALESCE(s.available,s.quantity-COALESCE(s.reserved,0))) AS available,
+      SUM(COALESCE(s.shipping,0)) AS shipping,
       MAX(COALESCE(s."lastSyncedAt",s."updatedAt")) AS "updatedAt"
     FROM "StockBalance" s JOIN "Product" p ON p.id=s."productId" JOIN "Warehouse" w ON w.id=s."warehouseId"
     WHERE p.guid=${guid}
@@ -108,22 +114,26 @@ export async function listWarehouseBalances(guid: string, query: Query, userId?:
     const metrics = stockMetrics(row);
     const myReserved = Number(own.find(r => r.warehouseId === row.warehouseId)?._sum.reserved ?? 0);
     return { id: row.guid, warehouse: { guid: row.guid, name: row.name }, ...metrics,
-      myReserved, availableForManager: metrics.available + myReserved, updatedAt: row.updatedAt };
+      myReserved, availableForManager: managerStockAvailability(metrics, myReserved), updatedAt: row.updatedAt };
   });
   return { items, offset: query.offset, nextOffset: query.offset + items.length, hasMore: rows.length > query.limit, groupedBy: 'warehouse' };
 }
 const seriesResponse = z.object({ version: z.literal('stock-series-v1'), hasMore: z.boolean(), items: z.array(z.object({
   id: z.string(), warehouse: z.object({ guid: z.string().uuid(), name: z.string() }), seriesGuid: z.string(), seriesNumber: z.string(),
   expiresAt: z.string().nullable(), productionDate: z.string().nullable(), inStock: z.number(), reserved: z.number(), myReserved: z.number(),
-  available: z.number().nullable(), availabilityReason: z.string().optional(),
+  available: z.number().nullable(), shipping: z.number().optional(), availabilityReason: z.string().optional(),
 })).max(100) });
 export async function listSeriesBalances(guid: string, query: Query, userId?: number) {
   const managerGuid = await stockManagerGuid(userId);
   const payload = seriesResponse.parse(await getOnecLpAppStock({ productGuid: guid, bySeries: '1',
     managerGuid: managerGuid || undefined, warehouseGuids: query.warehouseGuids?.join(',') || query.warehouseGuid,
     offset: query.offset, limit: query.limit }));
-  return { items: payload.items.map(row => ({ ...row, availableForManager: row.available,
-    available: row.available === null ? null : row.available - row.myReserved })),
+  return { items: payload.items.map(row => ({ ...row,
+    availableForManager: row.available === null ? null : availableStockForManager({
+      quantity: row.inStock - (row.shipping ?? 0),
+      freeAvailableRaw: row.inStock - (row.shipping ?? 0) - row.reserved,
+      myReserved: row.myReserved, available: row.available }),
+    available: row.available === null ? null : Math.max(row.inStock - (row.shipping ?? 0) - row.reserved, 0) })),
     offset: query.offset, nextOffset: query.offset + payload.items.length, hasMore: payload.hasMore, groupedBy: 'series' };
 }
 

@@ -1,7 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import prisma from '../src/prisma/client';
-import router, { listStockProducts, listWarehouseBalances, listSeriesBalances, stockProductsQuery, stockScope, stockMetrics } from '../src/routes/stockBalancesProducts';
+import router, { listStockProducts, listWarehouseBalances, listSeriesBalances, stockProductsQuery, stockScope, stockMetrics, managerStockAvailability } from '../src/routes/stockBalancesProducts';
 import { getOnecLpAppStock } from '../src/modules/onec/onec.lpApp.client';
 jest.mock('../src/modules/onec/onec.lpApp.client', () => ({ getOnecLpAppStock: jest.fn() }));
 import { enrichProductsWithImages } from '../src/modules/clientOrders/clientOrders.productImages';
@@ -20,6 +20,11 @@ jest.mock('../src/middleware/serviceAccess', () => ({ authorizeServiceAccess: ()
 const app = express().use(router);
 const guid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 beforeEach(() => jest.clearAllMocks());
+it('never converts an oversubscribed personal reserve into physical stock', () => {
+  expect(managerStockAvailability(stockMetrics({ quantity: 3, reserved: 25, available: 0 }), 25)).toBe(3);
+  expect(managerStockAvailability(stockMetrics({ quantity: 9, reserved: 6, available: 3 }), 6)).toBe(9);
+  expect(managerStockAvailability(stockMetrics({ quantity: 13, reserved: 25, shipping: 10, available: 0 }), 25)).toBe(3);
+});
 it('validates bounds, GUIDs and search types instead of allowing unbounded scans', () => {
   expect(stockProductsQuery.parse({}).limit).toBe(30);
   for (const value of [{ limit: 101 }, { offset: -1 }, { offset: 'bad' }, { search: ['a'] }, { search: 'a'.repeat(201) }, { warehouseGuid: 'bad' }]) {
