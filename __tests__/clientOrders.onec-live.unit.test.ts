@@ -475,6 +475,13 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.warnings).toEqual(['warning']);
   });
 
+  it('corrects inflated availability from older 1C before an order stock check', async () => {
+    nomenclatureMock.mockResolvedValueOnce(paged([{ guid: 'rice-guid', name: 'Рис',
+      stock: { quantity: 3, reserved: 25, available: 25, freeAvailable: 0, myReserved: 25 } }]));
+    const result = await getLiveProducts({ limit: 25, offset: 0, managerGuid: 'manager-guid', includeInactive: false });
+    expect(result.items[0].stock).toMatchObject({ available: 3, myReserved: 25, freeAvailableRaw: -22 });
+  });
+
   it('normalizes products with package, price, stock and filters deleted rows', async () => {
     nomenclatureMock.mockResolvedValueOnce(
       paged([

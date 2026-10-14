@@ -112,6 +112,18 @@ test('own reserves use the same allowed goods/warehouse/organization filter', as
   expect(where.warehouse.guid.in).toEqual([id(31)]);
   expect(where.OR).toContainEqual({ organizationId: null });
 });
+test('offline stock preserves negative free stock before a phone adds personal reserve', async () => {
+  db.stockBalance.findMany.mockResolvedValue([{ syncKey: 'rice-stock', productId: 'p1', quantity: 3, reserved: 25, shipping: 0,
+    available: 0, product: { guid: id(1) }, warehouse: { guid: id(31) } }]);
+  expect((await source('stock'))[0]).toMatchObject({ freeAvailable: 0, freeAvailableRaw: -22, quantity: 3 });
+});
+
+test('shipping stays unavailable to offline personal reserve calculations', async () => {
+  db.stockBalance.findMany.mockResolvedValue([{ syncKey: 'rice-stock', productId: 'p1', quantity: 13, reserved: 25, shipping: 10,
+    available: 0, product: { guid: id(1) }, warehouse: { guid: id(31) } }]);
+  expect((await source('stock'))[0]).toMatchObject({ freeAvailable: 0, freeAvailableRaw: -22 });
+});
+
 test('stock uses the authoritative technical key, exposes warehouse-wide quantity and preserves delta identity', async () => {
   db.offlineExportPolicy.findUnique.mockResolvedValue({ payload: { ...payload, stockOrganizationGuid: id(30) } });
   const syncKey = `${id(1)}|${id(31)}|${id(30)}|`;
