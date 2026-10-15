@@ -55,7 +55,7 @@ describe('snapshot controller recovery', () => {
     (prisma.$transaction as jest.Mock).mockImplementation(fn => fn(tx));
     res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   });
-  const run = async (item = snapshot()) => handleOrdersSnapshotBatch({ body: { secret: 'secret', items: [item] } } as any, res);
+  const run = async (item: unknown = snapshot()) => handleOrdersSnapshotBatch({ body: { secret: 'secret', items: [item] } } as any, res);
   it('applies the corrected lines, preserves cancelled quantity and clears the actual snapshot error', async () => {
     await run();
     const rows = tx.orderItem.createMany.mock.calls[0][0].data;
@@ -66,13 +66,16 @@ describe('snapshot controller recovery', () => {
       revision: 2, syncState: 'SYNCED', isPostedIn1c: true, last1cError: null,
     }) }));
     expect(tx.orderEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: 'ONEC_ORDER_SNAPSHOT_APPLIED' }) }));
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results: [{ key: 'app', status: 'ok' }] }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ receiptVersion: 'order-snapshot-receipt-v1',
+      results: [{ key: 'app', status: 'ok', applied: true, retryable: false, outcome: 'applied', currentRevision: 2 }] }));
   });
   it.each(['QUEUED', 'CANCEL_REQUESTED', 'CONFLICT'])('never replaces pending %s contents', async syncState => {
     tx.order.findUnique.mockResolvedValue({ ...order(), syncState });
     await run();
     expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
     expect(tx.order.update).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ status: 'ok', applied: false,
+      retryable: true, outcome: 'deferred', code: 'LOCAL_REVISION_PENDING' });
   });
   it('still rejects a duplicate incoming ID before deleting any old line', async () => {
     await run({ ...snapshot(), items: [line('same'), line('same')] });
@@ -86,5 +89,83 @@ describe('snapshot controller recovery', () => {
     expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
     expect(tx.orderItem.createMany).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].results[0].error).toContain('not found');
+  });
+  it('distinguishes a missing order from an applied receipt despite HTTP success', async () => {
+    tx.order.findUnique.mockResolvedValue(null);
+    await run();
+    expect(res.json.mock.calls[0][0]).toMatchObject({ success: true,
+      results: [{ key: 'app', status: 'error', applied: false, retryable: false, code: 'ORDER_NOT_FOUND' }] });
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+  });
+  it('replays the exact accepted snapshot without rewriting lines or incrementing revision', async () => {
+    tx.order.update.mockImplementation(async ({ data }: any) => {
+      tx.order.findUnique.mockResolvedValue({ ...order(), ...data,
+        last1cSnapshot: JSON.parse(JSON.stringify(data.last1cSnapshot)) });
+    });
+    await run();
+    await run();
+    expect(tx.order.update).toHaveBeenCalledTimes(1);
+    expect(tx.orderItem.deleteMany).toHaveBeenCalledTimes(1);
+    expect(tx.orderEvent.create).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls[1][0].results[0]).toEqual({ key: 'app', status: 'ok', applied: true,
+      retryable: false, outcome: 'duplicate', currentRevision: 2 });
+  });
+  it('also replays a legacy snapshot with implicit revision exactly once', async () => {
+    const item = { ...snapshot(), revision: undefined };
+    tx.order.findUnique.mockResolvedValue({ ...order(), revision: 1, syncState: 'SYNCED' });
+    tx.order.update.mockImplementation(async ({ data }: any) => {
+      tx.order.findUnique.mockResolvedValue({ ...order(), ...data,
+        last1cSnapshot: JSON.parse(JSON.stringify(data.last1cSnapshot)) });
+    });
+    await run(item);
+    await run(item);
+    expect(tx.order.update).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls[1][0].results[0]).toMatchObject({ applied: true, outcome: 'duplicate', currentRevision: 2 });
+  });
+  it('does not acknowledge an old accepted snapshot while a newer manager revision is queued', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status: 'QUEUED', syncState: 'QUEUED', revision: 3,
+      last1cSnapshot: snapshot() });
+    await run();
+    expect(tx.order.update).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: true, outcome: 'deferred' });
+  });
+  it('keeps legacy QUEUED/SYNCED orders protected and explicitly deferred', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status: 'QUEUED', syncState: 'SYNCED', revision: 1 });
+    await run();
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: true, outcome: 'deferred' });
+  });
+  it('still applies initial document details aligned with the direct worker ACK revision', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status: 'SENT_TO_1C', syncState: 'SYNCED', revision: 2,
+      last1cSnapshot: { item: { guid: 'app', revision: 1, isPostedIn1c: true } } });
+    await run();
+    expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: true, outcome: 'applied', currentRevision: 2 });
+  });
+  it('applies the next outgoing document revision after an accepted snapshot', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED', last1cSnapshot: snapshot() });
+    await run({ ...snapshot(), baseRevision: 2, revision: 3, sourceUpdatedAt: '2026-10-13T16:00:00Z', comment: 'Changed in 1C' });
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ revision: 3 }) }));
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: true, outcome: 'applied', currentRevision: 3 });
+  });
+  it.each([
+    { revision: 3, last1cSnapshot: snapshot() },
+    { revision: 2, last1cSnapshot: { ...snapshot(), sourceUpdatedAt: '2026-10-13T16:00:00.000Z' } },
+  ])('rejects a late source version without corrupting a healthy order: %j', extra => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED', ...extra });
+    return run().then(() => {
+      expect(tx.order.update).not.toHaveBeenCalled();
+      expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+      expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: false,
+        outcome: 'rejected', code: 'STALE_SNAPSHOT' });
+    });
+  });
+  it('preserves the revision conflict guard and reports a non-applied receipt', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED' });
+    await run({ ...snapshot(), baseRevision: 99 });
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ syncState: 'CONFLICT' }) }));
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: false,
+      code: 'REVISION_CONFLICT' });
   });
 });
