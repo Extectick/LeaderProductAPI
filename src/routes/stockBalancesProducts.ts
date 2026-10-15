@@ -10,6 +10,7 @@ import { enrichProductsWithImages } from '../modules/clientOrders/clientOrders.p
 import { getOnecLpAppStock } from '../modules/onec/onec.lpApp.client';
 import { enrichStockWarehouseGroups } from '../modules/clientOrders/stockWarehouseGroups';
 import { availableStockForManager } from '../modules/clientOrders/stockAvailability';
+import { InvalidStockCursor, listStockMovements, stockMovementsQuery } from '../modules/clientOrders/stockMovements';
 
 export const stockProductsQuery = z.object({
   search: z.string().trim().max(200).default(''),
@@ -154,6 +155,19 @@ router.get('/products', ...access, async (req: AuthRequest, res) => {
   if (!parsed.success) { res.status(400).json(errorResponse('Некорректные параметры поиска', ErrorCodes.VALIDATION_ERROR)); return; }
   try { res.json(successResponse(await listStockProducts(parsed.data, req.user?.userId))); }
   catch { res.status(500).json(errorResponse('Не удалось загрузить остатки', ErrorCodes.INTERNAL_ERROR)); }
+});
+router.get('/products/:guid/movements', ...access, async (req: AuthRequest, res) => {
+  const guid = (req.params as Record<string, string>).guid;
+  const parsed = stockMovementsQuery.safeParse(req.query);
+  if (!parsed.success || !z.string().uuid().safeParse(guid).success) {
+    res.status(400).json(errorResponse('Некорректные параметры истории товара', ErrorCodes.VALIDATION_ERROR)); return;
+  }
+  res.set('Cache-Control', 'private, no-store');
+  try { res.json(successResponse(await listStockMovements(guid, parsed.data, req.user?.userId))); }
+  catch (error) {
+    if (error instanceof InvalidStockCursor) { res.status(400).json(errorResponse(error.message, ErrorCodes.VALIDATION_ERROR)); return; }
+    res.status(503).json(errorResponse('Не удалось получить историю товара из 1С. Потяните вниз для повторной загрузки.', ErrorCodes.ONEC_UNAVAILABLE));
+  }
 });
 router.get('/products/:guid/balances', ...access, async (req: AuthRequest, res) => {
   const guid = (req.params as Record<string, string>).guid;

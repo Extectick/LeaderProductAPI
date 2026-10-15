@@ -60,7 +60,7 @@ it('skips aggregate and image work on an empty product page', async () => {
   expect(result.items).toEqual([]); expect(result.hasMore).toBe(false); expect(prisma.$queryRaw).not.toHaveBeenCalled();
 });
 it('requires authentication and permission on every new endpoint', async () => {
-  for (const path of ['/filters', '/products', `/products/${guid}/balances`]) {
+  for (const path of ['/filters', '/products', `/products/${guid}/balances`, `/products/${guid}/movements`]) {
     expect((await request(app).get(path)).status).toBe(401);
     expect((await request(app).get(path).set('Authorization', 'test')).status).toBe(403);
   }
