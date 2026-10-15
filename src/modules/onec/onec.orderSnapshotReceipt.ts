@@ -25,16 +25,23 @@ function previousSnapshot(order: SnapshotOrder): Record<string, unknown> | null 
     ? value as Record<string, unknown> : null;
 }
 
-/** A receipt replay must neither rewrite lines nor advance an implicit revision. */
-export function isAcceptedSnapshotReplay(order: SnapshotOrder, incoming: Snapshot): boolean {
+/** Mirrors parsed payloads stored in Prisma JSON, including dates and omitted fields. */
+export function canonicalSnapshotPayload(value: unknown): string {
+  return stableOrderJson(JSON.parse(JSON.stringify(value)));
+}
+
+/** A replay needs committed SNAPSHOT_APPLIED event evidence, not last1cSnapshot:
+ * that diagnostic column also contains rejected, deferred and direct-ACK payloads. */
+export function isAcceptedSnapshotReplay(order: SnapshotOrder, incoming: Snapshot, acceptedPayload: unknown): boolean {
   if (order.syncState !== 'SYNCED' || order.status === 'QUEUED'
       || order.status !== incoming.status || order.guid !== incoming.guid
       || order.revision !== (incoming.revision ?? incoming.baseRevision + 1)) return false;
-  const previous = previousSnapshot(order);
+  const previous = acceptedPayload && typeof acceptedPayload === 'object' && !Array.isArray(acceptedPayload)
+    ? acceptedPayload as Record<string, unknown> : null;
   if (!previous || previous.guid !== incoming.guid) return false;
   // JSON conversion mirrors Prisma JSON storage: dates become ISO strings and
   // optional undefined properties disappear. Object member order is irrelevant.
-  return stableOrderJson(JSON.parse(JSON.stringify(incoming))) === stableOrderJson(previous);
+  return canonicalSnapshotPayload(incoming) === canonicalSnapshotPayload(previous);
 }
 
 /** Late callbacks cannot roll back a newer accepted revision or source version. */

@@ -1,9 +1,9 @@
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
-  $transaction: jest.fn(), syncRun: { create: jest.fn() },
+  $transaction: jest.fn(), syncRun: { create: jest.fn() }, order: { findUnique: jest.fn() },
 }, pool: {} }));
 import prisma from '../src/prisma/client';
-import { canRetryDuplicateLineSnapshot } from '../src/modules/onec/onec.orderSnapshotRecovery';
-import { handleOrdersSnapshotBatch } from '../src/modules/onec/onec.controllers';
+import { canRetryDuplicateLineSnapshot, canRetryMissingReferenceSnapshot } from '../src/modules/onec/onec.orderSnapshotRecovery';
+import { handleOrderAck, handleOrdersSnapshotBatch } from '../src/modules/onec/onec.controllers';
 
 const line = (lineGuid: string, extra = {}) => ({ lineGuid, product: { guid: 'product' },
   quantity: 7.335, quantityBase: 7.335, price: 505, lineAmount: 3704.18, ...extra });
@@ -37,6 +37,28 @@ describe('retry of a rejected duplicate-line snapshot', () => {
   });
 });
 
+describe('retry of a missing catalog reference', () => {
+  const missing = () => ({ ...order(), last1cError: 'Product product not found for order snapshot',
+    last1cSnapshot: JSON.parse(JSON.stringify(snapshot())) });
+  it('allows only the exact failed acknowledged snapshot', () => {
+    expect(canRetryMissingReferenceSnapshot(missing(), snapshot())).toBe(true);
+  });
+  it.each([
+    { syncState: 'QUEUED' }, { syncState: 'CONFLICT' }, { status: 'QUEUED' }, { status: 'DRAFT' },
+    { revision: 3 }, { source: 'MARKETPLACE_CLIENT' }, { lastExportError: 'Write result uncertain' },
+    { cancelRequestedAt: new Date() }, { last1cError: 'Posting failed' }, { last1cSnapshot: null },
+  ])('does not bypass local state protections: %j', extra => {
+    expect(canRetryMissingReferenceSnapshot({ ...missing(), ...extra }, snapshot())).toBe(false);
+  });
+  it.each([
+    { guid: 'other' }, { number1c: 'НОУТ-other' }, { revision: 3 }, { baseRevision: 2 },
+    { sourceUpdatedAt: '2026-10-13T16:00:00Z' }, { totalAmount: 1 },
+    { items: [line('changed')] },
+  ])('does not rebase or change a failed payload: %j', extra => {
+    expect(canRetryMissingReferenceSnapshot(missing(), { ...snapshot(), ...extra })).toBe(false);
+  });
+});
+
 describe('snapshot controller recovery', () => {
   let tx: any;
   let res: any;
@@ -46,13 +68,18 @@ describe('snapshot controller recovery', () => {
       $queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
       order: { findUnique: jest.fn().mockResolvedValue(order()), update: jest.fn() },
       orderItem: { count: jest.fn().mockResolvedValue(6), deleteMany: jest.fn(), createMany: jest.fn() },
-      orderEvent: { create: jest.fn() },
+      orderEvent: { create: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
       product: { findUnique: jest.fn().mockResolvedValue({ id: 'product', baseUnit: { id: 'unit' } }) },
       syncRun: { findUniqueOrThrow: jest.fn().mockResolvedValue({ entity: 'ORDERS_SNAPSHOT', direction: 'IMPORT' }), update: jest.fn() },
       syncRunItem: { createMany: jest.fn() },
     };
     (prisma.syncRun.create as jest.Mock).mockResolvedValue({ id: 'run' });
     (prisma.$transaction as jest.Mock).mockImplementation(fn => fn(tx));
+    tx.orderEvent.create.mockImplementation(async ({ data }: any) => {
+      if (data.eventType === 'ONEC_ORDER_SNAPSHOT_APPLIED') {
+        tx.orderEvent.findFirst.mockResolvedValue({ payload: JSON.parse(JSON.stringify(data.payload)) });
+      }
+    });
     res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   });
   const run = async (item: unknown = snapshot()) => handleOrdersSnapshotBatch({ body: { secret: 'secret', items: [item] } } as any, res);
@@ -89,6 +116,8 @@ describe('snapshot controller recovery', () => {
     expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
     expect(tx.orderItem.createMany).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].results[0].error).toContain('not found');
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: true,
+      code: 'SNAPSHOT_APPLY_FAILED' });
   });
   it('distinguishes a missing order from an applied receipt despite HTTP success', async () => {
     tx.order.findUnique.mockResolvedValue(null);
@@ -122,6 +151,14 @@ describe('snapshot controller recovery', () => {
     expect(tx.order.update).toHaveBeenCalledTimes(1);
     expect(res.json.mock.calls[1][0].results[0]).toMatchObject({ applied: true, outcome: 'duplicate', currentRevision: 2 });
   });
+  it('canonicalizes equivalent timestamp representations against a committed applied event', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED', last1cSnapshot: snapshot() });
+    tx.orderEvent.findFirst.mockResolvedValue({ payload: { ...snapshot(), sourceUpdatedAt: '2026-10-13T15:50:00.000Z' } });
+    await run({ ...snapshot(), sourceUpdatedAt: '2026-10-13T21:50:00+06:00' });
+    expect(tx.orderItem.createMany).not.toHaveBeenCalled();
+    expect(tx.order.update).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: true, outcome: 'duplicate' });
+  });
   it('does not acknowledge an old accepted snapshot while a newer manager revision is queued', async () => {
     tx.order.findUnique.mockResolvedValue({ ...order(), status: 'QUEUED', syncState: 'QUEUED', revision: 3,
       last1cSnapshot: snapshot() });
@@ -129,10 +166,12 @@ describe('snapshot controller recovery', () => {
     expect(tx.order.update).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: true, outcome: 'deferred' });
   });
-  it('keeps legacy QUEUED/SYNCED orders protected and explicitly deferred', async () => {
-    tx.order.findUnique.mockResolvedValue({ ...order(), status: 'QUEUED', syncState: 'SYNCED', revision: 1 });
+  it.each([1, 2, 3])('keeps legacy QUEUED/SYNCED revision %i protected before stale/conflict checks', async revision => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), status: 'QUEUED', syncState: 'SYNCED', revision });
     await run();
     expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(tx.order.update).not.toHaveBeenCalled();
+    expect(tx.orderEvent.findFirst).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: false, retryable: true, outcome: 'deferred' });
   });
   it('still applies initial document details aligned with the direct worker ACK revision', async () => {
@@ -141,6 +180,57 @@ describe('snapshot controller recovery', () => {
     await run();
     expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
     expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: true, outcome: 'applied', currentRevision: 2 });
+  });
+  it('requires a committed applied event rather than a diagnostic snapshot to acknowledge a duplicate', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED', last1cSnapshot: snapshot() });
+    await run();
+    expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls[0][0].results[0]).toMatchObject({ applied: true, outcome: 'applied' });
+  });
+  it('applies a previously rejected snapshot after a legacy ACK instead of falsely acknowledging it as duplicate', async () => {
+    const item = { ...snapshot(), status: 'SENT_TO_1C', isPostedIn1c: false };
+    let current: any = { ...order(), revision: 1, status: 'SENT_TO_1C', syncState: 'SYNCED', last1cSnapshot: null };
+    tx.order.findUnique.mockImplementation(async () => current);
+    (prisma.order.findUnique as jest.Mock).mockImplementation(async () => current);
+    tx.order.update.mockImplementation(async ({ data }: any) => {
+      current = { ...current, ...data };
+      return current;
+    });
+    tx.product.findUnique.mockResolvedValue(null);
+    await run(item);
+    expect(current).toMatchObject({ revision: 1, syncState: 'ERROR' });
+    const workerSetting = process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED;
+    process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED = '1';
+    try {
+      await handleOrderAck({ params: { guid: 'app' }, body: { secret: 'secret',
+        status: 'SENT_TO_1C', isPostedIn1c: false } } as any, res);
+    } finally {
+      if (workerSetting === undefined) delete process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED;
+      else process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED = workerSetting;
+    }
+    expect(current).toMatchObject({ revision: 2, syncState: 'SYNCED' });
+    tx.product.findUnique.mockResolvedValue({ id: 'product', baseUnit: { id: 'unit' } });
+    await run(item);
+    expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(res.json.mock.calls.at(-1)[0].results[0]).toMatchObject({ applied: true, outcome: 'applied' });
+  });
+  it.each([1, 2])('heals an exact missing-reference snapshot at API revision %i after catalog synchronization without an endless deferred state', async revision => {
+    let current: any = { ...order(), revision, syncState: 'SYNCED', last1cSnapshot: null };
+    tx.order.findUnique.mockImplementation(async () => current);
+    tx.order.update.mockImplementation(async ({ data }: any) => {
+      current = { ...current, ...data };
+      return current;
+    });
+    tx.product.findUnique.mockResolvedValue(null);
+    await run();
+    await run();
+    expect(res.json.mock.calls[1][0].results[0]).toMatchObject({ applied: false, retryable: true,
+      outcome: 'rejected', code: 'SNAPSHOT_APPLY_FAILED' });
+    tx.product.findUnique.mockResolvedValue({ id: 'product', baseUnit: { id: 'unit' } });
+    await run();
+    expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(current).toMatchObject({ revision: 2, syncState: 'SYNCED', last1cError: null });
+    expect(res.json.mock.calls[2][0].results[0]).toMatchObject({ applied: true, outcome: 'applied' });
   });
   it('applies the next outgoing document revision after an accepted snapshot', async () => {
     tx.order.findUnique.mockResolvedValue({ ...order(), syncState: 'SYNCED', last1cSnapshot: snapshot() });

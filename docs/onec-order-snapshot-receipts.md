@@ -11,7 +11,7 @@ The additive `receiptVersion: "order-snapshot-receipt-v1"` contract includes:
 | applied | ok | true | false | Snapshot committed. |
 | duplicate | ok | true | false | This exact snapshot is already committed; no revision, lines or order events changed. |
 | deferred | ok | false | true | A local order edit/export is pending. Keep the 1C outbox item. |
-| rejected | error | false | false | Business validation, revision conflict or stale source version. Keep diagnostics; do not call it a successful delivery. |
+| rejected | error | false | depends | Validation/conflict/stale versions are permanent; missing catalog references remain retryable. Keep diagnostics; do not call it a successful delivery. |
 
 The sender must require `success === true` and exactly one result matching the
 expected app order GUID. Delivery is confirmed only when that result has
@@ -28,6 +28,14 @@ Late explicit revisions and older source timestamps are rejected without
 turning a healthy current order into a conflict. Exact accepted replays are
 idempotent, including legacy snapshots with implicit revision. Normal revision
 conflicts and pending local edits retain their existing content protections.
+
+Duplicate acknowledgement requires the latest committed
+`ONEC_ORDER_SNAPSHOT_APPLIED` event for the current revision to contain the same
+canonical parsed payload. `last1cSnapshot` alone is not evidence: it also stores
+rejected/deferred payloads and direct-worker ACKs. Exact missing-product snapshot
+retries may recover an import `ERROR` after catalog synchronization, but only at
+the original identity/revision and without modifying the failed payload. Pending
+local edits, uncertain exports, cancellations and unrelated errors remain protected.
 
 Focused verification:
 
