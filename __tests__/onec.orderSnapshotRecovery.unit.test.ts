@@ -83,6 +83,46 @@ describe('snapshot controller recovery', () => {
     res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   });
   const run = async (item: unknown = snapshot()) => handleOrdersSnapshotBatch({ body: { secret: 'secret', items: [item] } } as any, res);
+  it('defers lock contention without reading or mutating the busy order', async () => {
+    tx.$queryRaw.mockResolvedValue([{ locked: false }]);
+    await run();
+    expect(tx.order.findUnique).not.toHaveBeenCalled();
+    expect(tx.order.update).not.toHaveBeenCalled();
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(tx.orderItem.createMany).not.toHaveBeenCalled();
+    expect(tx.orderEvent.create).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true,
+      results: [{ key: 'app', status: 'ok', applied: false, retryable: true,
+        outcome: 'deferred', code: 'ORDER_BUSY' }] }));
+  });
+  it('continues a mixed batch after a busy order and applies only the unlocked order', async () => {
+    tx.$queryRaw.mockResolvedValueOnce([{ locked: false }]).mockResolvedValueOnce([{ locked: true }]);
+    await handleOrdersSnapshotBatch({ body: { secret: 'secret',
+      items: [{ ...snapshot(), guid: 'busy' }, snapshot()] } } as any, res);
+    expect(tx.order.findUnique).toHaveBeenCalledTimes(1);
+    expect(tx.order.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { guid: 'app' } }));
+    expect(tx.order.update).toHaveBeenCalledTimes(1);
+    expect(tx.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].results).toMatchObject([
+      { key: 'busy', applied: false, retryable: true, code: 'ORDER_BUSY' },
+      { key: 'app', applied: true, outcome: 'applied' },
+    ]);
+  });
+  it('does not hide an unexpected lock/database failure as retryable contention', async () => {
+    tx.$queryRaw.mockRejectedValue(new Error('Database unavailable'));
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await run();
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.json).toHaveBeenCalledWith({ error: 'Internal server error' });
+      expect(tx.order.update).not.toHaveBeenCalled();
+      expect(tx.orderItem.createMany).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
   it('applies the corrected lines, preserves cancelled quantity and clears the actual snapshot error', async () => {
     await run();
     const rows = tx.orderItem.createMany.mock.calls[0][0].data;

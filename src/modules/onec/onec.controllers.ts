@@ -18,7 +18,7 @@ import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
-import { lockOrderMutation } from '../orders/orderIntegrity';
+import { lockOrderMutation, OrderIntegrityError } from '../orders/orderIntegrity';
 import {
   canRetryDuplicateLineSnapshot, canRetryMissingReferenceSnapshot, MissingOrderSnapshotReferenceError,
 } from './onec.orderSnapshotRecovery';
@@ -1354,7 +1354,19 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
 
     await prisma.$transaction(async (tx) => {
       for (const item of parsed.items) {
-        await lockOrderMutation(tx, item.guid, true);
+        try {
+          await lockOrderMutation(tx, item.guid, true);
+        } catch (error) {
+          if (!(error instanceof OrderIntegrityError) || error.details.kind !== 'ORDER_EXPORT_IN_PROGRESS') {
+            throw error;
+          }
+          // pg_try_advisory_xact_lock does not abort the transaction. Leave this
+          // order untouched and let other batch items proceed; an exact retry
+          // can obtain the lock or acknowledge the first committed delivery.
+          results.push({ key: item.guid, status: 'ok', applied: false, retryable: true,
+            outcome: 'deferred', code: 'ORDER_BUSY' });
+          continue;
+        }
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
           select: { id: true, guid: true, number1c: true, revision: true, source: true, status: true,

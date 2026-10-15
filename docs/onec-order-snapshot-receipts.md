@@ -10,7 +10,7 @@ The additive `receiptVersion: "order-snapshot-receipt-v1"` contract includes:
 | --- | --- | --- | --- | --- |
 | applied | ok | true | false | Snapshot committed. |
 | duplicate | ok | true | false | This exact snapshot is already committed; no revision, lines or order events changed. |
-| deferred | ok | false | true | A local order edit/export is pending. Keep the 1C outbox item. |
+| deferred | ok | false | true | A local edit/export is pending or the per-order mutation lock is busy (`ORDER_BUSY`). Keep the 1C outbox item. |
 | rejected | error | false | depends | Validation/conflict/stale versions are permanent; missing catalog references remain retryable. Keep diagnostics; do not call it a successful delivery. |
 
 The sender must require `success === true` and exactly one result matching the
@@ -36,6 +36,8 @@ rejected/deferred payloads and direct-worker ACKs. Exact missing-product snapsho
 retries may recover an import `ERROR` after catalog synchronization, but only at
 the original identity/revision and without modifying the failed payload. Pending
 local edits, uncertain exports, cancellations and unrelated errors remain protected.
+Concurrent delivery lock contention is a per-item deferred receipt, not HTTP 500;
+the busy order is not read or changed and the remaining batch items continue.
 
 Focused verification:
 
