@@ -40,6 +40,7 @@ const DEFAULT_BACKOFF_MAX_MS = 300_000;
 let timer: NodeJS.Timeout | null = null;
 let wakeupTimer: NodeJS.Timeout | null = null;
 let inMemoryLock = false;
+let runInFlight = false;
 let isStarted = false;
 let directPushPausedUntil = 0;
 let lastPauseLogAt = 0;
@@ -146,12 +147,18 @@ async function acquireLock() {
   try {
     const redis = getRedis();
     if (redis.isOpen) {
-      const acquired = await redis.set(LOCK_KEY, lockId, { NX: true, PX: ttlMs });
-      if (acquired !== 'OK') return null;
-      return async () => {
-        try {
-          const current = await redis.get(LOCK_KEY);
-          if (current === lockId) await redis.del(LOCK_KEY);
+        const acquired = await redis.set(LOCK_KEY, lockId, { NX: true, PX: ttlMs });
+        if (acquired !== 'OK') return null;
+        const heartbeat = setInterval(() => {
+          void redis.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('pexpire',KEYS[1],ARGV[2]) else return 0 end",
+            { keys: [LOCK_KEY], arguments: [lockId, String(ttlMs)] }).catch(() => {});
+        }, Math.max(1000, Math.floor(ttlMs / 3)));
+        heartbeat.unref();
+        return async () => {
+          clearInterval(heartbeat);
+          try {
+            await redis.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",
+              { keys: [LOCK_KEY], arguments: [lockId] });
         } catch {
           // Lock cleanup is best-effort. TTL is the final guard.
         }
@@ -608,10 +615,28 @@ export async function markOrderExportFailure(order: QueuedOrderForExport, error:
   });
 }
 
-async function loadExportCandidates() {
-  const take = Math.max(getBatchSize() * 3, getBatchSize());
+export async function loadExportCandidates() {
+  const baseMs = envInt('CLIENT_ORDERS_EXPORT_BACKOFF_BASE_MS', DEFAULT_BACKOFF_BASE_MS, 1000);
+  const maxMs = envInt('CLIENT_ORDERS_EXPORT_BACKOFF_MAX_MS', DEFAULT_BACKOFF_MAX_MS, baseMs);
+  // Filter retry delays BEFORE LIMIT and before loading large item arrays. Round
+  // robin across managers prevents a single offline backlog monopolizing a batch.
+  const ids = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    WITH due AS (
+      SELECT id, "queuedAt", "createdAt", ROW_NUMBER() OVER (
+        PARTITION BY "createdByUserId" ORDER BY "queuedAt" ASC NULLS LAST, "createdAt", id
+      ) AS turn FROM "Order"
+      WHERE source = 'MANAGER_APP' AND guid IS NOT NULL
+        AND ((status = 'QUEUED' AND "syncState" = 'QUEUED')
+          OR (status = 'CANCELLED' AND "syncState" = 'CANCEL_REQUESTED'))
+        AND ("exportAttempts" <= 0 OR COALESCE("sourceUpdatedAt", "updatedAt", "queuedAt", "createdAt")
+          <= ${new Date()}::timestamptz - (LEAST(${maxMs}::double precision,
+            ${baseMs}::double precision * POWER(2, LEAST(20, GREATEST(0, "exportAttempts" - 1)))) * INTERVAL '1 millisecond'))
+    ) SELECT id FROM due ORDER BY turn, "queuedAt" ASC NULLS LAST, "createdAt", id LIMIT ${getBatchSize()}
+  `);
+  if (!ids.length) return [];
   const orders = await prisma.order.findMany({
     where: {
+      id: { in: ids.map(row => row.id) },
       source: OrderSource.MANAGER_APP,
       OR: [
         { status: OrderStatus.QUEUED, syncState: OrderSyncState.QUEUED },
@@ -620,12 +645,10 @@ async function loadExportCandidates() {
       guid: { not: null },
     },
     orderBy: [{ queuedAt: 'asc' }, { createdAt: 'asc' }],
-    take,
     select: queuedOrderSelect,
   });
-
-  const nowMs = Date.now();
-  return orders.filter((order) => shouldAttempt(order, nowMs)).slice(0, getBatchSize());
+  const byId = new Map(orders.map(order => [order.id, order]));
+  return ids.flatMap(({ id }) => byId.has(id) ? [byId.get(id)!] : []);
 }
 
 export async function exportOrder(order: QueuedOrderForExport) {
@@ -735,34 +758,42 @@ export async function exportOrder(order: QueuedOrderForExport) {
 }
 
 async function runOnce() {
-  if (Date.now() < directPushPausedUntil) return;
-
-  const release = await acquireLock();
-  if (!release) return;
-
+  if (runInFlight || Date.now() < directPushPausedUntil) return;
+  runInFlight = true;
+  let release: (() => Promise<void>) | null = null;
   try {
+    release = await acquireLock();
+    if (!release) return;
     const orders = await loadExportCandidates();
     if (orders.length === 0) return;
 
+    const groups = new Map<number, QueuedOrderForExport[]>();
     for (const order of orders) {
-      try {
-        await exportOrder(order);
-      } catch (error) {
-        const originalError = error instanceof ClientOrderExportFailure ? error.cause : error;
-        const context = error instanceof ClientOrderExportFailure ? error.context : undefined;
-        console.error('[client-orders-export-worker] order push failed', {
-          requestId: context?.requestId ?? null,
-          guid: order.guid ?? order.id,
-          error: errorMessage(originalError),
-        });
-        await markOrderExportFailure(order, originalError, context);
-        if (pauseDirectPushIfNeeded(originalError)) break;
-      }
+      const owner = order.createdByUser?.id ?? 0;
+      groups.set(owner, [...(groups.get(owner) ?? []), order]);
+    }
+    const managerQueues = [...groups.values()];
+    for (let i = 0; i < managerQueues.length; i += 2) {
+      await Promise.all(managerQueues.slice(i, i + 2).map(async queue => {
+        for (const order of queue) {
+          if (Date.now() < directPushPausedUntil) break;
+          try { await exportOrder(order); }
+          catch (error) {
+            const originalError = error instanceof ClientOrderExportFailure ? error.cause : error;
+            const context = error instanceof ClientOrderExportFailure ? error.context : undefined;
+            console.error('[client-orders-export-worker] order push failed', {
+              requestId: context?.requestId ?? null, guid: order.guid ?? order.id, error: errorMessage(originalError),
+            });
+            await markOrderExportFailure(order, originalError, context);
+            if (pauseDirectPushIfNeeded(originalError)) break;
+          }
+        }
+      }));
     }
   } catch (error) {
     console.error('[client-orders-export-worker] run failed', error);
   } finally {
-    await release();
+    try { if (release) await release(); } finally { runInFlight = false; }
   }
 }
 

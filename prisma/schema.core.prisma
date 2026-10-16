@@ -329,6 +329,7 @@ model User {
   trackingRequestsTargeted TrackingLocationRequest[] @relation("TrackingLocationRequestTarget")
   trackingRequestsCreated  TrackingLocationRequest[] @relation("TrackingLocationRequestRequester")
   createdOrders        Order[]               @relation("OrdersCreatedBy")
+  orderSubmissions     ClientOrderSubmission[]
   orderEvents          OrderEvent[]          @relation("OrderEventsActor")
   lastSeenAt           DateTime?
   createdAt            DateTime              @default(now())

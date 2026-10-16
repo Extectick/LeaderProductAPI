@@ -3777,6 +3777,15 @@ async function getClientOrdersTodaySummaryFresh(
   }
 }
 
+/** Inbox reconciliation must not wait for 1C detail/read-through caches. */
+export async function getStoredClientOrderForSubmission(guid: string, userId: number) {
+  const order = await prisma.order.findFirst({ where: { guid, createdByUserId: userId, source: OrderSource.MANAGER_APP }, select: orderDetailSelect });
+  if (!order) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ ещё не подготовлен сервером');
+  return { ...mapOrderDetail(order), draftReview: order.draftReview,
+    lastExportError: normalizeClientOrderPublicError(order.lastExportError),
+    last1cError: normalizeClientOrderPublicError(order.last1cError) };
+}
+
 export async function getClientOrderByGuid(guid: string, userId?: number) {
   const order = await prisma.order.findFirst({
     where: {
@@ -5764,7 +5773,8 @@ export async function getClientOrderByClientId(userId: number, clientOrderId: st
 export async function putClientOrderByClientId(
   userId: number,
   clientOrderId: string,
-  body: ClientOrderMutationBody
+  body: ClientOrderMutationBody,
+  options?: { storedResultOnly?: boolean }
 ) {
   const sourceUpdatedAt = now();
   const requestedBody = body;
@@ -5784,7 +5794,7 @@ export async function putClientOrderByClientId(
   if (committed) {
     const committedRevision = committed.clientRevision ?? 0;
     if (body.clientRevision < committedRevision) {
-      return getClientOrderByGuid(committed.guid!, userId);
+      return options?.storedResultOnly ? getStoredClientOrderForSubmission(committed.guid!, userId) : getClientOrderByGuid(committed.guid!, userId);
     }
     if (body.clientRevision === committedRevision) {
       const rejectedBackup = committed.draftReview && body.offlineReview ? await getDraftBackup(userId, clientOrderId) : null;
@@ -5798,7 +5808,7 @@ export async function putClientOrderByClientId(
         );
       }
       if (body.intent === 'SAVE' || isOrderQueued(committed) || committed.submitRequestedAt) {
-        return getClientOrderByGuid(committed.guid!, userId);
+        return options?.storedResultOnly ? getStoredClientOrderForSubmission(committed.guid!, userId) : getClientOrderByGuid(committed.guid!, userId);
       }
     }
   }
@@ -6074,7 +6084,7 @@ export async function putClientOrderByClientId(
     requestClientOrdersExportWakeup();
     if (body.offlineReview) await markDraftSubmitted(userId, clientOrderId, body.clientRevision, result.guid);
   }
-  return getClientOrderByGuid(result.guid, userId);
+  return options?.storedResultOnly ? getStoredClientOrderForSubmission(result.guid, userId) : getClientOrderByGuid(result.guid, userId);
 }
 
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
