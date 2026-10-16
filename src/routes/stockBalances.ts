@@ -5,8 +5,10 @@ import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { ErrorCodes, errorResponse, successResponse } from '../utils/apiResponse';
 import { cacheGet, cacheSet } from '../utils/cache';
+import stockBalancesProducts from './stockBalancesProducts';
 
 const router = express.Router();
+router.use(stockBalancesProducts);
 const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
 const STOCK_BALANCES_META_TTL_SEC = 60;
 const STOCK_BALANCES_TREE_TTL_SEC = 30;

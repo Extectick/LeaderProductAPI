@@ -29,7 +29,9 @@ export async function getOwnedShare(orderGuid: string, ownerId: number) {
 export function presentOwnedShare(link: OrderShareLink) {
   const origin = process.env.ORDER_SHARE_PUBLIC_ORIGIN;
   if (!origin || !/^https:\/\/[^/]+$/.test(origin)) throw new ShareError(503, 'Публикация заказов ещё не настроена');
-  return { url: `${origin}/order/#${decryptShareToken(link.tokenEncrypted)}`, expiresAt: link.expiresAt.toISOString(),
+  // Enable only after the public page and token-redacted nginx route are deployed.
+  const prefix = process.env.ORDER_SHARE_PATH_LINKS_ENABLED === '1' ? '' : '#';
+  return { url: `${origin}/order/${prefix}${decryptShareToken(link.tokenEncrypted)}`, expiresAt: link.expiresAt.toISOString(),
     active: !link.revokedAt && link.expiresAt.getTime() > Date.now() };
 }
 

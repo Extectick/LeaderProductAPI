@@ -4,18 +4,34 @@ jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
 } }));
 jest.mock('../src/modules/clientOrders/clientOrders.service', () => ({ getClientOrderByGuid: jest.fn() }));
 import prisma from '../src/prisma/client';
-import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey, publicOrderSelect } from '../src/modules/orderShare/orderShare.service';
+import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey, publicOrderSelect, presentOwnedShare } from '../src/modules/orderShare/orderShare.service';
 import { encryptShareToken } from '../src/modules/orderShare/orderShare.model';
 const db = prisma as any;
 const link = { id: 'share', ownerId: 1, orderGuid: 'order', localOrderId: 'local', tokenHash: 'hash', counterpartyGuid: 'client',
   expiresAt: new Date(Date.now() + 86400000), revokedAt: null, refreshedAt: new Date() };
 beforeEach(() => {
+  delete process.env.ORDER_SHARE_PATH_LINKS_ENABLED;
   jest.clearAllMocks(); db.orderShareLink.findUnique.mockResolvedValue(link);
   db.user.findFirst.mockResolvedValue({ firstName: 'Иван', lastName: 'Менеджер', phone: 79001234567n, clientContacts: null });
   db.$transaction.mockImplementation((callback: any) => callback(db)); db.productImage.findMany.mockResolvedValue([]);
   db.order.findUnique.mockResolvedValue({ id: 'local', createdByUserId: 1, updatedAt: new Date(), counterparty: { guid: 'client', name: 'Клиент', inn: 'private' },
     currency: 'RUB', totalAmount: 100, profit: 44, trackingSnapshot: { latitude: 50 },
     items: [{ id: 'line', product: { guid: 'product', name: 'Продукт' }, quantity: 2, price: 50, lineAmount: 100 }] });
+});
+
+test('path link retains the existing capability and expiry without rotating or writing the order', () => {
+  process.env.ORDER_SHARE_SECRET = 'unit-test-only-32-byte-secret-not-live';
+  process.env.ORDER_SHARE_PUBLIC_ORIGIN = 'https://dev.leader-product.ru';
+  process.env.ORDER_SHARE_PATH_LINKS_ENABLED = '1';
+  for (const length of [12, 43]) {
+    const token = 'x'.repeat(length);
+    const result = presentOwnedShare({ ...link, tokenEncrypted: encryptShareToken(token) } as any);
+    expect(result.url).toBe('https://dev.leader-product.ru/order/' + token);
+    expect(result.expiresAt).toBe(link.expiresAt.toISOString());
+    expect(new URL(result.url).hash).toBe('');
+    expect(result.active).toBe(true);
+  }
+  expect(db.order.findUnique).not.toHaveBeenCalled();
 });
 test('rejects missing, expired, revoked and blocked-owner links', async () => {
   for (const value of [null, { ...link, expiresAt: new Date(0) }, { ...link, revokedAt: new Date() }]) {

@@ -24,6 +24,12 @@ Client contact settings are separate from login, verified phone and Telegram/MAX
 
 Use current saved API order rows for manager documents. A cached public snapshot covers live-only 1C documents; refresh it in a bounded, single-flight background path for active links. Never call 1C for every public page view, and keep a last good snapshot on transient failure. No 1C writes or extension changes.
 
+## Messenger-safe path links
+
+`ORDER_SHARE_PATH_LINKS_ENABLED=1` changes newly copied addresses to `/order/<code>` without rotating the existing capability or changing expiry. Existing `/order/#<code>` links remain supported by the public page. Generic messenger preview cards can omit fragments; path codes stay in the destination sent to the server. This does not suppress the messenger's own external-site warning.
+
+Deploy in order: public web with both formats; nginx path entry with inherited no-referrer/no-index/CSP headers and disabled request/error logging for capability paths; API; then enable the flag only in the target environment. Public JSON/images still use bearer headers and the same authorization, revocation, expiry and rate limits. Never put customer data or order totals in preview metadata. Validate HTML/assets, old and new entry points and absence of code in access logs. Rollback: disable the flag; keep path-reading support for links already sent.
+
 ## Rollout boundary
 
 APP and API have separate commits. Production, production 1C and unrelated dirty primary worktrees remain untouched. Public web has a separate static dev deployment under /order/ on dev.leader-product.ru. No new native modules are required.

@@ -18,8 +18,13 @@ import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
 import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
-import { lockOrderMutation } from '../orders/orderIntegrity';
-import { canRetryDuplicateLineSnapshot } from './onec.orderSnapshotRecovery';
+import { lockOrderMutation, OrderIntegrityError } from '../orders/orderIntegrity';
+import {
+  canRetryDuplicateLineSnapshot, canRetryMissingReferenceSnapshot, MissingOrderSnapshotReferenceError,
+} from './onec.orderSnapshotRecovery';
+import {
+  isAcceptedSnapshotReplay, isStaleOrderSnapshot, ORDER_SNAPSHOT_RECEIPT_VERSION, OrderSnapshotReceipt,
+} from './onec.orderSnapshotReceipt';
 import { buildQueuedOrderPayload, clientOrderDirectPushLockKey, queuedOrderSelect } from './onec.orderQueuePayload';
 import {
   agreementsBatchSchema,
@@ -1241,7 +1246,7 @@ async function replaceOrderItemsFromSnapshot(
     });
 
     if (!product) {
-      throw new Error(`Product ${item.product.guid} not found for order snapshot`);
+      throw new MissingOrderSnapshotReferenceError(item.product.guid);
     }
 
     const packageRecord = item.package?.guid
@@ -1344,12 +1349,24 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
 
   try {
     const parsed = ordersSnapshotBatchSchema.parse(req.body);
-    const results: BatchResult[] = [];
+    const results: OrderSnapshotReceipt[] = [];
     const syncedAt = now();
 
     await prisma.$transaction(async (tx) => {
       for (const item of parsed.items) {
-        await lockOrderMutation(tx, item.guid, true);
+        try {
+          await lockOrderMutation(tx, item.guid, true);
+        } catch (error) {
+          if (!(error instanceof OrderIntegrityError) || error.details.kind !== 'ORDER_EXPORT_IN_PROGRESS') {
+            throw error;
+          }
+          // pg_try_advisory_xact_lock does not abort the transaction. Leave this
+          // order untouched and let other batch items proceed; an exact retry
+          // can obtain the lock or acknowledge the first committed delivery.
+          results.push({ key: item.guid, status: 'ok', applied: false, retryable: true,
+            outcome: 'deferred', code: 'ORDER_BUSY' });
+          continue;
+        }
         const order = await tx.order.findUnique({
           where: { guid: item.guid },
           select: { id: true, guid: true, number1c: true, revision: true, source: true, status: true,
@@ -1357,11 +1374,13 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
         });
 
         if (!order) {
-          results.push({ key: item.guid, status: 'error', error: 'Order not found' });
+          results.push({ key: item.guid, status: 'error', error: 'Order not found',
+            applied: false, retryable: false, outcome: 'rejected', code: 'ORDER_NOT_FOUND' });
           continue;
         }
 
-        const isSnapshotErrorRetry = canRetryDuplicateLineSnapshot(order, item);
+        const isSnapshotErrorRetry = canRetryDuplicateLineSnapshot(order, item)
+          || canRetryMissingReferenceSnapshot(order, item);
         const isAckAlignedSnapshot =
           order.source === OrderSource.MANAGER_APP &&
           (order.syncState === OrderSyncState.SYNCED || isSnapshotErrorRetry) &&
@@ -1373,12 +1392,32 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
 
         // In particular, an old 1C snapshot must not turn a pending direct retry
         // into CONFLICT and stop delivery of the immutable packet.
-        if (order.syncState !== OrderSyncState.SYNCED && !isSnapshotErrorRetry) {
+        if ((order.syncState !== OrderSyncState.SYNCED || order.status === OrderStatus.QUEUED)
+            && !isSnapshotErrorRetry) {
           await appendOrderEvent(tx, { orderId: order.id, revision: order.revision,
             source: OrderEventSource.ONEC_IMPORT, eventType: 'ONEC_ORDER_SNAPSHOT_DEFERRED',
             payload: item as unknown as Prisma.InputJsonValue,
             note: 'Локальная редакция не подтверждена; входящий снимок не применён.' });
-          results.push({ key: item.guid, status: 'ok' });
+          results.push({ key: item.guid, status: 'ok', applied: false, retryable: true,
+            outcome: 'deferred', code: 'LOCAL_REVISION_PENDING', currentRevision: order.revision });
+          continue;
+        }
+
+        const acceptedSnapshot = await tx.orderEvent.findFirst({
+          where: { orderId: order.id, revision: order.revision, eventType: 'ONEC_ORDER_SNAPSHOT_APPLIED' },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: { payload: true },
+        });
+        if (isAcceptedSnapshotReplay(order, item, acceptedSnapshot?.payload)) {
+          results.push({ key: item.guid, status: 'ok', applied: true, retryable: false,
+            outcome: 'duplicate', currentRevision: order.revision });
+          continue;
+        }
+
+        if (isStaleOrderSnapshot(order, item)) {
+          results.push({ key: item.guid, status: 'error', error: 'Stale order snapshot',
+            applied: false, retryable: false, outcome: 'rejected', code: 'STALE_SNAPSHOT',
+            currentRevision: order.revision });
           continue;
         }
 
@@ -1400,29 +1439,9 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
             payload: item as unknown as Prisma.InputJsonValue,
             note: `Revision conflict. Current=${order.revision}, snapshotBase=${item.baseRevision}`,
           });
-          results.push({ key: item.guid, status: 'error', error: 'Revision conflict' });
-          continue;
-        }
-
-        if (order.status === OrderStatus.QUEUED) {
-          const message = `Snapshot 1С отложен: заказ в состоянии ${order.status}/${order.syncState}, локальные строки не перезаписаны.`;
-          await tx.order.update({
-            where: { id: order.id },
-            data: {
-              last1cSnapshot: item as unknown as Prisma.InputJsonValue,
-              lastSyncedAt: syncedAt,
-              lastStatusSyncAt: syncedAt,
-            },
-          });
-          await appendOrderEvent(tx, {
-            orderId: order.id,
-            revision: order.revision,
-            source: OrderEventSource.ONEC_IMPORT,
-            eventType: 'ONEC_ORDER_SNAPSHOT_DEFERRED',
-            payload: item as unknown as Prisma.InputJsonValue,
-            note: message,
-          });
-          results.push({ key: item.guid, status: 'ok' });
+          results.push({ key: item.guid, status: 'error', error: 'Revision conflict',
+            applied: false, retryable: false, outcome: 'rejected', code: 'REVISION_CONFLICT',
+            currentRevision: order.revision });
           continue;
         }
 
@@ -1447,7 +1466,8 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
               payload: item as unknown as Prisma.InputJsonValue,
               note: message,
             });
-            results.push({ key: item.guid, status: 'error', error: message });
+            results.push({ key: item.guid, status: 'error', error: message, applied: false,
+              retryable: false, outcome: 'rejected', code: 'EMPTY_ITEMS', currentRevision: order.revision });
             continue;
           }
 
@@ -1507,7 +1527,8 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
             payload: item as unknown as Prisma.InputJsonValue,
           });
 
-          results.push({ key: order.guid ?? item.guid, status: 'ok' });
+          results.push({ key: order.guid ?? item.guid, status: 'ok', applied: true, retryable: false,
+            outcome: 'applied', currentRevision: nextRevision });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Failed to apply order snapshot';
           await tx.order.update({
@@ -1527,13 +1548,15 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
             payload: item as unknown as Prisma.InputJsonValue,
             note: message,
           });
-          results.push({ key: item.guid, status: 'error', error: message });
+          results.push({ key: item.guid, status: 'error', error: message, applied: false,
+            retryable: error instanceof MissingOrderSnapshotReferenceError,
+            outcome: 'rejected', code: 'SNAPSHOT_APPLY_FAILED', currentRevision: order.revision });
         }
       }
     });
 
     await safeCompleteSyncRun(runId, results, { rawCount, parsedCount: parsed.items.length });
-    return res.json({ success: true, count: results.length, results });
+    return res.json({ success: true, receiptVersion: ORDER_SNAPSHOT_RECEIPT_VERSION, count: results.length, results });
   } catch (error) {
     if (error instanceof ZodError) {
       await safeFailSyncRun(runId, error, baseMeta);

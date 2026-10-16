@@ -15,6 +15,7 @@ import { appendOrderEvent } from '../orders/orderEvents';
 import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
+import { clientOrderPayloadHash, proveAcceptedClientOperation } from './acceptedClientOperation';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
@@ -5476,24 +5477,6 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
   */
 }
 
-function stableJsonValue(value: unknown): unknown {
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(stableJsonValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, stableJsonValue(item)])
-    );
-  }
-  return value;
-}
-
-function clientOrderPayloadHash(body: ClientOrderMutationBody) {
-  const { clientRevision: _clientRevision, intent: _intent, integrity: _integrity, ...payload } = body;
-  return createHash('sha256').update(JSON.stringify(stableJsonValue(payload))).digest('hex');
-}
-
 type OrderGeoEventInput = NonNullable<ClientOrderCreateBody['geoEvents']>[number];
 
 async function saveOrderGeoEvents(
@@ -5749,12 +5732,33 @@ function assertClientOrderCanBeSubmitted(order: {
 export async function getClientOrderByClientId(userId: number, clientOrderId: string) {
   const order = await prisma.order.findFirst({
     where: { createdByUserId: userId, clientOrderId },
-    select: { guid: true },
+    select: { id: true, guid: true, clientOrderId: true, clientRevision: true, clientPayloadHash: true,
+      source: true, syncState: true, status: true, isPostedIn1c: true, number1c: true,
+      lastExportError: true, last1cError: true, cancelRequestedAt: true },
   });
   if (!order?.guid) {
     throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ с таким идентификатором устройства не найден');
   }
-  return getClientOrderByGuid(order.guid, userId);
+  const detail = await getClientOrderByGuid(order.guid, userId);
+  // Read-only acceptance evidence lets a phone retire a redundant error copy,
+  // never overwrite its newer content or resend an already posted document.
+  let acceptedClientOperation = null;
+  if (order.syncState === 'SYNCED' && order.isPostedIn1c && order.clientRevision) {
+    const matchingPayload = { AND: [
+      { payload: { path: ['clientOrderId'], equals: clientOrderId } },
+      { payload: { path: ['clientRevision'], equals: order.clientRevision } },
+    ] };
+    const mutation = await prisma.orderEvent.findFirst({ where: { orderId: order.id, ...matchingPayload,
+      eventType: { in: ['CLIENT_ORDER_CREATED', 'CLIENT_ORDER_UPDATED'] } },
+      orderBy: { createdAt: 'desc' }, select: { revision: true, payload: true } });
+    const submitted = mutation ? await prisma.orderEvent.findFirst({ where: { orderId: order.id, ...matchingPayload,
+      eventType: 'CLIENT_ORDER_SUBMITTED', revision: mutation.revision }, select: { revision: true, payload: true } }) : null;
+    const change = mutation ? await prisma.orderEvent.findFirst({ where: { orderId: order.id,
+      eventType: 'ORDER_CONTENT_SNAPSHOT', revision: mutation.revision - 1 }, orderBy: { createdAt: 'desc' },
+      select: { revision: true, payload: true } }) : null;
+    acceptedClientOperation = proveAcceptedClientOperation(order, mutation, submitted, change);
+  }
+  return { ...detail, acceptedClientOperation };
 }
 
 export async function putClientOrderByClientId(
