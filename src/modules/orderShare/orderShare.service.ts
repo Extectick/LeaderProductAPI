@@ -3,6 +3,8 @@ import prisma from '../../prisma/client';
 import { getClientOrderByGuid } from '../clientOrders/clientOrders.service';
 import { resolveClientContacts } from './clientContacts';
 import { createShareToken, decryptShareToken, encryptShareToken, projectShareOrder, shareTokenHash, shareVersion, type ShareSnapshot } from './orderShare.model';
+import { summarizeShareWeights } from './orderShare.weights';
+import { scheduleShareWeightRefresh } from './orderShare.weightRefresh';
 
 // This select is intentionally independent of the employee order DTO.
 export const publicOrderSelect = {
@@ -12,8 +14,11 @@ export const publicOrderSelect = {
   counterparty: { select: { name: true, guid: true } },
   items: { orderBy: { createdAt: 'asc' as const }, select: {
     id: true, lineGuid: true, quantity: true, price: true, lineAmount: true, isCancelled: true,
-    product: { select: { name: true, guid: true, isWeight: true } },
-    package: { select: { name: true, multiplier: true } }, unit: { select: { name: true, symbol: true } },
+    product: { select: { name: true, guid: true, isWeight: true,
+      baseUnit: { select: { guid: true, name: true, symbol: true, code: true } } } },
+    package: { select: { guid: true, name: true, multiplier: true,
+      unit: { select: { guid: true, name: true, symbol: true, code: true } } } },
+    unit: { select: { guid: true, name: true, symbol: true, code: true } },
   } },
 } satisfies Prisma.OrderSelect;
 
@@ -40,11 +45,14 @@ export async function publishOrder(orderGuid: string, ownerId: number, rotate: b
   // Never allow a manager to share another manager's local order.
   if (local && local.createdByUserId !== ownerId) throw new ShareError(404, 'Заказ не найден');
   const order = local || await getClientOrderByGuid(orderGuid, ownerId);
-  const snapshot = projectShareOrder(order);
+  let snapshot = projectShareOrder(order);
   if (!snapshot.counterpartyGuid) throw new ShareError(400, 'Выберите клиента');
   const link = await prisma.$transaction(async tx => {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`order-share:${ownerId}:${orderGuid}`}, 0))`;
   const existing = await tx.orderShareLink.findUnique({ where: { ownerId_orderGuid: { ownerId, orderGuid } } });
+  const weightCache = existing?.counterpartyGuid === snapshot.counterpartyGuid ? existing?.snapshot as any : null;
+  if (local && weightCache) snapshot = { ...projectShareOrder(order, weightCache._weightReferences),
+    ...Object.fromEntries(Object.entries(weightCache).filter(([key]) => ['_weightReferences','_weightOrderKey','_weightCursor','_weightCheckedAt'].includes(key))) };
   const replaceToken = rotate || !existing || !!existing.revokedAt || existing.expiresAt.getTime() <= Date.now()
     || existing.counterpartyGuid !== snapshot.counterpartyGuid;
   const token = replaceToken ? createShareToken() : decryptShareToken(existing!.tokenEncrypted);
@@ -57,6 +65,7 @@ export async function publishOrder(orderGuid: string, ownerId: number, rotate: b
     create: { orderGuid, ownerId, ...data }, update: data,
   });
   });
+  if (local) scheduleShareWeightRefresh(link, local);
   return presentOwnedShare(link);
 }
 
@@ -97,8 +106,9 @@ export async function resolvePublicShare(token: string) {
     if (!local || local.createdByUserId !== link.ownerId || local.counterparty?.guid !== link.counterpartyGuid) return revokeInvalidLink(link);
     // Header and relations are read in an explicit repeatable-read transaction;
     // the employee's save transaction commits header and lines together.
-    snapshot = projectShareOrder(local);
+    snapshot = projectShareOrder(local, (link.snapshot as any)?._weightReferences);
     updatedAt = local.updatedAt;
+    scheduleShareWeightRefresh(link, local);
   } else {
     scheduleLiveRefresh(link);
   }
@@ -112,10 +122,14 @@ export async function resolvePublicShare(token: string) {
     number: snapshot.number, date: snapshot.date, customer: snapshot.customer, deliveryDate: snapshot.deliveryDate,
     deliveryMethod: snapshot.deliveryMethod ?? null, deliveryAddress: snapshot.deliveryAddress ?? null,
     currency: snapshot.currency, cancelled: snapshot.cancelled, total: snapshot.total, updatedAt: updatedAt.toISOString(),
+    ...summarizeShareWeights(snapshot.items),
     manager: { name: [owner.firstName, owner.lastName].filter(Boolean).join(' '), ...resolveClientContacts(owner.clientContacts, owner.phone) },
-    items: snapshot.items.map(({ productGuid, ...item }) => {
+    items: snapshot.items.map(item => {
+      const { productGuid } = item;
       const image = imageByProduct.get(productGuid);
-      return { ...item, image: image ? { id: image.id, version: image.updatedAt.toISOString() } : null };
+      return { id: item.id, name: item.name, quantity: item.quantity, unit: item.unit,
+        unitPrice: item.unitPrice, amount: item.amount, weightKg: item.weightKg ?? null,
+        image: image ? { id: image.id, version: image.updatedAt.toISOString() } : null };
     }),
   };
   return { link, snapshot, data, etag: `"${shareVersion(data)}"` };

@@ -1647,7 +1647,7 @@ export async function getLiveClientOrder(documentGuid: string, query: { managerG
   return mapped;
 }
 
-export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody & { managerGuid?: string | null }) {
+export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody & { managerGuid?: string | null }, options?: { skipMissingDetails?: boolean }) {
   const uniqueGuids = [...new Set(body.productGuids)];
   const query = normalizeQuery({
     limit: Math.min(Math.max(uniqueGuids.length, 1), 200),
@@ -1668,7 +1668,7 @@ export async function getLiveProductsByGuids(body: ClientOrdersBatchProductsBody
   const byGuid = new Map(list.map((item) => [item.guid.toLowerCase(), item]));
   const missing = uniqueGuids.filter((guid) => !byGuid.has(guid.toLowerCase()));
 
-  if (missing.length) {
+  if (missing.length && !options?.skipMissingDetails) {
     const details = await Promise.all(
       missing.map(async (guid) => {
         const payload = await getOnecLpAppNomenclatureItem(guid, query);

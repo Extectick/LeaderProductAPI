@@ -44,7 +44,7 @@ jobs:
       - run: npm run test:unit -- --runInBand __tests__/stockWarehouseGroups.unit.test.ts __tests__/stockBalancesProducts.unit.test.ts __tests__/stockMovements.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockBalancesProducts.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockAvailability.unit.test.ts __tests__/offlineExportPolicy.unit.test.ts __tests__/clientOrders.onec-live.unit.test.ts
-      - run: npm run test:unit -- --runInBand __tests__/orderShare.unit.test.ts __tests__/orderShare.service.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/orderShare.unit.test.ts __tests__/orderShare.service.unit.test.ts __tests__/orderShare.weights.unit.test.ts __tests__/orderShare.weightRefresh.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/ota.manifest.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/clientOrderDraftBackups.unit.test.ts __tests__/clientOrders.routes.live.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/crashEvents.unit.test.ts __tests__/crashRoutes.unit.test.ts

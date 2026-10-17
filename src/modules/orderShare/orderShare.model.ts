@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { orderLineWeightKg, summarizeShareWeights } from './orderShare.weights';
 
 export function shareTokenHash(token: string) { return createHash('sha256').update(token).digest('hex'); }
 function encryptionKey() {
@@ -35,7 +36,7 @@ const iso = (value: unknown) => {
 
 export type ShareSnapshot = ReturnType<typeof projectShareOrder>;
 /** Explicit allowlist. Never spread the authenticated order DTO into a public response. */
-export function projectShareOrder(order: any) {
+export function projectShareOrder(order: any, weightReferences: unknown = {}) {
   if (!Array.isArray(order.items) || !order.items.length || order.items.length > 1000) throw new Error('Заказ не содержит доступного списка товаров');
   const rows: any[] = order.items;
   const items = rows.filter((item: any) => !item.isCancelled).map((item: any, index: number) => {
@@ -52,6 +53,7 @@ export function projectShareOrder(order: any) {
       unit: text(item.package?.name || item.unit?.symbol || item.unit?.name || (item.product?.isWeight ? 'кг' : 'шт.'), 100),
       unitPrice: unitPrice.toDecimalPlaces(4).toString(),
       amount: amount.toDecimalPlaces(2).toFixed(2),
+      weightKg: orderLineWeightKg(item, weightReferences),
     };
   });
   if (!items.length && order.status !== 'CANCELLED') throw new Error('В заказе нет действующих товаров');
@@ -70,6 +72,7 @@ export function projectShareOrder(order: any) {
     currency: /^[A-Z]{3}$/.test(order.currency) ? String(order.currency) : 'RUB',
     cancelled: order.status === 'CANCELLED',
     total: decimal(order.totalAmount ?? items.reduce((sum: Prisma.Decimal, item: any) => sum.add(item.amount), new Prisma.Decimal(0))).toDecimalPlaces(2).toFixed(2),
+    ...summarizeShareWeights(items),
     items,
   };
 }

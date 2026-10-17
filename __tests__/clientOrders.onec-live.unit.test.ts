@@ -777,6 +777,15 @@ describe('clientOrders 1C live adapter', () => {
     expect(result.map((item) => item.guid)).toEqual(['product-1', 'product-2']);
   });
 
+  it('can bound a reference-only product batch without N+1 missing-detail calls', async () => {
+    nomenclatureMock.mockResolvedValueOnce(paged([{ guid: 'product-2', name: 'Товар 2', weight: 0.815 }]));
+    const result = await getLiveProductsByGuids({ productGuids: ['missing-1', 'product-2', 'missing-3'] }, { skipMissingDetails: true });
+    expect(nomenclatureMock).toHaveBeenCalledTimes(1);
+    expect(nomenclatureItemMock).not.toHaveBeenCalled();
+    expect(result.map(item => item.guid)).toEqual(['product-2']);
+    expect(result[0].weight).toBe(0.815);
+  });
+
   it('builds reference-data bundle from live 1C dictionaries', async () => {
     counterpartiesMock.mockResolvedValueOnce(paged([{ guid: 'counterparty-guid', name: 'Контрагент' }]));
     agreementsMock.mockResolvedValueOnce(paged([{ guid: 'agreement-guid', name: 'Соглашение', counterpartyGuid: 'counterparty-guid' }]));
