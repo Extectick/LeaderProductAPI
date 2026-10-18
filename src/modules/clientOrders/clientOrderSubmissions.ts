@@ -94,3 +94,15 @@ export async function getClientOrderSubmissionStatuses(userId: number, ids: stri
   const rows = await prisma.clientOrderSubmission.findMany({ where: { userId, id: { in: ids } }, take: 100 });
   return { receiptVersion: SUBMISSION_RECEIPT_VERSION, results: rows.map(submissionReceipt) };
 }
+
+/** Bind a canonical DB-only read to the exact immutable operation, not to fields
+ * which 1C may legitimately enrich after accepting that operation. */
+export async function getClientOrderSubmissionOrder<T extends { guid: string | null; createdByUser?: { id: number } | null }>(
+  userId: number, id: string, readOrder: (guid: string, userId: number) => Promise<T>,
+) {
+  const row = await prisma.clientOrderSubmission.findFirst({ where: { id, userId, state: 'QUEUED' } });
+  if (!row?.orderGuid) return null;
+  const order = await readOrder(row.orderGuid, userId);
+  if (order.guid !== row.orderGuid || order.createdByUser?.id !== userId) return null;
+  return { ...order, acceptedSubmission: submissionReceipt(row) };
+}

@@ -16,6 +16,7 @@ import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderCon
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
 import { clientOrderPayloadHash, proveAcceptedClientOperation } from './acceptedClientOperation';
+import { resolveDraftDeliveryMethod } from './clientOrders.delivery';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
@@ -3907,6 +3908,9 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             origin: 'merged',
             source: order.source,
             revision: order.revision,
+            // Old snapshots may have erased only this API field. Use the actual
+            // read-only 1C value rather than hiding both delivery choices.
+            deliveryMethod: mapped.deliveryMethod ?? liveDetail.deliveryMethod,
             queuePosition: null,
             lastExportError: normalizeClientOrderPublicError(order.lastExportError),
             last1cError: resolveMergedClientOrderLast1cError(liveDetail, order.last1cError),
@@ -5865,6 +5869,8 @@ export async function putClientOrderByClientId(
         clientPayloadHash: true,
         draftReview: true,
         submitRequestedAt: true,
+        number1c: true,
+        deliveryMethod: true,
         status: true,
         syncState: true,
         source: true,
@@ -5994,7 +6000,7 @@ export async function putClientOrderByClientId(
       comment: body.comment ?? null,
       deliveryDate,
       paymentForm: body.paymentForm ?? null,
-      deliveryMethod: body.deliveryMethod ?? null,
+      deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, existing?.deliveryMethod, existing?.number1c),
       invoiceRequested: body.invoiceRequested,
       trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
       trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
@@ -6117,7 +6123,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod),
         invoiceRequested: body.invoiceRequested,
         trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
         trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
@@ -6149,7 +6155,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod),
         invoiceRequested: body.invoiceRequested,
         trackingSnapshot: trackingSnapshot?.snapshot ?? null,
         generalDiscountPercent: body.generalDiscountPercent ?? null,
@@ -6194,7 +6200,7 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
     priceTypeGuid: source.priceType?.guid ?? source.agreement?.priceType?.guid ?? null,
     deliveryDate: dateForCreatePayload(source.deliveryDate),
     paymentForm: source.paymentForm ?? null,
-    deliveryMethod: source.deliveryMethod ?? null,
+    deliveryMethod: resolveDraftDeliveryMethod(source.deliveryMethod),
     comment: source.comment ?? undefined,
     currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
     saveReason: 'manual',
@@ -6250,6 +6256,26 @@ export function buildStoredClientOrderCopyItemData(item: any, sourceUpdatedAt: D
 }
 
 async function copyStoredClientOrder(guid: string, userId: number) {
+  const candidate = await prisma.order.findFirst({
+    where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
+    select: { guid: true, revision: true, number1c: true, deliveryMethod: true },
+  });
+  if (!candidate) return null;
+  let liveDeliveryMethod: string | null = null;
+  if (!candidate.deliveryMethod?.trim() && candidate.number1c) {
+    const managerGuid = await getManagerGuidForUser(userId);
+    if (managerGuid) {
+      try {
+        const live = await onecLive(
+          () => findLiveClientOrder({ managerGuid, appGuid: guid, number1c: candidate.number1c }),
+          'Ошибка получения способа доставки исходного заказа из 1С',
+        );
+        if (live?.appGuid?.toLowerCase() === guid.toLowerCase() && live.number1c === candidate.number1c) {
+          liveDeliveryMethod = live.deliveryMethod;
+        }
+      } catch { /* Copying stays available during outages; only the NEW copy gets the default. */ }
+    }
+  }
   return prisma.$transaction(async (tx) => {
     const source = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
@@ -6315,7 +6341,8 @@ async function copyStoredClientOrder(guid: string, userId: number) {
         comment: source.comment,
         deliveryDate: source.deliveryDate,
         paymentForm: source.paymentForm,
-        deliveryMethod: source.deliveryMethod,
+        deliveryMethod: resolveDraftDeliveryMethod(source.deliveryMethod,
+          source.revision === candidate.revision ? liveDeliveryMethod : null),
         currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
         totalAmount: new Prisma.Decimal(0),
         generalDiscountPercent: source.generalDiscountPercent,
@@ -6407,6 +6434,8 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         source: true,
         isPostedIn1c: true,
         hasRealization: true,
+        deliveryMethod: true,
+        number1c: true,
       },
     });
 
@@ -6444,7 +6473,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, order.deliveryMethod, order.number1c),
         invoiceRequested: body.invoiceRequested,
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
@@ -6476,7 +6505,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           comment: body.comment ?? null,
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
           paymentForm: body.paymentForm ?? null,
-          deliveryMethod: body.deliveryMethod ?? null,
+          deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, order.deliveryMethod, order.number1c),
           invoiceRequested: body.invoiceRequested,
           trackingSnapshot: null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,

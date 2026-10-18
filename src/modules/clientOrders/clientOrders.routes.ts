@@ -1,8 +1,7 @@
 import express from 'express';
-import { acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses, submissionsBatchSchema, submissionsStatusSchema } from './clientOrderSubmissions';
+import { acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses, getClientOrderSubmissionOrder, submissionsBatchSchema, submissionsStatusSchema } from './clientOrderSubmissions';
 import { wakeClientOrderSubmissionWorker } from '../../services/clientOrderSubmissionWorker';
 import { getStoredClientOrderForSubmission } from './clientOrders.service';
-import prisma from '../../prisma/client';
 import { getCustomerPurchaseHistory, purchaseHistoryQuerySchema } from './customerPurchaseHistory';
 import { OrderIntegrityError } from '../orders/orderIntegrity';
 import { draftBackupSchema, DraftBackupConflict, getDraftBackup, saveDraftBackup } from './clientOrderDraftBackups';
@@ -118,9 +117,9 @@ router.post('/submissions/status', authorizePermissions(['view_client_orders']),
 });
 router.get('/submissions/:id/order', authorizePermissions(['view_client_orders']), async (req: AuthRequest<{ id: string }>, res) => {
   try {
-    const receipt = await prisma.clientOrderSubmission.findFirst({ where: { id: String(req.params.id), userId: req.user!.userId, state: 'QUEUED' }, select: { orderGuid: true } });
-    if (!receipt?.orderGuid) return res.status(404).json(errorResponse('Заказ ещё обрабатывается', ErrorCodes.NOT_FOUND));
-    return res.json(successResponse(await getStoredClientOrderForSubmission(receipt.orderGuid, req.user!.userId)));
+    const order = await getClientOrderSubmissionOrder(req.user!.userId, String(req.params.id), getStoredClientOrderForSubmission);
+    if (!order) return res.status(404).json(errorResponse('Заказ ещё обрабатывается', ErrorCodes.NOT_FOUND));
+    return res.json(successResponse(order));
   } catch (error) { return handleError(res, error, 'Не удалось прочитать принятый заказ'); }
 });
 

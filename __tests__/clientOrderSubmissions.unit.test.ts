@@ -1,8 +1,8 @@
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: { $transaction: jest.fn(),
-  clientOrderSubmission: { findMany: jest.fn() } } }));
+  clientOrderSubmission: { findMany: jest.fn(), findFirst: jest.fn() } } }));
 import prisma from '../src/prisma/client';
 import { acceptClientOrderSubmission, acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses,
-  submissionPayloadHash, SubmissionConflict } from '../src/modules/clientOrders/clientOrderSubmissions';
+  submissionPayloadHash, SubmissionConflict, getClientOrderSubmissionOrder } from '../src/modules/clientOrders/clientOrderSubmissions';
 
 const payload = { organizationGuid: 'org', counterpartyGuid: 'customer', clientRevision: 1, intent: 'SUBMIT',
   items: [{ productGuid: 'product', lineGuid: 'line-guid-1234', quantity: 1, basePrice: 100 }],
@@ -16,6 +16,30 @@ beforeEach(() => {
       id: 'receipt-123', acceptedAt: new Date('2026-10-16T10:00:00Z'), state: 'ACCEPTED' })),
   } };
   (prisma.$transaction as jest.Mock).mockImplementation(fn => fn(tx));
+});
+
+describe('canonical submitted order proof', () => {
+  const read = jest.fn();
+  const row = { id: 'receipt-123', userId: 90, clientOrderId: 'legacy-server:order-guid', clientRevision: 1,
+    payloadHash: 'a'.repeat(64), payload: { private: 'must not leak' }, state: 'QUEUED', orderGuid: 'order-guid',
+    acceptedAt: new Date('2026-10-18T05:00:00Z') };
+  beforeEach(() => { read.mockReset(); (prisma.clientOrderSubmission.findFirst as jest.Mock).mockResolvedValue(row); });
+  it('returns original immutable identity beside enriched current fields, never the raw payload', async () => {
+    read.mockResolvedValue({ guid: 'order-guid', createdByUser: { id: 90 }, deliveryMethod: 'ДоКлиента', paymentForm: 'Наличная' });
+    const result = await getClientOrderSubmissionOrder(90, 'receipt-123', read);
+    expect(prisma.clientOrderSubmission.findFirst).toHaveBeenCalledWith({ where: { id: 'receipt-123', userId: 90, state: 'QUEUED' } });
+    expect(result).toMatchObject({ deliveryMethod: 'ДоКлиента', acceptedSubmission: { submissionId: 'receipt-123', payloadHash: row.payloadHash, orderGuid: 'order-guid', state: 'QUEUED' } });
+    expect(result?.acceptedSubmission).not.toHaveProperty('payload');
+  });
+  it.each([null, { ...row, orderGuid: null }])('does not return an unmaterialized/unknown receipt', async value => {
+    (prisma.clientOrderSubmission.findFirst as jest.Mock).mockResolvedValue(value);
+    expect(await getClientOrderSubmissionOrder(90, 'receipt-123', read)).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+  it.each([{ guid: 'other-guid', createdByUser: { id: 90 } }, { guid: 'order-guid', createdByUser: { id: 91 } }])('rejects mismatched canonical identity', async value => {
+    read.mockResolvedValue(value);
+    expect(await getClientOrderSubmissionOrder(90, 'receipt-123', read)).toBeNull();
+  });
 });
 describe('durable async intake without 1C', () => {
   it('commits the entire immutable raw packet and returns an explicitly non-posting receipt', async () => {

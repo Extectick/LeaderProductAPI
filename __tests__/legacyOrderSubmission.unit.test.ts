@@ -22,6 +22,11 @@ it('submits the existing GUID from durable matching SAVE without rewriting or cr
   expect(updateClientOrder).not.toHaveBeenCalled();
   expect(submitClientOrder).toHaveBeenCalledWith('original-guid', 90, expect.objectContaining({ revision: 3 }));
 });
+it('accepts a server delivery default only when legacy input made no explicit choice', () => {
+  expect(legacySubmissionMatches(payload, saved({ deliveryMethod: 'ДоКлиента' }))).toBe(true);
+  expect(legacySubmissionMatches({ ...payload, deliveryMethod: 'Самовывоз' }, saved({ deliveryMethod: 'ДоКлиента' }))).toBe(false);
+  expect(legacySubmissionMatches({ ...payload, deliveryMethod: 'Самовывоз' }, saved({ deliveryMethod: 'Самовывоз' }))).toBe(true);
+});
 it('resumes a lost SAVE at the newer server revision only if the entire input matches', async () => {
   (getStoredClientOrderForSubmission as jest.Mock).mockResolvedValue(saved({ revision: 4 }));
   await materializeLegacyOrderSubmission(90, raw, payload);

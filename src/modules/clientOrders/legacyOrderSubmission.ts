@@ -11,7 +11,10 @@ export function legacySubmissionMatches(body: ClientOrderMutationBody, order: an
   for (const ref of ['organization','counterparty','agreement','contract','warehouse','deliveryAddress','priceType'] as const) {
     if (guid(body[`${ref}Guid`]) !== guid(order[ref]?.guid)) return false;
   }
-  for (const key of ['paymentForm','deliveryMethod','comment','currency'] as const) if (text(body[key]) !== text(order[key])) return false;
+  for (const key of ['paymentForm','comment','currency'] as const) if (text(body[key]) !== text(order[key])) return false;
+  // Empty legacy input did not choose a method; saving may now fill the new-draft
+  // default or retain the existing selection. Explicit choices remain strict.
+  if (text(body.deliveryMethod) && text(body.deliveryMethod) !== text(order.deliveryMethod)) return false;
   if (date(body.deliveryDate) !== date(order.deliveryDate) || Boolean(body.invoiceRequested) !== Boolean(order.invoiceRequested)
     || (number(body.generalDiscountPercent) ?? 0) !== (number(order.generalDiscountPercent) ?? 0)) return false;
   if (!body.items.length || body.items.length !== order.items?.length) return false;
