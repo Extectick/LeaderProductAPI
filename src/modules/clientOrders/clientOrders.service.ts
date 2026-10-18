@@ -5930,6 +5930,7 @@ export async function putClientOrderByClientId(
           syncState: OrderSyncState.QUEUED,
           queuedAt,
           submitRequestedAt: queuedAt,
+          deliveryMethod: resolveDraftDeliveryMethod(existing.deliveryMethod, null, existing.number1c),
           exportAttempts: 0,
           lastExportError: null,
           last1cError: null,
@@ -6541,6 +6542,8 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         warehouseId: true,
         deliveryAddressId: true,
         deliveryDate: true,
+        deliveryMethod: true,
+        number1c: true,
         items: {
           select: {
             quantity: true,
@@ -6601,6 +6604,8 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         syncState: OrderSyncState.QUEUED,
         queuedAt,
         submitRequestedAt: queuedAt,
+        deliveryMethod: order.status === OrderStatus.DRAFT
+          ? resolveDraftDeliveryMethod(order.deliveryMethod, null, order.number1c) : undefined,
         cancelRequestedAt: null,
         cancelReason: null,
         exportAttempts: 0,
