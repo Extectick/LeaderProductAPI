@@ -66,6 +66,7 @@ jobs:
               const orders=await db.order.findMany({where:{source:'MANAGER_APP',OR:[{guid:{startsWith:'898cecdb'}},{guid:{startsWith:'d6a73aa7'}},{guid:{startsWith:'af0d2187'}},{number1c:{in:['НОУТ-125312','НОУТ-125211']}},{status:{in:['QUEUED','REJECTED']},updatedAt:{gte:new Date('2026-10-15T18:00:00Z')}}]},orderBy:{updatedAt:'desc'},take:65,select:{id:true,guid:true,clientOrderId:true,clientRevision:true,revision:true,number1c:true,status:true,syncState:true,createdByUserId:true,createdAt:true,updatedAt:true,queuedAt:true,submitRequestedAt:true,sentTo1cAt:true,exportAttempts:true,lastExportError:true,last1cError:true,isPostedIn1c:true,totalAmount:true,deliveryMethod:true,deliveryDate:true,counterparty:{select:{name:true}},createdByUser:{select:{firstName:true,lastName:true}},_count:{select:{items:true}}}});
               console.log(JSON.stringify(clean({stage:'orders',orders})));
               console.log(JSON.stringify({stage:'recent-order-counts',counts:await db.order.groupBy({by:['status','syncState'],where:{source:'MANAGER_APP',createdAt:{gte:new Date('2026-10-15T18:00:00Z')}},_count:true})}));
+              console.log(JSON.stringify(clean({stage:'recent-exceptions',orders:await db.order.findMany({where:{source:'MANAGER_APP',updatedAt:{gte:new Date('2026-10-15T18:00:00Z')},OR:[{lastExportError:{not:null}},{last1cError:{not:null}},{syncState:{in:['ERROR','CONFLICT','QUEUED']}},{status:'SENT_TO_1C'}]},take:40,select:{guid:true,number1c:true,createdByUserId:true,status:true,syncState:true,isPostedIn1c:true,lastExportError:true,last1cError:true,queuedAt:true,sentTo1cAt:true}})})));
               const {findLiveClientOrder}=require('/app/dist/modules/clientOrders/clientOrders.onecLive');
               const {getStoredClientOrderForSubmission}=require('/app/dist/modules/clientOrders/clientOrders.service');
               for(const prefix of ['898cedcb','d6a73aa7','af0d2187']){
@@ -76,6 +77,12 @@ jobs:
                 console.log(JSON.stringify(clean({stage:'direct-onec-proof',order,live:live&&{guid:live.guid,appGuid:live.appGuid,number1c:live.number1c,status:live.status,isPostedIn1c:live.isPostedIn1c,deliveryMethod:live.deliveryMethod,deliveryDate:live.deliveryDate,totalAmount:live.totalAmount,rows:live.items?.length}})));
                 const receipt=await db.clientOrderSubmission.findFirst({where:{orderGuid:order.guid},orderBy:{acceptedAt:'desc'}});
                 const canonical=await getStoredClientOrderForSubmission(order.guid,order.createdByUserId);
+                const proofReader=require('/app/dist/modules/clientOrders/clientOrderSubmissions').getClientOrderSubmissionOrder;
+                if(typeof proofReader==='function'&&receipt){
+                  const result=await proofReader(order.createdByUserId,receipt.id,getStoredClientOrderForSubmission);
+                  if(result?.acceptedSubmission?.payloadHash!==receipt.payloadHash||result?.guid!==order.guid)throw Error('Canonical receipt proof mismatch');
+                  console.log(JSON.stringify({stage:'deployed-receipt-proof',prefix,orderGuid:result.guid,proofMatchesOriginal:true,number1c:result.number1c}));
+                }
                 const headers=['organizationGuid','counterpartyGuid','agreementGuid','contractGuid','warehouseGuid','deliveryAddressGuid','priceTypeGuid','deliveryMethod','paymentForm','deliveryDate'];
                 const relationKeys={organizationGuid:'organization',counterpartyGuid:'counterparty',agreementGuid:'agreement',contractGuid:'contract',warehouseGuid:'warehouse',deliveryAddressGuid:'deliveryAddress',priceTypeGuid:'priceType'};
                 console.log(JSON.stringify(clean({stage:'receipt-order-comparison',prefix,receipt:receipt&&{id:receipt.id,clientOrderId:receipt.clientOrderId,clientRevision:receipt.clientRevision,payloadHash:receipt.payloadHash,state:receipt.state},canonical:{guid:canonical.guid,origin:canonical.origin,createdByUser:canonical.createdByUser,status:canonical.status,syncState:canonical.syncState,clientOrderId:canonical.clientOrderId,clientRevision:canonical.clientRevision},headers:headers.map(key=>({key,submitted:receipt?.payload?.[key]??null,current:relationKeys[key]?canonical[relationKeys[key]]?.guid??null:canonical[key]??null})),lines:receipt?.payload?.items?.map(row=>({lineGuid:row.lineGuid,productGuid:row.productGuid,quantity:row.quantity,manualPrice:row.manualPrice,packageGuid:row.packageGuid,unitGuid:row.unitGuid})),serverLines:canonical.items?.map(row=>({lineGuid:row.lineGuid,productGuid:row.product?.guid,quantity:row.quantity,price:row.price,packageGuid:row.package?.guid,unitGuid:row.unit?.guid}))})));
@@ -83,3 +90,6 @@ jobs:
               console.log(JSON.stringify({stage:'database-pool',stats:await db.$queryRawUnsafe("SELECT state, wait_event_type, wait_event, count(*)::int FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2,3") }));
             })().catch(e=>{console.error(JSON.stringify(clean({failure:e.message})));process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
             NODE
+            cd /opt/leader-api
+            sha256sum --check backups/prod-order-status-delivery-20261018/config-checksums.before
+            readlink -f /var/www/leader-order-prod/current
