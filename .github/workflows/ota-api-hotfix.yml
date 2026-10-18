@@ -1,58 +1,35 @@
-name: Build narrow production OTA API fix
-
+name: Read-only production order inbox diagnostic
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-  packages: write
-
 jobs:
-  build:
+  inspect:
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: appleboy/ssh-action@v1
         with:
-          fetch-depth: 0
-      - name: Guard the exact production overlay scope
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF_NAME" = main
-          git merge-base --is-ancestor cbb2e6d "$GITHUB_SHA"
-          unexpected=$(git diff --name-only cbb2e6d "$GITHUB_SHA" | grep -Ev '^(src/routes/ota.ts|src/utils/otaExpoConfig.ts|scripts/publish-ota-update-db.js|__tests__/ota.manifest.unit.test.ts|\.github/workflows/(deploy|ota-api-hotfix).yml|deploy/ota-hotfix/Dockerfile|docs/production-ota-manifest-fix.md)$' || true)
-          if [ -n "$unexpected" ]; then
-            echo "Changes outside the reviewed overlay; use a full release instead: $unexpected"
-            exit 1
-          fi
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npx prisma generate
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test
-      - run: npm run type-check
-      - run: npm run test:unit -- --runInBand __tests__/ota.manifest.unit.test.ts __tests__/crashEvents.unit.test.ts __tests__/crashRoutes.unit.test.ts __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/clientOrders.invoiceShadow.unit.test.ts
-      - run: npm run build
-      - name: Stage only the three reviewed runtime files
-        run: |
-          mkdir -p .ota-hotfix/dist/routes .ota-hotfix/dist/utils .ota-hotfix/scripts
-          cp dist/routes/ota.js .ota-hotfix/dist/routes/
-          cp dist/utils/otaExpoConfig.js .ota-hotfix/dist/utils/
-          cp scripts/publish-ota-update-db.js .ota-hotfix/scripts/
-          cp deploy/ota-hotfix/Dockerfile .ota-hotfix/Dockerfile
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .ota-hotfix
-          push: true
-          platforms: linux/amd64
-          build-args: SOURCE_REVISION=${{ github.sha }}
-          tags: ghcr.io/extectick/leaderproductapi:${{ github.sha }}
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 3m
+          script: |
+            set -eu
+            docker inspect leader_api --format '{{.State.Health.Status}} {{.Config.Image}}'
+            docker exec -i leader_api node <<'NODE'
+            const deadline=setTimeout(()=>{console.error('Diagnostic deadline');process.exit(2)},45000);
+            const {default:db,pool}=require('/app/dist/prisma/client');
+            const clean=v=>JSON.parse(JSON.stringify(v).replace(/(apiKey[=\"\s:]+)[^&\s\"]+/gi,'$1[redacted]').replace(/postgres(?:ql)?:\/\/[^\s\"]+/gi,'[database]'));
+            (async()=>{
+              if(!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Not production 1C');
+              console.log(JSON.stringify({stage:'flags',at:new Date().toISOString(),asyncEnabled:process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED,workerDisabled:process.env.CLIENT_ORDERS_SUBMISSION_WORKER_DISABLED,exportDisabled:process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED}));
+              console.log(JSON.stringify({submissionCounts:await db.clientOrderSubmission.groupBy({by:['state'],_count:true})}));
+              const submissions=await db.clientOrderSubmission.findMany({where:{OR:[{state:{not:'QUEUED'}},{acceptedAt:{gte:new Date('2026-10-17T18:00:00Z')}}]},orderBy:{acceptedAt:'asc'},take:60});
+              for(const s of submissions)console.log(JSON.stringify(clean({stage:'submission',id:s.id,userId:s.userId,clientOrderId:s.clientOrderId,revision:s.clientRevision,state:s.state,orderGuid:s.orderGuid,attempts:s.attempts,nextAttemptAt:s.nextAttemptAt,leaseUntil:s.leaseUntil,errorCode:s.errorCode,errorMessage:s.errorMessage,errorDetails:s.errorDetails,acceptedAt:s.acceptedAt,updatedAt:s.updatedAt,deliveryMethod:s.payload?.deliveryMethod,deliveryDate:s.payload?.deliveryDate,rows:s.payload?.items?.length})));
+              const orders=await db.order.findMany({where:{source:'MANAGER_APP',OR:[{guid:{startsWith:'898cecdb'}},{guid:{startsWith:'d6a73aa7'}},{guid:{startsWith:'af0d2187'}},{number1c:{in:['НОУТ-125312','НОУТ-125211']}},{status:{in:['QUEUED','REJECTED']},updatedAt:{gte:new Date('2026-10-15T18:00:00Z')}}]},orderBy:{updatedAt:'desc'},take:65,select:{id:true,guid:true,clientOrderId:true,clientRevision:true,revision:true,number1c:true,status:true,syncState:true,createdByUserId:true,createdAt:true,updatedAt:true,queuedAt:true,submitRequestedAt:true,sentTo1cAt:true,exportAttempts:true,lastExportError:true,last1cError:true,isPostedIn1c:true,totalAmount:true,deliveryMethod:true,deliveryDate:true,counterparty:{select:{name:true}},createdByUser:{select:{firstName:true,lastName:true}},_count:{select:{items:true}}}});
+              console.log(JSON.stringify(clean({stage:'orders',orders})));
+              console.log(JSON.stringify({stage:'database-pool',stats:await db.$queryRawUnsafe("SELECT state, wait_event_type, wait_event, count(*)::int FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2,3") }));
+            })().catch(e=>{console.error(JSON.stringify(clean({failure:e.message})));process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
+            NODE
