@@ -1,6 +1,10 @@
 name: Read-only production order inbox diagnostic
 on:
   workflow_dispatch:
+    inputs:
+      backup:
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -8,6 +12,37 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Guarded pre-release backup
+        if: inputs.backup
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            set -eu
+            umask 077
+            cd /opt/leader-api
+            target=/opt/leader-api/backups/prod-order-status-delivery-20261018
+            test ! -e "$target"
+            mkdir -m 700 "$target"
+            cp -p .env "$target/env.before"
+            cp -p docker-compose.yml "$target/compose.before.yml"
+            cp -p docker-compose.prod.yml "$target/compose.prod.before.yml"
+            sha256sum .env docker-compose.yml docker-compose.prod.yml > "$target/config-checksums.before"
+            git rev-parse HEAD > "$target/git.before.txt"
+            docker inspect leader_api --format '{{.Config.Image}}' > "$target/image.before.txt"
+            readlink -f /var/www/leader-order-prod/current > "$target/web.before.txt"
+            tar -czf "$target/web.before.tar.gz" -C /var/www/leader-order-prod/current .
+            actual_db=$(docker exec leader_postgres sh -c 'printf %s "$POSTGRES_DB"')
+            test "$actual_db" = LeaderAPI
+            docker exec leader_postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-acl' > "$target/prod-before.dump"
+            docker exec -i leader_postgres pg_restore --list < "$target/prod-before.dump" > "$target/contents.txt"
+            test -s "$target/contents.txt"
+            sha256sum "$target/prod-before.dump" "$target/web.before.tar.gz"
+            stat -c '%a %s %n' "$target/prod-before.dump"
+            df -h /
       - uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
