@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { orderLineWeightKg, summarizeShareWeights } from './orderShare.weights';
+import { ShareProjectionError } from './orderShare.errors';
 
 export function shareTokenHash(token: string) { return createHash('sha256').update(token).digest('hex'); }
 function encryptionKey() {
@@ -37,14 +38,18 @@ const iso = (value: unknown) => {
 export type ShareSnapshot = ReturnType<typeof projectShareOrder>;
 /** Explicit allowlist. Never spread the authenticated order DTO into a public response. */
 export function projectShareOrder(order: any, weightReferences: unknown = {}) {
-  if (!Array.isArray(order.items) || !order.items.length || order.items.length > 1000) throw new Error('Заказ не содержит доступного списка товаров');
+  if (!Array.isArray(order?.items) || !order.items.length || order.items.length > 1000) {
+    throw new ShareProjectionError('Заказ не содержит доступного списка товаров', 'ORDER_ITEMS_MISSING');
+  }
   const rows: any[] = order.items;
   const items = rows.filter((item: any) => !item.isCancelled).map((item: any, index: number) => {
     const quantity = decimal(item.quantity);
     const multiplier = decimal(item.package?.multiplier, 1);
     const unitPrice = decimal(item.price).mul(multiplier.gt(0) ? multiplier : 1);
     const amount = item.lineAmount == null ? quantity.mul(unitPrice) : decimal(item.lineAmount);
-    if (!quantity.gt(0) || amount.lt(0) || !text(item.product?.name) || !text(item.product?.guid)) throw new Error('Заполните товары и количество перед отправкой ссылки');
+    if (!quantity.gt(0) || amount.lt(0) || !text(item.product?.name) || !text(item.product?.guid)) {
+      throw new ShareProjectionError('Заполните товары и количество перед отправкой ссылки', 'ORDER_ITEMS_INVALID');
+    }
     return {
       id: text(item.lineGuid || item.id || `line-${index}`, 100),
       productGuid: text(item.product.guid, 100), // Server-private image lookup; stripped by public presenter.
@@ -56,7 +61,7 @@ export function projectShareOrder(order: any, weightReferences: unknown = {}) {
       weightKg: orderLineWeightKg(item, weightReferences),
     };
   });
-  if (!items.length && order.status !== 'CANCELLED') throw new Error('В заказе нет действующих товаров');
+  if (!items.length && order.status !== 'CANCELLED') throw new ShareProjectionError('В заказе нет действующих товаров', 'ORDER_ITEMS_EMPTY');
   const deliveryMethod = text(order.deliveryMethod, 100);
   const isPickup = deliveryMethod.toLocaleLowerCase('ru-RU') === 'самовывоз';
   return {
