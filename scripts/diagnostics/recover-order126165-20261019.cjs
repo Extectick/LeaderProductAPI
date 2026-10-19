@@ -58,15 +58,91 @@ function summary(order) {
 (async () => {
   if (process.env.NODE_ENV !== 'production' || new URL(process.env.DATABASE_URL).pathname !== '/LeaderAPI'
     || !String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026')) throw Error('Wrong production target');
-  if (!['inspect'].includes(phase)) throw Error('Unsupported recovery phase');
+  if (!['inspect', 'send', 'verify'].includes(phase)) throw Error('Unsupported recovery phase');
   const user = await db.user.findUnique({ where: { id: USER }, select: { isActive: true, deletedAt: true } });
   if (!user?.isActive || user.deletedAt) throw Error('Inactive owner');
   const order = await target(), saved = await originals(), live = await liveOrder(order);
+  if (phase === 'verify') {
+    const receipt = saved.receipts.find(r => r.clientRevision === 31);
+    const rawOrder = await db.order.findUnique({ where: { guid: GUID }, select: { clientPayloadHash: true } });
+    const { clientOrderPayloadHash } = require('/app/dist/modules/clientOrders/acceptedClientOperation');
+    if (!receipt || receipt.state !== 'QUEUED' || receipt.orderGuid !== GUID || !receipt.payload
+      || rawOrder.clientPayloadHash !== clientOrderPayloadHash(clientOrderMutationSchema.parse(receipt.payload))) throw Error('Accepted recovery packet not proven');
+    const linesMatch = hash(businessLines(order)) === hash(businessLines(live));
+    log({ stage: 'recovery-result', order: summary(order), live: { guid: live.guid, appGuid: live.appGuid,
+      number1c: live.number1c, rows: live.items.length, amount: Number(live.totalAmount), posted: live.isPostedIn1c,
+      status: live.status }, exactLinesMatch: linesMatch,
+      receipt: { id: receipt.id, state: receipt.state, clientRevision: receipt.clientRevision, payloadHash: receipt.payloadHash,
+        errorCode: receipt.errorCode, errorMessage: receipt.errorMessage },
+      backup: saved.backup && { clientRevision: saved.backup.clientRevision, submittedOrderGuid: saved.backup.submittedOrderGuid, review: saved.backup.review },
+      lines: live.items.map(i => ({ lineGuid: i.lineGuid, productGuid: i.product?.guid, name: i.product?.name,
+        quantity: i.quantity, price: i.price, amount: i.lineAmount })) });
+    if (order.clientRevision !== 31 || order.status !== 'CONFIRMED' || order.syncState !== 'SYNCED'
+      || !order.isPostedIn1c || order.items.length !== 19 || Number(order.totalAmount) !== 43028
+      || !live.isPostedIn1c || live.items.length !== 19 || Number(live.totalAmount) !== 43028 || !linesMatch
+      || order.lastExportError || order.last1cError || order.draftReview || receipt.errorCode || receipt.errorMessage
+      || saved.backup?.review || saved.backup?.submittedOrderGuid !== GUID) throw Error('Recovery not fully posted/reconciled or current error remains');
+    log({ stage: 'verified', postedInSameOnecDocument: true, duplicateCreated: false, all19LinesMatch: true,
+      currentApiErrors: false, oldRejectedReceiptPreservedAsHistory: true });
+    return;
+  }
   const source = saved.source;
   const nextRevision = Math.max(source.revision, order.clientRevision || 0) + 1;
   const body = clientOrderMutationSchema.parse({ ...source.payload, clientRevision: nextRevision, intent: 'SUBMIT', offlineReview: { pricePolicy: 'ASK' } });
   const review = await service.previewClientOrderAmendment(USER, CLIENT, body);
   const apiLines = businessLines(order), liveLines = businessLines(live);
+  if (phase === 'send') {
+    if (process.env.SOURCE_REVISION !== '30' || source.revision !== 30
+      || process.env.SOURCE_HASH !== '2efa66f3deca569c740447cbe8afaf8c4aea0cbe068f021f43ab5933c46d033b'
+      || inbox.submissionPayloadHash(source.payload) !== process.env.SOURCE_HASH
+      || order.clientRevision !== 29 || order.revision !== 3 || order.items.length !== 16
+      || Number(order.totalAmount) !== 36548 || order.hasRealization || live.hasRealization
+      || order.syncState !== 'SYNCED' || !order.isPostedIn1c || !live.isPostedIn1c
+      || hash(apiLines) !== hash(liveLines) || body.items.length !== 19 || nextRevision !== 31
+      || review.baseContentToken !== 'a92338a4ceae45d97c63159e24dc37e0bd5b9548218bad07f91b9b00b1bba63b'
+      || review.changes.some(c => !['Добавление строки', 'Изменение реквизита'].includes(c.reason))
+      || review.changes.filter(c => c.reason === 'Добавление строки').length !== 3
+      || review.confirmationToken) throw Error('Latest proposal or baseline drift; do not send blindly');
+    const packet = { ...body, integrity: { baseContentToken: review.baseContentToken } };
+    const packetHash = inbox.submissionPayloadHash(packet);
+    const userWithRole = await db.user.findUnique({ where: { id: USER }, include: { role: true } });
+    if (!userWithRole.role?.name || !process.env.ACCESS_TOKEN_SECRET) throw Error('Owner authorization unavailable');
+    const jwt = require('jsonwebtoken').sign({ userId: USER, role: userWithRole.role.name,
+      permissions: [], profileStatus: userWithRole.profileStatus }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '2m' });
+    const response = await fetch('http://127.0.0.1:3000/api/client-orders/submissions/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jwt },
+      body: JSON.stringify({ items: [{ clientOrderId: CLIENT, payloadHash: packetHash, payload: packet }] }),
+      signal: AbortSignal.timeout(30000) });
+    const answer = await response.json();
+    const receipt = answer.data?.results?.[0];
+    if (response.status !== 202 || receipt?.accepted !== true || receipt.clientRevision !== 31
+      || receipt.payloadHash !== packetHash || receipt.clientOrderId !== CLIENT || receipt.userId !== USER) {
+      log({ stage: 'intake-error', status: response.status, error: answer.error, result: receipt });
+      throw Error('Recovery intake not accepted');
+    }
+    log({ stage: 'recovery-accepted', status: response.status, receiptId: receipt.submissionId,
+      clientRevision: receipt.clientRevision, payloadHash: receipt.payloadHash, state: receipt.state,
+      rows: packet.items.length, expectedAmount: 43028, originalReceiptUnmodified: true, authorizedByUser: true });
+    for (let attempt = 0; attempt < 90; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      const result = await db.clientOrderSubmission.findUnique({ where: { id: receipt.submissionId } });
+      if (['NEEDS_REVIEW', 'REJECTED'].includes(result.state)) {
+        log({ stage: 'recovery-business-rejection', state: result.state, code: result.errorCode,
+          message: result.errorMessage, details: result.errorDetails });
+        throw Error('Normal commercial validation rejected recovery; no force or error clearing');
+      }
+      if (result.state === 'QUEUED') {
+        const current = await target();
+        if (current.status === 'CONFIRMED' && current.syncState === 'SYNCED' && current.clientRevision === 31) {
+          log({ stage: 'recovery-materialized', order: summary(current), receiptId: result.id });
+          return;
+        }
+        if (current.lastExportError || current.last1cError) log({ stage: 'export-status',
+          status: current.status, syncState: current.syncState, error: current.lastExportError || current.last1cError });
+      }
+    }
+    throw Error('Recovery remains durably queued; verify before any retry');
+  }
   log({ stage: 'current-order', order: summary(order), live: { guid: live.guid, appGuid: live.appGuid, number1c: live.number1c,
     rows: live.items.length, amount: live.totalAmount, posted: live.isPostedIn1c, status: live.status, hasRealization: live.hasRealization },
     exactLinesMatch: hash(apiLines) === hash(liveLines), apiLines, liveLines });

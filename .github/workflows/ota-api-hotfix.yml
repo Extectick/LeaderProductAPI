@@ -4,7 +4,7 @@ on:
     inputs:
       phase:
         type: choice
-        options: [inspect]
+        options: [inspect, send, verify]
         default: inspect
       source_revision:
         type: string
@@ -22,6 +22,36 @@ jobs:
       - uses: actions/checkout@v4
       - name: Load scoped script
         run: echo "SCRIPT_B64=$(base64 -w0 scripts/diagnostics/recover-order126165-20261019.cjs)" >> "$GITHUB_ENV"
+      - name: Back up only the authorized order before recovery
+        if: inputs.phase == 'send'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 2m
+          script: |
+            set -eu
+            umask 077
+            target=/opt/leader-api/backups/recover-126165-20261019
+            test ! -e "$target"
+            mkdir -m 700 "$target"
+            docker exec -i leader_api node > "$target/before.json" <<'NODE'
+            const {default:db,pool}=require('/app/dist/prisma/client');
+            (async()=>{
+              if(process.env.NODE_ENV!=='production'||new URL(process.env.DATABASE_URL).pathname!=='/LeaderAPI')throw Error('Not production');
+              const guid='33d4c1cc-d71d-48c4-b634-a1eeb15a7dbf',clientOrderId='007955a1-8912-48ee-8737-b109ee766cab',userId=99;
+              const order=await db.order.findUnique({where:{guid},include:{items:true,events:true}});
+              if(order.createdByUserId!==userId||order.clientOrderId!==clientOrderId||order.number1c!=='НОУТ-126165'||order.clientRevision!==29)throw Error('Order drift');
+              const submissions=await db.clientOrderSubmission.findMany({where:{userId,clientOrderId},orderBy:{clientRevision:'asc'}});
+              const backup=await db.clientOrderDraftBackup.findUnique({where:{userId_clientOrderId:{userId,clientOrderId}}});
+              console.log(JSON.stringify({at:new Date().toISOString(),order,submissions,backup}));
+            })().catch(e=>{console.error(e.message);process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end()});
+            NODE
+            test -s "$target/before.json"
+            chmod 600 "$target/before.json"
+            sha256sum "$target/before.json"
+            stat -c '%a %s %n' "$target/before.json"
       - name: Inspect or recover only the authorized document
         uses: appleboy/ssh-action@v1
         env:
