@@ -2,6 +2,10 @@ name: Read-only production order inbox diagnostic
 on:
   workflow_dispatch:
     inputs:
+      retry_targets:
+        description: Retry only the two orders explicitly authorized on 2026-10-19, without overriding validation
+        type: boolean
+        default: false
       backup:
         type: boolean
         default: false
@@ -105,3 +109,74 @@ jobs:
             cd /opt/leader-api
             sha256sum --check backups/prod-order-status-delivery-20261018/config-checksums.before
             readlink -f /var/www/leader-order-prod/current
+  attempt_targets:
+    if: inputs.retry_targets
+    needs: inspect
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Retry exact original packets through the deployed application service
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 6m
+          script: |
+            set -eu
+            docker exec -i leader_api node <<'NODE'
+            const deadline=setTimeout(()=>{console.error('Scoped retry deadline');process.exit(2)},300000);
+            const {default:db,pool}=require('/app/dist/prisma/client');
+            const {putClientOrderByClientId,getStoredClientOrderForSubmission,ClientOrdersError}=require('/app/dist/modules/clientOrders/clientOrders.service');
+            const {clientOrderMutationSchema}=require('/app/dist/modules/clientOrders/clientOrders.schemas');
+            const {submissionPayloadHash}=require('/app/dist/modules/clientOrders/clientOrderSubmissions');
+            const {OrderIntegrityError,orderContentToken}=require('/app/dist/modules/orders/orderIntegrity');
+            const {findLiveClientOrder,getLiveClientOrder}=require('/app/dist/modules/clientOrders/clientOrders.onecLive');
+            const {withBackgroundOnecRequests}=require('/app/dist/modules/onec/onec.lpApp.client');
+            const clean=value=>JSON.parse(JSON.stringify(value, (key,item)=>/token|password|apikey|secret/i.test(key)?'[redacted]':item));
+            const log=value=>console.log(JSON.stringify(clean(value)));
+            const specs=[
+              {guid:'33d4c1cc-d71d-48c4-b634-a1eeb15a7dbf',clientOrderId:'007955a1-8912-48ee-8737-b109ee766cab',receipt:'cmveukveh0lfv01mygn1hddp4',revision:30,hash:'a3261f8b34b8104a251f375448207836e9747608111a3605d2326f5243dbb0de',rows:19,number:'НОУТ-126165'},
+              {guid:'aa8f67ef-fb45-4d49-bc5c-efe0318e6456',clientOrderId:'027ea1d3-712d-4d59-87cf-8524604c1cf1',receipt:'cmverv1lc0h6901mynh2w0m2b',revision:2,hash:'9268b1e6ccbc3278dd1cd37cb0c12e82b55100e1ee7a47f1c55f66614381a5d8',rows:17,number:'НОУТ-126039'},
+            ];
+            async function liveProof(order,managerGuid,stage){
+              const found=await findLiveClientOrder({managerGuid,appGuid:order.guid,number1c:order.number1c});
+              if(!found||found.appGuid?.toLowerCase()!==order.guid.toLowerCase()||found.number1c!==order.number1c)throw Error('Live 1C identity not proven');
+              const live=await getLiveClientOrder(found.guid,{managerGuid,appGuid:order.guid});
+              if(live.appGuid?.toLowerCase()!==order.guid.toLowerCase()||live.number1c!==order.number1c)throw Error('Live detail identity mismatch');
+              log({stage,guid:order.guid,liveGuid:live.guid,number1c:live.number1c,status:live.status,isPostedIn1c:live.isPostedIn1c,totalAmount:live.totalAmount,rows:live.items?.length,lines:live.items?.map(i=>({lineGuid:i.lineGuid,productGuid:i.product?.guid,productName:i.product?.name,quantity:i.quantity,price:i.price,amount:i.lineAmount,isCancelled:i.isCancelled}))});
+              return live;
+            }
+            (async()=>{
+              if(process.env.NODE_ENV!=='production'||!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Production target guard failed');
+              const user=await db.user.findUnique({where:{id:99},select:{id:true,firstName:true,lastName:true,isActive:true,deletedAt:true}});
+              const profile=await db.employeeProfile.findUnique({where:{userId:99},select:{onecUserGuid:true}});
+              if(!user?.isActive||user.deletedAt||!profile?.onecUserGuid)throw Error('Owner not active or manager missing');
+              log({stage:'retry-owner',user});
+              for(const spec of specs){
+                const receipt=await db.clientOrderSubmission.findUnique({where:{id:spec.receipt}});
+                const latest=await db.clientOrderSubmission.findFirst({where:{userId:99,clientOrderId:spec.clientOrderId},orderBy:{clientRevision:'desc'}});
+                const backup=await db.clientOrderDraftBackup.findUnique({where:{userId_clientOrderId:{userId:99,clientOrderId:spec.clientOrderId}}});
+                if(!receipt||latest?.id!==receipt.id||receipt.userId!==99||receipt.clientOrderId!==spec.clientOrderId||receipt.clientRevision!==spec.revision||receipt.payloadHash!==spec.hash||submissionPayloadHash(receipt.payload)!==spec.hash||!['NEEDS_REVIEW','REJECTED'].includes(receipt.state)||receipt.payload?.items?.length!==spec.rows||receipt.payload?.intent!=='SUBMIT'||(backup&&backup.clientRevision>spec.revision))throw Error('Immutable packet/latest revision guard failed for '+spec.guid);
+                const before=await getStoredClientOrderForSubmission(spec.guid,99);
+                if(before.createdByUser?.id!==99||before.clientOrderId!==spec.clientOrderId||before.number1c!==spec.number)throw Error('Order ownership/identity guard failed');
+                const live=await liveProof(before,profile.onecUserGuid,'before-retry-live');
+                if(Number(live.totalAmount)!==Number(before.totalAmount)||live.items?.length!==before.items?.length)throw Error('Live 1C/server contents differ; review before retry');
+                const beforeContent=orderContentToken(before);
+                log({stage:'attempt-start',guid:spec.guid,number1c:before.number1c,clientRevision:spec.revision,rows:spec.rows,originalError:{code:receipt.errorCode,message:receipt.errorMessage,details:receipt.errorDetails}});
+                try{
+                  const body=clientOrderMutationSchema.parse(receipt.payload);
+                  const result=await withBackgroundOnecRequests(()=>putClientOrderByClientId(99,spec.clientOrderId,body,{storedResultOnly:true}));
+                  log({stage:'attempt-accepted',guid:spec.guid,result:{guid:result.guid,clientRevision:result.clientRevision,status:result.status,syncState:result.syncState,number1c:result.number1c}});
+                }catch(error){
+                  log({stage:'attempt-error',guid:spec.guid,error:{name:error.name,status:error.status,code:error.code||error.details?.kind,message:error.message,details:error.details}});
+                  if(!(error instanceof ClientOrdersError)&&!(error instanceof OrderIntegrityError))throw error;
+                }
+                const after=await getStoredClientOrderForSubmission(spec.guid,99);
+                const afterReceipt=await db.clientOrderSubmission.findUnique({where:{id:spec.receipt}});
+                log({stage:'after-retry-server',guid:spec.guid,number1c:after.number1c,clientRevision:after.clientRevision,revision:after.revision,status:after.status,syncState:after.syncState,totalAmount:after.totalAmount,rows:after.items?.length,businessContentsUnchanged:beforeContent===orderContentToken(after),receiptState:afterReceipt.state,receiptError:afterReceipt.errorCode});
+                await liveProof(after,profile.onecUserGuid,'after-retry-live');
+              }
+            })().catch(error=>{log({failure:error.message});process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
+            NODE
