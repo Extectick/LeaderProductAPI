@@ -68,7 +68,11 @@ jobs:
             test "$health" = healthy
             if [ -n "$EXPECTED_SHA" ]; then test "$image" = "ghcr.io/extectick/leaderproductapi:$EXPECTED_SHA"; fi
             sha256sum --check backups/prod-order-amendments-20261019/config-checksums.before
-            if [ "$VERIFY_API" = true ]; then docker cp backups/prod-order-amendments-20261019/orders.before.json leader_api:/tmp/order-amendments-orders.before.json; fi
+            if [ "$VERIFY_API" = true ]; then
+              docker cp backups/prod-order-amendments-20261019/orders.before.json leader_api:/tmp/order-amendments-orders.before.json
+              owner=$(docker exec leader_api id -u)
+              docker exec -u 0 leader_api chown "$owner" /tmp/order-amendments-orders.before.json
+            fi
             docker exec -e VERIFY_API="$VERIFY_API" -e SAVE_BASELINE="$SAVE_BASELINE" -i leader_api node <<'NODE'
             const fs=require('fs'),crypto=require('crypto');
             const {default:db,pool}=require('/app/dist/prisma/client');
@@ -106,7 +110,7 @@ jobs:
                 if(status.status!==200||status.body.data?.results?.length!==2)throw Error('Owner status endpoint failed');
                 for(const r of status.body.data.results){
                   if(!r.submittedVersion?.number1c||!r.submittedVersion.isPostedIn1c||!['NEEDS_REVIEW','REJECTED'].includes(r.state))throw Error('Accepted and pending states not separated');
-                  console.log(JSON.stringify({stage:'owner-status',receipt:r.id,state:r.state,submittedVersion:r.submittedVersion}));
+                  console.log(JSON.stringify({stage:'owner-status',receipt:r.submissionId,state:r.state,submittedVersion:r.submittedVersion}));
                 }
                 if((await getClientOrderSubmissionStatuses(0,ids)).results.length)throw Error('Cross-owner status leaked');
                 for(const receipt of receipts){
