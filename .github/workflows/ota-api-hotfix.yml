@@ -1,22 +1,24 @@
-name: Read-only production order inbox diagnostic
+name: Production order amendment release verification
 on:
   workflow_dispatch:
     inputs:
-      retry_targets:
-        description: Retry only the two orders explicitly authorized on 2026-10-19, without overriding validation
-        type: boolean
-        default: false
       backup:
         type: boolean
         default: false
+      verify_api:
+        type: boolean
+        default: false
+      expected_sha:
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
-  inspect:
+  verify:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Guarded pre-release backup
+      - name: Guarded fresh production backup
         if: inputs.backup
         uses: appleboy/ssh-action@v1
         with:
@@ -28,8 +30,10 @@ jobs:
             set -eu
             umask 077
             cd /opt/leader-api
-            target=/opt/leader-api/backups/prod-order-status-delivery-20261018
+            target=/opt/leader-api/backups/prod-order-amendments-20261019
             test ! -e "$target"
+            test "$(docker exec leader_postgres sh -c 'printf %s "$POSTGRES_DB"')" = LeaderAPI
+            df -h /
             mkdir -m 700 "$target"
             cp -p .env "$target/env.before"
             cp -p docker-compose.yml "$target/compose.before.yml"
@@ -37,146 +41,92 @@ jobs:
             sha256sum .env docker-compose.yml docker-compose.prod.yml > "$target/config-checksums.before"
             git rev-parse HEAD > "$target/git.before.txt"
             docker inspect leader_api --format '{{.Config.Image}}' > "$target/image.before.txt"
-            readlink -f /var/www/leader-order-prod/current > "$target/web.before.txt"
-            tar -czf "$target/web.before.tar.gz" -C /var/www/leader-order-prod/current .
-            actual_db=$(docker exec leader_postgres sh -c 'printf %s "$POSTGRES_DB"')
-            test "$actual_db" = LeaderAPI
             docker exec leader_postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-acl' > "$target/prod-before.dump"
             docker exec -i leader_postgres pg_restore --list < "$target/prod-before.dump" > "$target/contents.txt"
             test -s "$target/contents.txt"
-            sha256sum "$target/prod-before.dump" "$target/web.before.tar.gz"
+            chmod 600 "$target/prod-before.dump"
+            sha256sum "$target/prod-before.dump"
             stat -c '%a %s %n' "$target/prod-before.dump"
-            df -h /
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          timeout: 30s
-          command_timeout: 3m
-          script: |
-            set -eu
-            docker inspect leader_api --format '{{.State.Health.Status}} {{.Config.Image}}'
-            docker exec -i leader_api node <<'NODE'
-            const deadline=setTimeout(()=>{console.error('Diagnostic deadline');process.exit(2)},125000);
-            const {default:db,pool}=require('/app/dist/prisma/client');
-            const clean=v=>JSON.parse(JSON.stringify(v).replace(/(apiKey[=\"\s:]+)[^&\s\"]+/gi,'$1[redacted]').replace(/postgres(?:ql)?:\/\/[^\s\"]+/gi,'[database]'));
-            (async()=>{
-              if(!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Not production 1C');
-              console.log(JSON.stringify({stage:'flags',at:new Date().toISOString(),asyncEnabled:process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED,workerDisabled:process.env.CLIENT_ORDERS_SUBMISSION_WORKER_DISABLED,exportDisabled:process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED}));
-              console.log(JSON.stringify({submissionCounts:await db.clientOrderSubmission.groupBy({by:['state'],_count:true})}));
-              const targetPrefixes=['33d4c1cc','aa8f67ef'];
-              const targetReceipts=await db.clientOrderSubmission.findMany({where:{OR:[{state:{in:['NEEDS_REVIEW','REJECTED']}},...targetPrefixes.flatMap(prefix=>[{clientOrderId:{contains:prefix}},{orderGuid:{startsWith:prefix}}])]},orderBy:{acceptedAt:'desc'},take:20});
-              for(const s of targetReceipts){
-                const owner=await db.user.findUnique({where:{id:s.userId},select:{id:true,firstName:true,lastName:true}});
-                const customer=s.payload?.counterpartyGuid?await db.counterparty.findUnique({where:{guid:s.payload.counterpartyGuid},select:{guid:true,name:true}}):null;
-                console.log(JSON.stringify(clean({stage:'target-review-receipt',id:s.id,owner,clientOrderId:s.clientOrderId,revision:s.clientRevision,state:s.state,orderGuid:s.orderGuid,attempts:s.attempts,errorCode:s.errorCode,errorMessage:s.errorMessage,errorDetails:s.errorDetails,acceptedAt:s.acceptedAt,updatedAt:s.updatedAt,customer,rows:s.payload?.items?.length,legacyServerGuid:s.payload?.legacyServerGuid,legacyServerRevision:s.payload?.legacyServerRevision,intent:s.payload?.intent,payloadHash:s.payloadHash})));
-              }
-              console.log(JSON.stringify(clean({stage:'target-orders',orders:await db.order.findMany({where:{OR:targetPrefixes.flatMap(prefix=>[{guid:{startsWith:prefix}},{clientOrderId:{contains:prefix}}])},select:{guid:true,clientOrderId:true,clientRevision:true,revision:true,number1c:true,status:true,syncState:true,createdByUserId:true,totalAmount:true,deliveryDate:true,lastExportError:true,last1cError:true,draftReview:true,queuedAt:true,submitRequestedAt:true,sentTo1cAt:true,isPostedIn1c:true,createdByUser:{select:{firstName:true,lastName:true}},counterparty:{select:{guid:true,name:true}},_count:{select:{items:true}}}})})));
-              const targetBackups=await db.clientOrderDraftBackup.findMany({where:{OR:targetPrefixes.flatMap(prefix=>[{clientOrderId:{contains:prefix}},{submittedOrderGuid:{startsWith:prefix}}])},take:10});
-              for(const b of targetBackups)console.log(JSON.stringify(clean({stage:'target-backup',userId:b.userId,clientOrderId:b.clientOrderId,revision:b.clientRevision,submittedOrderGuid:b.submittedOrderGuid,updatedAt:b.updatedAt,review:b.review,payloadKeys:Object.keys(b.payload||{}),rows:b.payload?.items?.length})));
-              console.log(JSON.stringify(clean({stage:'global-submitted-pending',orders:await db.order.findMany({where:{source:'MANAGER_APP',syncState:{in:['QUEUED','ERROR','CONFLICT','CANCEL_REQUESTED']},OR:[{submitRequestedAt:{not:null}},{queuedAt:{not:null}}]},take:40,select:{guid:true,number1c:true,status:true,syncState:true,createdByUserId:true,queuedAt:true,lastExportError:true,last1cError:true}})})));
-              console.log(JSON.stringify({stage:'active-production-ota',release:await db.appOtaUpdate.findFirst({where:{channel:'prod',runtimeVersion:'0.1.35',isActive:true},orderBy:{createdAt:'desc'},select:{updateId:true,displayVersion:true,commitSha:true,runtimeVersion:true,rolloutPercent:true}})}));
-              const submissions=await db.clientOrderSubmission.findMany({where:{OR:[{state:{not:'QUEUED'}},{acceptedAt:{gte:new Date('2026-10-17T18:00:00Z')}}]},orderBy:{acceptedAt:'asc'},take:60});
-              for(const s of submissions)console.log(JSON.stringify(clean({stage:'submission',id:s.id,userId:s.userId,clientOrderId:s.clientOrderId,revision:s.clientRevision,state:s.state,orderGuid:s.orderGuid,attempts:s.attempts,nextAttemptAt:s.nextAttemptAt,leaseUntil:s.leaseUntil,errorCode:s.errorCode,errorMessage:s.errorMessage,errorDetails:s.errorDetails,acceptedAt:s.acceptedAt,updatedAt:s.updatedAt,deliveryMethod:s.payload?.deliveryMethod,deliveryDate:s.payload?.deliveryDate,rows:s.payload?.items?.length})));
-              const orders=await db.order.findMany({where:{source:'MANAGER_APP',OR:[{guid:{startsWith:'898cecdb'}},{guid:{startsWith:'d6a73aa7'}},{guid:{startsWith:'af0d2187'}},{number1c:{in:['НОУТ-125312','НОУТ-125211']}},{status:{in:['QUEUED','REJECTED']},updatedAt:{gte:new Date('2026-10-15T18:00:00Z')}}]},orderBy:{updatedAt:'desc'},take:65,select:{id:true,guid:true,clientOrderId:true,clientRevision:true,revision:true,number1c:true,status:true,syncState:true,createdByUserId:true,createdAt:true,updatedAt:true,queuedAt:true,submitRequestedAt:true,sentTo1cAt:true,exportAttempts:true,lastExportError:true,last1cError:true,isPostedIn1c:true,totalAmount:true,deliveryMethod:true,deliveryDate:true,counterparty:{select:{name:true}},createdByUser:{select:{firstName:true,lastName:true}},_count:{select:{items:true}}}});
-              console.log(JSON.stringify(clean({stage:'orders',orders})));
-              console.log(JSON.stringify({stage:'recent-order-counts',counts:await db.order.groupBy({by:['status','syncState'],where:{source:'MANAGER_APP',createdAt:{gte:new Date('2026-10-15T18:00:00Z')}},_count:true})}));
-              console.log(JSON.stringify(clean({stage:'recent-exceptions',orders:await db.order.findMany({where:{source:'MANAGER_APP',updatedAt:{gte:new Date('2026-10-15T18:00:00Z')},OR:[{lastExportError:{not:null}},{last1cError:{not:null}},{syncState:{in:['ERROR','CONFLICT','QUEUED']}},{status:'SENT_TO_1C'}]},take:40,select:{guid:true,number1c:true,createdByUserId:true,status:true,syncState:true,isPostedIn1c:true,lastExportError:true,last1cError:true,queuedAt:true,sentTo1cAt:true}})})));
-              const {findLiveClientOrder}=require('/app/dist/modules/clientOrders/clientOrders.onecLive');
-              const {getStoredClientOrderForSubmission}=require('/app/dist/modules/clientOrders/clientOrders.service');
-              for(const prefix of ['898cedcb','d6a73aa7','af0d2187']){
-                const order=await db.order.findFirst({where:{guid:{startsWith:prefix}},select:{id:true,guid:true,revision:true,createdByUserId:true,number1c:true,status:true,syncState:true,deliveryMethod:true,totalAmount:true,queuedAt:true,sentTo1cAt:true,updatedAt:true,lastExportError:true,last1cError:true}});
-                if(!order){console.log(JSON.stringify({stage:'missing-prefix',prefix}));continue}
-                const profile=await db.employeeProfile.findUnique({where:{userId:order.createdByUserId},select:{onecUserGuid:true}});
-                const live=await findLiveClientOrder({managerGuid:profile.onecUserGuid,appGuid:order.guid,number1c:order.number1c});
-                console.log(JSON.stringify(clean({stage:'direct-onec-proof',order,live:live&&{guid:live.guid,appGuid:live.appGuid,number1c:live.number1c,status:live.status,isPostedIn1c:live.isPostedIn1c,deliveryMethod:live.deliveryMethod,deliveryDate:live.deliveryDate,totalAmount:live.totalAmount,rows:live.items?.length}})));
-                const receipt=await db.clientOrderSubmission.findFirst({where:{orderGuid:order.guid},orderBy:{acceptedAt:'desc'}});
-                const canonical=await getStoredClientOrderForSubmission(order.guid,order.createdByUserId);
-                const proofReader=require('/app/dist/modules/clientOrders/clientOrderSubmissions').getClientOrderSubmissionOrder;
-                if(typeof proofReader==='function'&&receipt){
-                  const result=await proofReader(order.createdByUserId,receipt.id,getStoredClientOrderForSubmission);
-                  if(result?.acceptedSubmission?.payloadHash!==receipt.payloadHash||result?.guid!==order.guid)throw Error('Canonical receipt proof mismatch');
-                  console.log(JSON.stringify({stage:'deployed-receipt-proof',prefix,orderGuid:result.guid,proofMatchesOriginal:true,number1c:result.number1c}));
-                }
-                const headers=['organizationGuid','counterpartyGuid','agreementGuid','contractGuid','warehouseGuid','deliveryAddressGuid','priceTypeGuid','deliveryMethod','paymentForm','deliveryDate'];
-                const relationKeys={organizationGuid:'organization',counterpartyGuid:'counterparty',agreementGuid:'agreement',contractGuid:'contract',warehouseGuid:'warehouse',deliveryAddressGuid:'deliveryAddress',priceTypeGuid:'priceType'};
-                console.log(JSON.stringify(clean({stage:'receipt-order-comparison',prefix,receipt:receipt&&{id:receipt.id,clientOrderId:receipt.clientOrderId,clientRevision:receipt.clientRevision,payloadHash:receipt.payloadHash,state:receipt.state},canonical:{guid:canonical.guid,origin:canonical.origin,createdByUser:canonical.createdByUser,status:canonical.status,syncState:canonical.syncState,clientOrderId:canonical.clientOrderId,clientRevision:canonical.clientRevision},headers:headers.map(key=>({key,submitted:receipt?.payload?.[key]??null,current:relationKeys[key]?canonical[relationKeys[key]]?.guid??null:canonical[key]??null})),lines:receipt?.payload?.items?.map(row=>({lineGuid:row.lineGuid,productGuid:row.productGuid,quantity:row.quantity,manualPrice:row.manualPrice,packageGuid:row.packageGuid,unitGuid:row.unitGuid})),serverLines:canonical.items?.map(row=>({lineGuid:row.lineGuid,productGuid:row.product?.guid,quantity:row.quantity,price:row.price,packageGuid:row.package?.guid,unitGuid:row.unit?.guid}))})));
-              }
-              console.log(JSON.stringify({stage:'database-pool',stats:await db.$queryRawUnsafe("SELECT state, wait_event_type, wait_event, count(*)::int FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2,3") }));
-            })().catch(e=>{console.error(JSON.stringify(clean({failure:e.message})));process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
-            NODE
-            cd /opt/leader-api
-            sha256sum --check backups/prod-order-status-delivery-20261018/config-checksums.before
-            readlink -f /var/www/leader-order-prod/current
-  attempt_targets:
-    if: inputs.retry_targets
-    needs: inspect
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Retry exact original packets through the deployed application service
+      - name: Read-only production API and document verification
         uses: appleboy/ssh-action@v1
+        env:
+          VERIFY_API: ${{ inputs.verify_api }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SAVE_BASELINE: ${{ inputs.backup }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          timeout: 30s
-          command_timeout: 6m
+          envs: VERIFY_API,EXPECTED_SHA,SAVE_BASELINE
+          command_timeout: 4m
           script: |
             set -eu
-            docker exec -i leader_api node <<'NODE'
-            const deadline=setTimeout(()=>{console.error('Scoped retry deadline');process.exit(2)},300000);
+            cd /opt/leader-api
+            image=$(docker inspect leader_api --format '{{.Config.Image}}')
+            health=$(docker inspect leader_api --format '{{.State.Health.Status}}')
+            printf 'Deployed image: %s; health: %s\n' "$image" "$health"
+            test "$health" = healthy
+            if [ -n "$EXPECTED_SHA" ]; then test "$image" = "ghcr.io/extectick/leaderproductapi:$EXPECTED_SHA"; fi
+            sha256sum --check backups/prod-order-amendments-20261019/config-checksums.before
+            if [ "$VERIFY_API" = true ]; then docker cp backups/prod-order-amendments-20261019/orders.before.json leader_api:/tmp/order-amendments-orders.before.json; fi
+            docker exec -e VERIFY_API="$VERIFY_API" -e SAVE_BASELINE="$SAVE_BASELINE" -i leader_api node <<'NODE'
+            const fs=require('fs'),crypto=require('crypto');
             const {default:db,pool}=require('/app/dist/prisma/client');
-            const {putClientOrderByClientId,getStoredClientOrderForSubmission,ClientOrdersError}=require('/app/dist/modules/clientOrders/clientOrders.service');
-            const {clientOrderMutationSchema}=require('/app/dist/modules/clientOrders/clientOrders.schemas');
-            const {submissionPayloadHash}=require('/app/dist/modules/clientOrders/clientOrderSubmissions');
-            const {OrderIntegrityError,orderContentToken}=require('/app/dist/modules/orders/orderIntegrity');
-            const {findLiveClientOrder,getLiveClientOrder}=require('/app/dist/modules/clientOrders/clientOrders.onecLive');
-            const {withBackgroundOnecRequests}=require('/app/dist/modules/onec/onec.lpApp.client');
-            const clean=value=>JSON.parse(JSON.stringify(value, (key,item)=>/token|password|apikey|secret/i.test(key)?'[redacted]':item));
-            const log=value=>console.log(JSON.stringify(clean(value)));
-            const specs=[
-              {guid:'33d4c1cc-d71d-48c4-b634-a1eeb15a7dbf',clientOrderId:'007955a1-8912-48ee-8737-b109ee766cab',receipt:'cmveukveh0lfv01mygn1hddp4',revision:30,hash:'a3261f8b34b8104a251f375448207836e9747608111a3605d2326f5243dbb0de',rows:19,number:'НОУТ-126165'},
-              {guid:'aa8f67ef-fb45-4d49-bc5c-efe0318e6456',clientOrderId:'027ea1d3-712d-4d59-87cf-8524604c1cf1',receipt:'cmverv1lc0h6901mynh2w0m2b',revision:2,hash:'9268b1e6ccbc3278dd1cd37cb0c12e82b55100e1ee7a47f1c55f66614381a5d8',rows:17,number:'НОУТ-126039'},
-            ];
-            async function liveProof(order,managerGuid,stage){
-              const found=await findLiveClientOrder({managerGuid,appGuid:order.guid,number1c:order.number1c});
-              if(!found||found.appGuid?.toLowerCase()!==order.guid.toLowerCase()||found.number1c!==order.number1c)throw Error('Live 1C identity not proven');
-              const live=await getLiveClientOrder(found.guid,{managerGuid,appGuid:order.guid});
-              if(live.appGuid?.toLowerCase()!==order.guid.toLowerCase()||live.number1c!==order.number1c)throw Error('Live detail identity mismatch');
-              log({stage,guid:order.guid,liveGuid:live.guid,number1c:live.number1c,status:live.status,isPostedIn1c:live.isPostedIn1c,totalAmount:live.totalAmount,rows:live.items?.length,lines:live.items?.map(i=>({lineGuid:i.lineGuid,productGuid:i.product?.guid,productName:i.product?.name,quantity:i.quantity,price:i.price,amount:i.lineAmount,isCancelled:i.isCancelled}))});
-              return live;
+            const deadline=setTimeout(()=>process.exit(2),150000);
+            const ids=['cmveukveh0lfv01mygn1hddp4','cmverv1lc0h6901mynh2w0m2b'];
+            const guids=['33d4c1cc-d71d-48c4-b634-a1eeb15a7dbf','aa8f67ef-fb45-4d49-bc5c-efe0318e6456'];
+            const baseline='/tmp/order-amendments-orders.before.json';
+            const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
+            async function snapshot(){
+              const orders=await db.order.findMany({where:{guid:{in:guids},createdByUserId:99},orderBy:{guid:'asc'},select:{guid:true,clientOrderId:true,clientRevision:true,number1c:true,status:true,syncState:true,isPostedIn1c:true,totalAmount:true,items:{orderBy:{id:'asc'},select:{lineGuid:true,productId:true,quantity:true,quantityBase:true,price:true,lineAmount:true,isCancelled:true}}}});
+              if(orders.length!==2)throw Error('Target document identity not proven');
+              return orders.map(o=>({guid:o.guid,clientOrderId:o.clientOrderId,number1c:o.number1c,clientRevision:o.clientRevision,totalAmount:String(o.totalAmount),rows:o.items.length,isPostedIn1c:o.isPostedIn1c,businessHash:hash(o)}));
             }
             (async()=>{
-              if(process.env.NODE_ENV!=='production'||!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Production target guard failed');
-              const user=await db.user.findUnique({where:{id:99},select:{id:true,firstName:true,lastName:true,isActive:true,deletedAt:true}});
-              const profile=await db.employeeProfile.findUnique({where:{userId:99},select:{onecUserGuid:true}});
-              if(!user?.isActive||user.deletedAt||!profile?.onecUserGuid)throw Error('Owner not active or manager missing');
-              log({stage:'retry-owner',user});
-              for(const spec of specs){
-                const receipt=await db.clientOrderSubmission.findUnique({where:{id:spec.receipt}});
-                const latest=await db.clientOrderSubmission.findFirst({where:{userId:99,clientOrderId:spec.clientOrderId},orderBy:{clientRevision:'desc'}});
-                const backup=await db.clientOrderDraftBackup.findUnique({where:{userId_clientOrderId:{userId:99,clientOrderId:spec.clientOrderId}}});
-                if(!receipt||latest?.id!==receipt.id||receipt.userId!==99||receipt.clientOrderId!==spec.clientOrderId||receipt.clientRevision!==spec.revision||receipt.payloadHash!==spec.hash||submissionPayloadHash(receipt.payload)!==spec.hash||!['NEEDS_REVIEW','REJECTED'].includes(receipt.state)||receipt.payload?.items?.length!==spec.rows||receipt.payload?.intent!=='SUBMIT'||(backup&&backup.clientRevision>spec.revision))throw Error('Immutable packet/latest revision guard failed for '+spec.guid);
-                const before=await getStoredClientOrderForSubmission(spec.guid,99);
-                if(before.createdByUser?.id!==99||before.clientOrderId!==spec.clientOrderId||before.number1c!==spec.number)throw Error('Order ownership/identity guard failed');
-                const live=await liveProof(before,profile.onecUserGuid,'before-retry-live');
-                if(Number(live.totalAmount)!==Number(before.totalAmount)||live.items?.length!==before.items?.length)throw Error('Live 1C/server contents differ; review before retry');
-                const beforeContent=orderContentToken(before);
-                log({stage:'attempt-start',guid:spec.guid,number1c:before.number1c,clientRevision:spec.revision,rows:spec.rows,originalError:{code:receipt.errorCode,message:receipt.errorMessage,details:receipt.errorDetails}});
-                try{
-                  const body=clientOrderMutationSchema.parse(receipt.payload);
-                  const result=await withBackgroundOnecRequests(()=>putClientOrderByClientId(99,spec.clientOrderId,body,{storedResultOnly:true}));
-                  log({stage:'attempt-accepted',guid:spec.guid,result:{guid:result.guid,clientRevision:result.clientRevision,status:result.status,syncState:result.syncState,number1c:result.number1c}});
-                }catch(error){
-                  log({stage:'attempt-error',guid:spec.guid,error:{name:error.name,status:error.status,code:error.code||error.details?.kind,message:error.message,details:error.details}});
-                  if(!(error instanceof ClientOrdersError)&&!(error instanceof OrderIntegrityError))throw error;
-                }
-                const after=await getStoredClientOrderForSubmission(spec.guid,99);
-                const afterReceipt=await db.clientOrderSubmission.findUnique({where:{id:spec.receipt}});
-                log({stage:'after-retry-server',guid:spec.guid,number1c:after.number1c,clientRevision:after.clientRevision,revision:after.revision,status:after.status,syncState:after.syncState,totalAmount:after.totalAmount,rows:after.items?.length,businessContentsUnchanged:beforeContent===orderContentToken(after),receiptState:afterReceipt.state,receiptError:afterReceipt.errorCode});
-                await liveProof(after,profile.onecUserGuid,'after-retry-live');
+              if(process.env.NODE_ENV!=='production'||!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Not production');
+              const health=await fetch('http://127.0.0.1:3000/health');if(health.status!==200)throw Error('API unhealthy');
+              const before=await snapshot();
+              const receipts=await db.clientOrderSubmission.findMany({where:{id:{in:ids},userId:99},orderBy:{id:'asc'}});
+              if(receipts.length!==2)throw Error('Receipt owner mismatch');
+              console.log(JSON.stringify({stage:'documents',orders:before,receipts:receipts.map(r=>({id:r.id,state:r.state,revision:r.clientRevision,payloadHash:r.payloadHash,errorCode:r.errorCode}))}));
+              console.log(JSON.stringify({stage:'queue',counts:await db.clientOrderSubmission.groupBy({by:['state'],_count:true}),asyncEnabled:process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED,workerDisabled:process.env.CLIENT_ORDERS_SUBMISSION_WORKER_DISABLED,exportDisabled:process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED}));
+              console.log(JSON.stringify({stage:'ota',release:await db.appOtaUpdate.findFirst({where:{channel:'prod',runtimeVersion:'0.1.35',isActive:true},orderBy:{createdAt:'desc'},select:{updateId:true,displayVersion:true,commitSha:true,runtimeVersion:true,rolloutPercent:true}})}));
+              if(process.env.SAVE_BASELINE==='true'){
+                fs.writeFileSync(baseline,JSON.stringify({orders:before,receipts:receipts.map(r=>({id:r.id,state:r.state,payloadHash:r.payloadHash}))}),{flag:'wx',mode:0o600});
+                console.log(JSON.stringify({stage:'baseline-saved',path:baseline}));
               }
-            })().catch(error=>{log({failure:error.message});process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
+              if(process.env.VERIFY_API==='true'){
+                const {previewClientOrderAmendment}=require('/app/dist/modules/clientOrders/clientOrders.service');
+                const {getClientOrderSubmissionStatuses}=require('/app/dist/modules/clientOrders/clientOrderSubmissions');
+                const user=await db.user.findUnique({where:{id:99},include:{role:true}});
+                if(!user?.isActive||user.deletedAt||!user.role?.name||!process.env.ACCESS_TOKEN_SECRET)throw Error('Active owner/auth not proven');
+                const jwt=require('jsonwebtoken').sign({userId:99,role:user.role.name,permissions:[],profileStatus:user.profileStatus},process.env.ACCESS_TOKEN_SECRET,{expiresIn:'2m'});
+                async function post(path,body){const r=await fetch('http://127.0.0.1:3000/api/client-orders'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+jwt},body:JSON.stringify(body),signal:AbortSignal.timeout(25000)});return {status:r.status,body:await r.json()};}
+                const status=await post('/submissions/status',{ids});
+                if(status.status!==200||status.body.data?.results?.length!==2)throw Error('Owner status endpoint failed');
+                for(const r of status.body.data.results){
+                  if(!r.submittedVersion?.number1c||!r.submittedVersion.isPostedIn1c||!['NEEDS_REVIEW','REJECTED'].includes(r.state))throw Error('Accepted and pending states not separated');
+                  console.log(JSON.stringify({stage:'owner-status',receipt:r.id,state:r.state,submittedVersion:r.submittedVersion}));
+                }
+                if((await getClientOrderSubmissionStatuses(0,ids)).results.length)throw Error('Cross-owner status leaked');
+                for(const receipt of receipts){
+                  const order=before.find(o=>o.clientOrderId===receipt.clientOrderId);
+                  const proposal={...receipt.payload,clientRevision:Math.max(receipt.clientRevision,Number(order.clientRevision)+1)};
+                  const review=await post('/by-client-id/'+encodeURIComponent(receipt.clientOrderId)+'/review',proposal);
+                  if(review.status!==200||review.body.data?.orderGuid!==order.guid||!review.body.data?.baseContentToken)throw Error('Read-only review failed: '+review.status+' '+JSON.stringify(review.body.error));
+                  console.log(JSON.stringify({stage:'owner-preview',guid:order.guid,status:review.status,number1c:review.body.data.number1c,requiresConfirmation:review.body.data.requiresConfirmation,hasChallenge:Boolean(review.body.data.confirmationToken),changes:review.body.data.changes.map(c=>({reason:c.reason,before:c.before,after:c.after}))}));
+                  try{await previewClientOrderAmendment(0,receipt.clientOrderId,proposal);throw Error('Cross-owner review leaked');}catch(e){if(e.status!==404)throw e;}
+                }
+                const after=await snapshot();if(hash(before)!==hash(after))throw Error('Read-only checks changed document');
+                const old=JSON.parse(fs.readFileSync(baseline,'utf8'));
+                if(hash(old.orders)!==hash(after))throw Error('Business documents differ from release baseline');
+                const receiptsAfter=await db.clientOrderSubmission.findMany({where:{id:{in:ids}},orderBy:{id:'asc'},select:{id:true,state:true,payloadHash:true}});
+                if(hash(old.receipts)!==hash(receiptsAfter))throw Error('Immutable receipts changed');
+                console.log(JSON.stringify({stage:'release-proof',ownerScopedHttpPassed:true,crossOwnerDenied:true,documentsUnchanged:true,receiptsUnchanged:true,noResend:true}));
+              }
+            })().catch(e=>{console.error(JSON.stringify({failure:e.message}));process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
             NODE
+            if [ "$SAVE_BASELINE" = true ]; then
+              docker cp leader_api:/tmp/order-amendments-orders.before.json backups/prod-order-amendments-20261019/orders.before.json
+              chmod 600 backups/prod-order-amendments-20261019/orders.before.json
+            fi
