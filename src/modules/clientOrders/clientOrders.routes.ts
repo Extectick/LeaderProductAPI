@@ -55,6 +55,7 @@ import {
   copyClientOrder,
   createClientOrder,
   putClientOrderByClientId,
+  previewClientOrderAmendment,
   deleteDraftClientOrder,
   getClientOrderByGuid,
   getClientOrderExportDebug,
@@ -653,6 +654,14 @@ router.get('/draft-backups/:clientOrderId', authorizePermissions(['view_client_o
     if (!backup) return res.status(404).json(errorResponse('Черновик не найден', ErrorCodes.NOT_FOUND));
     return res.json(successResponse(backup, 'Резервная копия черновика'));
   } catch (error) { return handleError(res, error, 'Не удалось прочитать резервную копию черновика'); }
+});
+
+router.post('/by-client-id/:clientOrderId/review', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = clientOrderIdParamsSchema.safeParse(req.params);
+  const body = clientOrderMutationSchema.safeParse(req.body);
+  if (!params.success || !body.success) return res.status(400).json(errorResponse('Проверьте данные заказа для согласования', ErrorCodes.VALIDATION_ERROR));
+  try { return res.json(successResponse(await previewClientOrderAmendment(req.user!.userId, params.data.clientOrderId, body.data))); }
+  catch (error) { return handleError(res, error, 'Не удалось согласовать изменения. Локальная копия сохранена.'); }
 });
 
 router.put('/by-client-id/:clientOrderId', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {

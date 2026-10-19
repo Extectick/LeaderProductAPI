@@ -81,6 +81,12 @@ describe('async submission materialization', () => {
   it('does not bypass destructive-change confirmation', () => {
     expect(submissionFailure(new OrderIntegrityError('Подтвердите изменение', { kind: 'ORDER_CHANGE_REVIEW_REQUIRED' })).state).toBe('NEEDS_REVIEW');
   });
+  it('classifies stale content as review and preserves REFERENCE_STALE instead of the field label', () => {
+    expect(submissionFailure(new OrderIntegrityError('Версия изменилась', { kind: 'ORDER_CONTENT_CONFLICT' })))
+      .toMatchObject({ state: 'NEEDS_REVIEW', code: 'ORDER_CONTENT_CONFLICT' });
+    expect(submissionFailure(new ClientOrdersError(409, ErrorCodes.REFERENCE_STALE, 'Выберите договор', { kind: 'Договор', guid: 'old' })))
+      .toMatchObject({ state: 'NEEDS_REVIEW', code: 'REFERENCE_STALE', details: { kind: 'Договор', guid: 'old' } });
+  });
   it('bounds concurrent materializations and continues after failure of one claim', async () => {
     (prisma.clientOrderSubmission.findMany as jest.Mock).mockResolvedValue([{ id: 'one' }, { id: 'two' }, { id: 'three' }]);
     await runClientOrderSubmissionsOnce();

@@ -1,5 +1,5 @@
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: { $transaction: jest.fn(),
-  clientOrderSubmission: { findMany: jest.fn(), findFirst: jest.fn() } } }));
+  clientOrderSubmission: { findMany: jest.fn(), findFirst: jest.fn() }, order: { findMany: jest.fn() } } }));
 import prisma from '../src/prisma/client';
 import { acceptClientOrderSubmission, acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses,
   submissionPayloadHash, SubmissionConflict, getClientOrderSubmissionOrder } from '../src/modules/clientOrders/clientOrderSubmissions';
@@ -11,6 +11,7 @@ const input = (body: any = payload) => ({ clientOrderId: 'client-id-123', payloa
 let tx: any;
 beforeEach(() => {
   jest.clearAllMocks();
+  (prisma.order.findMany as jest.Mock).mockResolvedValue([]);
   tx = { order: { findFirst: jest.fn().mockResolvedValue({ id: 'owned' }) }, $queryRaw: jest.fn().mockResolvedValue([]), clientOrderSubmission: {
     findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockImplementation(({ data }) => ({ ...data,
       id: 'receipt-123', acceptedAt: new Date('2026-10-16T10:00:00Z'), state: 'ACCEPTED' })),
@@ -98,6 +99,18 @@ describe('durable async intake without 1C', () => {
     (prisma.clientOrderSubmission.findMany as jest.Mock).mockResolvedValue([]);
     await getClientOrderSubmissionStatuses(90, ['receipt-123']);
     expect(prisma.clientOrderSubmission.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 90, id: { in: ['receipt-123'] } } }));
+  });
+  it('reports the previously accepted 1C version separately from a rejected amendment without accepting it', async () => {
+    (prisma.clientOrderSubmission.findMany as jest.Mock).mockResolvedValue([{ id: 'rejected', userId: 90, clientOrderId: 'client-id-123',
+      clientRevision: 30, payloadHash: 'a'.repeat(64), state: 'REJECTED', orderGuid: null,
+      acceptedAt: new Date(), errorCode: 'ORDER_CONTENT_CONFLICT' }]);
+    (prisma.order.findMany as jest.Mock).mockResolvedValue([{ guid: 'existing', clientOrderId: 'client-id-123', clientRevision: 29,
+      number1c: 'НОУТ-126165', isPostedIn1c: true, status: 'CONFIRMED', syncState: 'SYNCED', revision: 3,
+      totalAmount: 36548, updatedAt: new Date(), _count: { items: 16 } }]);
+    const response = await getClientOrderSubmissionStatuses(90, ['rejected']);
+    expect(response.results[0]).toMatchObject({ state: 'REJECTED', orderGuid: null, clientRevision: 30,
+      submittedVersion: { number1c: 'НОУТ-126165', clientRevision: 29, itemsCount: 16, totalAmount: 36548 } });
+    expect(prisma.order.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ createdByUserId: 90, source: 'MANAGER_APP' }) }));
   });
   it('accepts old server GUID operations into the same fast inbox without creating an Order', async () => {
     const guid = '5a74eabe-7124-4af7-a663-6809e70cc011';

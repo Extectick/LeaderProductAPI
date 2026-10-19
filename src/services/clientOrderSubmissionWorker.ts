@@ -22,9 +22,10 @@ export function submissionFailure(error: unknown) {
   const known = error instanceof ClientOrdersError || error instanceof OrderIntegrityError;
   const status = known ? error.status : 503;
   const details = error instanceof OrderIntegrityError ? error.details : error instanceof ClientOrdersError ? error.details : null;
-  const code = (details as any)?.kind ?? (error instanceof ClientOrdersError ? error.code : 'PROCESSING_UNAVAILABLE');
+  const code = error instanceof ClientOrdersError ? error.code
+    : error instanceof OrderIntegrityError ? String(error.details.kind ?? 'ORDER_CONTENT_CONFLICT') : 'PROCESSING_UNAVAILABLE';
   const retryable = [0, 408, 425, 429, 500, 502, 503, 504].includes(status) || code === 'ORDER_EXPORT_IN_PROGRESS';
-  const review = ['PRICE_REVIEW_REQUIRED', 'STOCK_SHORTAGE', 'ORDER_CHANGE_REVIEW_REQUIRED', 'REFERENCE_STALE'].includes(code);
+  const review = ['PRICE_REVIEW_REQUIRED', 'STOCK_SHORTAGE', 'ORDER_CHANGE_REVIEW_REQUIRED', 'ORDER_CONTENT_CONFLICT', 'LEGACY_DRAFT_CONFLICT', 'REFERENCE_STALE'].includes(code);
   return { state: retryable ? 'RETRY' : review ? 'NEEDS_REVIEW' : 'REJECTED', code,
     message: retryable ? 'Документ сохранён в API. Обработка временно недоступна; сервер повторит попытку автоматически.' : known ? error.message : 'Обработка временно недоступна. Сервер повторит попытку.',
     details: details ? JSON.parse(JSON.stringify(details)) as Prisma.InputJsonValue : Prisma.DbNull };

@@ -12,7 +12,8 @@ import prisma from '../../prisma/client';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
-import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
+import { assertOrderIntegrity, OrderIntegrityError, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
+import { acceptedOrderQuantities, amendmentAvailableQuantity, previewOrderAmendment } from './clientOrderAmendments';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
 import { clientOrderPayloadHash, proveAcceptedClientOperation } from './acceptedClientOperation';
@@ -5561,7 +5562,8 @@ function referenceStale(kind: string, guid: string): never {
  */
 async function validateOfflineSubmission(
   body: ClientOrderMutationBody,
-  managerGuid: string | null
+  managerGuid: string | null,
+  acceptedQuantities: Map<string, number> = new Map()
 ): Promise<ClientOrderMutationBody> {
   if (!body.offlineReview || body.intent !== 'SUBMIT') return body;
   if (!managerGuid) {
@@ -5641,7 +5643,8 @@ async function validateOfflineSubmission(
       if (line.packageGuid && !pack) referenceStale('Упаковка', line.packageGuid);
       const multiplier = pack?.multiplier && pack.multiplier > 0 ? pack.multiplier : 1;
       const requiredBase = line.isCancelled ? 0 : Number(line.quantity) * multiplier;
-      const available = Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0);
+      const available = amendmentAvailableQuantity(Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0),
+        acceptedQuantities.get(product.guid.toLowerCase()) ?? 0);
       const requirement = requirements.get(product.guid) ?? {
         productGuid: product.guid,
         name: product.name,
@@ -5774,6 +5777,36 @@ export async function getClientOrderByClientId(userId: number, clientOrderId: st
   return { ...detail, acceptedClientOperation };
 }
 
+/** Read-only, owner-scoped review. It NEVER saves, queues, or changes a receipt. */
+export async function previewClientOrderAmendment(userId: number, clientOrderId: string, body: ClientOrderMutationBody) {
+  const legacyGuid = clientOrderId.startsWith('legacy-server:') ? clientOrderId.slice('legacy-server:'.length) : null;
+  const order = await prisma.order.findFirst({ where: { createdByUserId: userId, source: OrderSource.MANAGER_APP,
+    ...(legacyGuid ? { guid: legacyGuid } : { clientOrderId }) }, select: orderDetailSelect });
+  if (!order) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Исходный заказ не найден. Локальная копия сохранена.');
+  ensureEditable(order);
+  if (order.status === OrderStatus.CANCELLED) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отменённый заказ нельзя изменять отправкой.');
+  if (!legacyGuid && order.clientRevision != null && body.clientRevision <= order.clientRevision) throw new ClientOrdersError(409, ErrorCodes.CONFLICT,
+    'На сервере уже есть эта или более новая версия. Обновите заказ перед согласованием; локальные правки сохранены.');
+  if (order.syncState === OrderSyncState.QUEUED || order.syncState === OrderSyncState.CANCEL_REQUESTED) {
+    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Предыдущая отправка ещё не завершена. Дождитесь результата; изменения сохранены.');
+  }
+  const products = await prisma.product.findMany({ where: { guid: { in: body.items.map(line => line.productGuid) } }, select: { guid: true, name: true } });
+  const names = new Map(products.map(product => [product.guid!.toLowerCase(), product.name]));
+  const referenceNames = await Promise.all([
+    body.organizationGuid !== order.organization?.guid ? prisma.organization.findUnique({ where: { guid: body.organizationGuid }, select: { guid: true, name: true } }) : null,
+    body.counterpartyGuid !== order.counterparty?.guid ? prisma.counterparty.findUnique({ where: { guid: body.counterpartyGuid }, select: { guid: true, name: true } }) : null,
+    body.warehouseGuid && body.warehouseGuid !== order.warehouse?.guid ? prisma.warehouse.findUnique({ where: { guid: body.warehouseGuid }, select: { guid: true, name: true } }) : null,
+    body.agreementGuid && body.agreementGuid !== order.agreement?.guid ? prisma.clientAgreement.findUnique({ where: { guid: body.agreementGuid }, select: { guid: true, name: true } }) : null,
+    body.contractGuid && body.contractGuid !== order.contract?.guid ? prisma.clientContract.findUnique({ where: { guid: body.contractGuid }, select: { guid: true, name: true, number: true } }) : null,
+    body.priceTypeGuid && body.priceTypeGuid !== order.priceType?.guid ? prisma.priceType.findUnique({ where: { guid: body.priceTypeGuid }, select: { guid: true, name: true } }) : null,
+    body.deliveryAddressGuid && body.deliveryAddressGuid !== order.deliveryAddress?.guid ? prisma.deliveryAddress.findFirst({
+      where: { guid: body.deliveryAddressGuid, counterparty: { guid: body.counterpartyGuid } }, select: { guid: true, name: true, fullAddress: true } }) : null,
+  ]);
+  for (const reference of referenceNames) if (reference?.guid) names.set(reference.guid.toLowerCase(), reference.name
+    || ('fullAddress' in reference ? reference.fullAddress : '') || ('number' in reference ? reference.number : '') || reference.guid);
+  return previewOrderAmendment(order, body, userId, names);
+}
+
 export async function putClientOrderByClientId(
   userId: number,
   clientOrderId: string,
@@ -5824,8 +5857,12 @@ export async function putClientOrderByClientId(
   const managerGuid = await getManagerGuidForUser(userId);
   let rejectedSubmission: ClientOrdersError | null = null;
   let draftReview: Prisma.InputJsonValue | undefined;
+  const validationOrder = committed && body.offlineReview && body.intent === 'SUBMIT'
+    ? await prisma.order.findFirst({ where: { guid: committed.guid, createdByUserId: userId, source: OrderSource.MANAGER_APP }, select: orderDetailSelect }) : null;
+  const acceptedQuantities = acceptedOrderQuantities(validationOrder, body);
+  const validationContentToken = acceptedQuantities.size ? orderContentToken(validationOrder) : null;
   try {
-    body = await validateOfflineSubmission(body, managerGuid);
+    body = await validateOfflineSubmission(body, managerGuid, acceptedQuantities);
   } catch (error) {
     if (!(error instanceof ClientOrdersError)) throw error;
     const review = { code: error.code, message: error.message, details: error.details ?? null,
@@ -5956,6 +5993,11 @@ export async function putClientOrderByClientId(
 
     // Correcting a rejected, never-submitted draft cannot reduce accepted 1C facts.
     // All queued/exported orders retain the normal integrity confirmation guard.
+    if (validationContentToken && existing) {
+      const current = await tx.order.findUniqueOrThrow({ where: { id: existing.id }, select: orderDetailSelect });
+      if (orderContentToken(current) !== validationContentToken) throw new OrderIntegrityError(
+        'Заказ изменился во время проверки остатков. Согласуйте изменения и повторите отправку.', { kind: 'ORDER_CONTENT_CONFLICT' });
+    }
     if (existing && (!existing.draftReview || existing.submitRequestedAt
       || existing.syncState !== OrderSyncState.DRAFT || existing.status !== OrderStatus.DRAFT)) {
       await guardAndAuditOrderChange(tx, existing.id, body, userId);

@@ -92,7 +92,22 @@ export async function acceptClientOrderSubmissionBatch(userId: number, inputs: u
 /** User-scoped, DB-only polling. Never call live 1C on a receipt/status endpoint. */
 export async function getClientOrderSubmissionStatuses(userId: number, ids: string[]) {
   const rows = await prisma.clientOrderSubmission.findMany({ where: { userId, id: { in: ids } }, take: 100 });
-  return { receiptVersion: SUBMISSION_RECEIPT_VERSION, results: rows.map(submissionReceipt) };
+  if (!rows.length) return { receiptVersion: SUBMISSION_RECEIPT_VERSION, results: [] };
+  // The latest pending amendment is NOT the already accepted order. Return its
+  // independent state without changing orderGuid/state or falsely accepting it.
+  const orders = await prisma.order.findMany({ where: { createdByUserId: userId, source: 'MANAGER_APP',
+    submitRequestedAt: { not: null }, status: { notIn: ['DRAFT', 'CANCELLED', 'REJECTED'] },
+    OR: [{ clientOrderId: { in: rows.map(row => row.clientOrderId) } },
+      { guid: { in: rows.filter(row => row.clientOrderId.startsWith('legacy-server:')).map(row => row.clientOrderId.slice('legacy-server:'.length)) } }] },
+    select: { guid: true, clientOrderId: true, clientRevision: true, number1c: true, isPostedIn1c: true,
+      status: true, syncState: true, revision: true, totalAmount: true, updatedAt: true, _count: { select: { items: true } } } });
+  return { receiptVersion: SUBMISSION_RECEIPT_VERSION, results: rows.map(row => {
+    const order = orders.find(order => order.clientOrderId === row.clientOrderId || `legacy-server:${order.guid}` === row.clientOrderId);
+    return { ...submissionReceipt(row), submittedVersion: order ? { orderGuid: order.guid, clientRevision: order.clientRevision,
+      number1c: order.number1c, isPostedIn1c: order.isPostedIn1c, status: order.status, syncState: order.syncState,
+      revision: order.revision, totalAmount: order.totalAmount == null ? null : Number(order.totalAmount),
+      itemsCount: order._count.items, updatedAt: order.updatedAt.toISOString() } : null };
+  }) };
 }
 
 /** Bind a canonical DB-only read to the exact immutable operation, not to fields

@@ -20,7 +20,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.cache', () => ({
 }));
 import prisma, { pool } from '../src/prisma/client';
 import * as live from '../src/modules/clientOrders/clientOrders.onecLive';
-import { putClientOrderByClientId, getClientOrderByClientId, submitClientOrder } from '../src/modules/clientOrders/clientOrders.service';
+import { putClientOrderByClientId, getClientOrderByClientId, submitClientOrder, previewClientOrderAmendment, getStoredClientOrderForSubmission } from '../src/modules/clientOrders/clientOrders.service';
 import { draftBackupSchema, saveDraftBackup, getDraftBackup, DraftBackupConflict } from '../src/modules/clientOrders/clientOrderDraftBackups';
 import { clientOrderMutationSchema } from '../src/modules/clientOrders/clientOrders.schemas';
 import { requestClientOrdersExportWakeup } from '../src/services/clientOrdersExportWorker';
@@ -195,4 +195,80 @@ it('serializes concurrent backup revisions without losing the newest contents', 
   expect(copy?.clientRevision).toBe(2);
   expect(copy?.payload).toEqual({ comment: 'new', items: [] });
   expect(await prisma.clientOrderDraftBackup.count({ where: { userId, clientOrderId: id } })).toBe(1);
+});
+
+async function acceptedFixture() {
+  const id = randomUUID();
+  product.stock.available = 100;
+  const initial = { ...body(), items: [{ ...body().items[0], quantity: 2 }] };
+  const sent = await putClientOrderByClientId(userId, id, initial, { storedResultOnly: true });
+  if (!sent.guid) throw new Error('Missing fixture order guid');
+  await prisma.order.update({ where: { guid: sent.guid }, data: { status: 'CONFIRMED', syncState: 'SYNCED',
+    number1c: `TEST-${id}`, isPostedIn1c: true, revision: { increment: 1 }, last1cSnapshot: { test: true } } });
+  return { id, initial, current: { ...await getStoredClientOrderForSubmission(sent.guid, userId), guid: sent.guid } };
+}
+
+it('incident 2 -> 1: requires explicit confirmation but not fresh free stock for a smaller accepted allocation', async () => {
+  const { id, initial, current } = await acceptedFixture();
+  product.stock.available = 0;
+  const change = { ...initial, clientRevision: 2, items: [{ ...initial.items[0], quantity: 1 }] };
+  await expect(putClientOrderByClientId(userId, id, change, { storedResultOnly: true }))
+    .rejects.toMatchObject({ details: { kind: 'ORDER_CHANGE_REVIEW_REQUIRED' } });
+  const preview = await previewClientOrderAmendment(userId, id, change);
+  expect((await previewClientOrderAmendment(userId, `legacy-server:${current.guid}`, { ...change, clientRevision: 1 })).orderGuid).toBe(current.guid);
+  expect(preview).toMatchObject({ requiresConfirmation: true, changes: [expect.objectContaining({ before: 2, after: 1 })] });
+  const sent = await putClientOrderByClientId(userId, id, { ...change,
+    integrity: { baseContentToken: preview.baseContentToken, confirmationToken: preview.confirmationToken } }, { storedResultOnly: true });
+  expect(sent).toMatchObject({ guid: current.guid, clientRevision: 2, syncState: 'QUEUED', totalAmount: 100 });
+  expect(await prisma.order.count({ where: { createdByUserId: userId, clientOrderId: id } })).toBe(1);
+  expect(sent.items[0].quantity).toBe(1);
+});
+
+it('does not allow an increase or movement to another warehouse using the previous accepted quantity', async () => {
+  const { id, initial, current } = await acceptedFixture();
+  product.stock.available = 0;
+  await expect(putClientOrderByClientId(userId, id, { ...initial, clientRevision: 2,
+    items: [{ ...initial.items[0], quantity: 3 }] }, { storedResultOnly: true }))
+    .rejects.toMatchObject({ code: 'STOCK_SHORTAGE', details: { items: [expect.objectContaining({ required: 3, available: 2 })] } });
+  await expect(putClientOrderByClientId(userId, id, { ...initial, clientRevision: 3, warehouseGuid: 'another-warehouse',
+    items: [{ ...initial.items[0], quantity: 1 }] }, { storedResultOnly: true }))
+    .rejects.toMatchObject({ code: 'STOCK_SHORTAGE', details: { items: [expect.objectContaining({ required: 1, available: 0 })] } });
+  expect(await getStoredClientOrderForSubmission(current.guid, userId)).toMatchObject({ clientRevision: 1, totalAmount: 200, syncState: 'SYNCED' });
+});
+
+it('incident stale content: read-only preview lists differences, never rebases a write silently, and fences subsequent changes', async () => {
+  const { id, initial, current } = await acceptedFixture();
+  await prisma.order.update({ where: { guid: current.guid }, data: { paymentForm: 'Наличная' } });
+  const change = { ...initial, clientRevision: 2, integrity: { baseContentToken: current.contentToken! },
+    items: [...initial.items, { ...initial.items[0], lineGuid: 'extra-line', quantity: 1 }] };
+  await expect(putClientOrderByClientId(userId, id, change, { storedResultOnly: true }))
+    .rejects.toMatchObject({ details: { kind: 'ORDER_CONTENT_CONFLICT' } });
+  const before = await getStoredClientOrderForSubmission(current.guid, userId);
+  const preview = await previewClientOrderAmendment(userId, id, change);
+  expect(preview.changes).toContainEqual(expect.objectContaining({ reason: 'Добавление строки' }));
+  expect(await getStoredClientOrderForSubmission(current.guid, userId)).toEqual(before);
+  await expect(previewClientOrderAmendment(otherUserId, id, change)).rejects.toMatchObject({ status: 404 });
+  await prisma.order.update({ where: { guid: current.guid }, data: { comment: 'Concurrent 1C change' } });
+  await expect(putClientOrderByClientId(userId, id, { ...change, integrity: { baseContentToken: preview.baseContentToken } }, { storedResultOnly: true }))
+    .rejects.toMatchObject({ details: { kind: 'ORDER_CONTENT_CONFLICT' } });
+  const refreshed = await previewClientOrderAmendment(userId, id, change);
+  const result = await putClientOrderByClientId(userId, id, { ...change, integrity: { baseContentToken: refreshed.baseContentToken } }, { storedResultOnly: true });
+  expect(result.guid).toBe(current.guid);
+  expect(result.items).toHaveLength(2);
+});
+
+it('does not use an accepted-stock allowance after the baseline changes during live validation', async () => {
+  const { id, initial, current } = await acceptedFixture();
+  const change = { ...initial, clientRevision: 2, items: [{ ...initial.items[0], quantity: 1 }] };
+  const preview = await previewClientOrderAmendment(userId, id, change);
+  product.stock.available = 0;
+  jest.mocked(live.getLiveProductsByGuids).mockImplementationOnce(async () => {
+    await prisma.order.update({ where: { guid: current.guid }, data: { comment: 'Changed during stock read' } });
+    return [product];
+  });
+  await expect(putClientOrderByClientId(userId, id, { ...change,
+    integrity: { baseContentToken: preview.baseContentToken, confirmationToken: preview.confirmationToken } }, { storedResultOnly: true }))
+    .rejects.toMatchObject({ details: { kind: 'ORDER_CONTENT_CONFLICT' } });
+  expect(await getStoredClientOrderForSubmission(current.guid, userId)).toMatchObject({ clientRevision: 1,
+    syncState: 'SYNCED', totalAmount: 200, comment: 'Changed during stock read' });
 });
