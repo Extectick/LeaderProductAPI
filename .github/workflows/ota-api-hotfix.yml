@@ -1,136 +1,41 @@
-name: Production order amendment release verification
+name: Scoped recovery of order 126165
 on:
   workflow_dispatch:
     inputs:
-      backup:
-        type: boolean
-        default: false
-      verify_api:
-        type: boolean
-        default: false
-      expected_sha:
+      phase:
+        type: choice
+        options: [inspect]
+        default: inspect
+      source_revision:
+        type: string
+        default: ''
+      source_hash:
         type: string
         default: ''
 permissions:
   contents: read
 jobs:
-  verify:
+  recovery:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Guarded fresh production backup
-        if: inputs.backup
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          command_timeout: 5m
-          script: |
-            set -eu
-            umask 077
-            cd /opt/leader-api
-            target=/opt/leader-api/backups/prod-order-amendments-20261019
-            test ! -e "$target"
-            test "$(docker exec leader_postgres sh -c 'printf %s "$POSTGRES_DB"')" = LeaderAPI
-            df -h /
-            mkdir -m 700 "$target"
-            cp -p .env "$target/env.before"
-            cp -p docker-compose.yml "$target/compose.before.yml"
-            cp -p docker-compose.prod.yml "$target/compose.prod.before.yml"
-            sha256sum .env docker-compose.yml docker-compose.prod.yml > "$target/config-checksums.before"
-            git rev-parse HEAD > "$target/git.before.txt"
-            docker inspect leader_api --format '{{.Config.Image}}' > "$target/image.before.txt"
-            docker exec leader_postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-acl' > "$target/prod-before.dump"
-            docker exec -i leader_postgres pg_restore --list < "$target/prod-before.dump" > "$target/contents.txt"
-            test -s "$target/contents.txt"
-            chmod 600 "$target/prod-before.dump"
-            sha256sum "$target/prod-before.dump"
-            stat -c '%a %s %n' "$target/prod-before.dump"
-      - name: Read-only production API and document verification
+      - uses: actions/checkout@v4
+      - name: Load scoped script
+        run: echo "SCRIPT_B64=$(base64 -w0 scripts/diagnostics/recover-order126165-20261019.cjs)" >> "$GITHUB_ENV"
+      - name: Inspect or recover only the authorized document
         uses: appleboy/ssh-action@v1
         env:
-          VERIFY_API: ${{ inputs.verify_api }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-          SAVE_BASELINE: ${{ inputs.backup }}
+          RECOVERY_PHASE: ${{ inputs.phase }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          SOURCE_HASH: ${{ inputs.source_hash }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: VERIFY_API,EXPECTED_SHA,SAVE_BASELINE
-          command_timeout: 4m
+          envs: SCRIPT_B64,RECOVERY_PHASE,SOURCE_REVISION,SOURCE_HASH
+          command_timeout: 6m
           script: |
             set -eu
             cd /opt/leader-api
-            image=$(docker inspect leader_api --format '{{.Config.Image}}')
-            health=$(docker inspect leader_api --format '{{.State.Health.Status}}')
-            printf 'Deployed image: %s; health: %s\n' "$image" "$health"
-            test "$health" = healthy
-            if [ -n "$EXPECTED_SHA" ]; then test "$image" = "ghcr.io/extectick/leaderproductapi:$EXPECTED_SHA"; fi
-            sha256sum --check backups/prod-order-amendments-20261019/config-checksums.before
-            if [ "$VERIFY_API" = true ]; then
-              docker cp backups/prod-order-amendments-20261019/orders.before.json leader_api:/tmp/order-amendments-orders.before.json
-              owner=$(docker exec leader_api id -u)
-              docker exec -u 0 leader_api chown "$owner" /tmp/order-amendments-orders.before.json
-            fi
-            docker exec -e VERIFY_API="$VERIFY_API" -e SAVE_BASELINE="$SAVE_BASELINE" -i leader_api node <<'NODE'
-            const fs=require('fs'),crypto=require('crypto');
-            const {default:db,pool}=require('/app/dist/prisma/client');
-            const deadline=setTimeout(()=>process.exit(2),150000);
-            const ids=['cmveukveh0lfv01mygn1hddp4','cmverv1lc0h6901mynh2w0m2b'];
-            const guids=['33d4c1cc-d71d-48c4-b634-a1eeb15a7dbf','aa8f67ef-fb45-4d49-bc5c-efe0318e6456'];
-            const baseline='/tmp/order-amendments-orders.before.json';
-            const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
-            async function snapshot(){
-              const orders=await db.order.findMany({where:{guid:{in:guids},createdByUserId:99},orderBy:{guid:'asc'},select:{guid:true,clientOrderId:true,clientRevision:true,number1c:true,status:true,syncState:true,isPostedIn1c:true,totalAmount:true,items:{orderBy:{id:'asc'},select:{lineGuid:true,productId:true,quantity:true,quantityBase:true,price:true,lineAmount:true,isCancelled:true}}}});
-              if(orders.length!==2)throw Error('Target document identity not proven');
-              return orders.map(o=>({guid:o.guid,clientOrderId:o.clientOrderId,number1c:o.number1c,clientRevision:o.clientRevision,totalAmount:String(o.totalAmount),rows:o.items.length,isPostedIn1c:o.isPostedIn1c,businessHash:hash(o)}));
-            }
-            (async()=>{
-              if(process.env.NODE_ENV!=='production'||!String(process.env.ONEC_LP_APP_BASE_URL).toLowerCase().includes('torg2026'))throw Error('Not production');
-              const health=await fetch('http://127.0.0.1:3000/health');if(health.status!==200)throw Error('API unhealthy');
-              const before=await snapshot();
-              const receipts=await db.clientOrderSubmission.findMany({where:{id:{in:ids},userId:99},orderBy:{id:'asc'}});
-              if(receipts.length!==2)throw Error('Receipt owner mismatch');
-              console.log(JSON.stringify({stage:'documents',orders:before,receipts:receipts.map(r=>({id:r.id,state:r.state,revision:r.clientRevision,payloadHash:r.payloadHash,errorCode:r.errorCode}))}));
-              console.log(JSON.stringify({stage:'queue',counts:await db.clientOrderSubmission.groupBy({by:['state'],_count:true}),asyncEnabled:process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED,workerDisabled:process.env.CLIENT_ORDERS_SUBMISSION_WORKER_DISABLED,exportDisabled:process.env.CLIENT_ORDERS_EXPORT_WORKER_DISABLED}));
-              console.log(JSON.stringify({stage:'ota',release:await db.appOtaUpdate.findFirst({where:{channel:'prod',runtimeVersion:'0.1.35',isActive:true},orderBy:{createdAt:'desc'},select:{updateId:true,displayVersion:true,commitSha:true,runtimeVersion:true,rolloutPercent:true}})}));
-              if(process.env.SAVE_BASELINE==='true'){
-                fs.writeFileSync(baseline,JSON.stringify({orders:before,receipts:receipts.map(r=>({id:r.id,state:r.state,payloadHash:r.payloadHash}))}),{flag:'wx',mode:0o600});
-                console.log(JSON.stringify({stage:'baseline-saved',path:baseline}));
-              }
-              if(process.env.VERIFY_API==='true'){
-                const {previewClientOrderAmendment}=require('/app/dist/modules/clientOrders/clientOrders.service');
-                const {getClientOrderSubmissionStatuses}=require('/app/dist/modules/clientOrders/clientOrderSubmissions');
-                const user=await db.user.findUnique({where:{id:99},include:{role:true}});
-                if(!user?.isActive||user.deletedAt||!user.role?.name||!process.env.ACCESS_TOKEN_SECRET)throw Error('Active owner/auth not proven');
-                const jwt=require('jsonwebtoken').sign({userId:99,role:user.role.name,permissions:[],profileStatus:user.profileStatus},process.env.ACCESS_TOKEN_SECRET,{expiresIn:'2m'});
-                async function post(path,body){const r=await fetch('http://127.0.0.1:3000/api/client-orders'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+jwt},body:JSON.stringify(body),signal:AbortSignal.timeout(25000)});return {status:r.status,body:await r.json()};}
-                const status=await post('/submissions/status',{ids});
-                if(status.status!==200||status.body.data?.results?.length!==2)throw Error('Owner status endpoint failed');
-                for(const r of status.body.data.results){
-                  if(!r.submittedVersion?.number1c||!r.submittedVersion.isPostedIn1c||!['NEEDS_REVIEW','REJECTED'].includes(r.state))throw Error('Accepted and pending states not separated');
-                  console.log(JSON.stringify({stage:'owner-status',receipt:r.submissionId,state:r.state,submittedVersion:r.submittedVersion}));
-                }
-                if((await getClientOrderSubmissionStatuses(0,ids)).results.length)throw Error('Cross-owner status leaked');
-                for(const receipt of receipts){
-                  const order=before.find(o=>o.clientOrderId===receipt.clientOrderId);
-                  const proposal={...receipt.payload,clientRevision:Math.max(receipt.clientRevision,Number(order.clientRevision)+1)};
-                  const review=await post('/by-client-id/'+encodeURIComponent(receipt.clientOrderId)+'/review',proposal);
-                  if(review.status!==200||review.body.data?.orderGuid!==order.guid||!review.body.data?.baseContentToken)throw Error('Read-only review failed: '+review.status+' '+JSON.stringify(review.body.error));
-                  console.log(JSON.stringify({stage:'owner-preview',guid:order.guid,status:review.status,number1c:review.body.data.number1c,requiresConfirmation:review.body.data.requiresConfirmation,hasChallenge:Boolean(review.body.data.confirmationToken),changes:review.body.data.changes.map(c=>({reason:c.reason,before:c.before,after:c.after}))}));
-                  try{await previewClientOrderAmendment(0,receipt.clientOrderId,proposal);throw Error('Cross-owner review leaked');}catch(e){if(e.status!==404)throw e;}
-                }
-                const after=await snapshot();if(hash(before)!==hash(after))throw Error('Read-only checks changed document');
-                const old=JSON.parse(fs.readFileSync(baseline,'utf8'));
-                if(hash(old.orders)!==hash(after))throw Error('Business documents differ from release baseline');
-                const receiptsAfter=await db.clientOrderSubmission.findMany({where:{id:{in:ids}},orderBy:{id:'asc'},select:{id:true,state:true,payloadHash:true}});
-                if(hash(old.receipts)!==hash(receiptsAfter))throw Error('Immutable receipts changed');
-                console.log(JSON.stringify({stage:'release-proof',ownerScopedHttpPassed:true,crossOwnerDenied:true,documentsUnchanged:true,receiptsUnchanged:true,noResend:true}));
-              }
-            })().catch(e=>{console.error(JSON.stringify({failure:e.message}));process.exitCode=1}).finally(async()=>{await db.$disconnect();await pool.end();clearTimeout(deadline);process.exit(process.exitCode||0)});
-            NODE
-            if [ "$SAVE_BASELINE" = true ]; then
-              docker cp leader_api:/tmp/order-amendments-orders.before.json backups/prod-order-amendments-20261019/orders.before.json
-              chmod 600 backups/prod-order-amendments-20261019/orders.before.json
-            fi
+            test "$(docker inspect leader_api --format '{{.State.Health.Status}}')" = healthy
+            printf '%s' "$SCRIPT_B64" | base64 -d | docker exec -i -e RECOVERY_PHASE="$RECOVERY_PHASE" -e SOURCE_REVISION="$SOURCE_REVISION" -e SOURCE_HASH="$SOURCE_HASH" leader_api node
