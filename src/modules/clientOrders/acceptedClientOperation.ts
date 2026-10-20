@@ -39,3 +39,34 @@ export function proveAcceptedClientOperation(order: Order, mutation: Event, subm
     clientRevision, intent, ...payload } = candidate.data;
   return { clientRevision, intent, payload };
 }
+
+type Submission = { userId: number; clientOrderId: string; clientRevision: number;
+  orderGuid: string | null; state: string; payloadHash: string; payload: unknown } | null;
+
+/** A previously rejected draft may be accepted without an amendment audit.
+ * Its immutable receipt must prove the exact posted input; never reconstruct
+ * that input from current 1C fields or rewrite a historical rejection. */
+export function proveAcceptedSubmissionOperation(
+  order: Order & { guid: string | null; createdByUserId: number | null }, receipt: Submission, userId: number,
+) {
+  if (order.createdByUserId !== userId || !order.guid || order.source !== 'MANAGER_APP'
+    || order.syncState !== 'SYNCED' || order.status !== 'CONFIRMED' || !order.isPostedIn1c
+    || !order.number1c || order.lastExportError || order.last1cError || order.cancelRequestedAt
+    || !order.clientRevision || !order.clientPayloadHash || !receipt || receipt.state !== 'QUEUED'
+    || receipt.userId !== userId || receipt.orderGuid !== order.guid
+    || receipt.clientOrderId !== order.clientOrderId || receipt.clientRevision !== order.clientRevision) return null;
+  if (!receipt.payload || typeof receipt.payload !== 'object' || Array.isArray(receipt.payload)) return null;
+  // Keep transport hashing identical to submissionCanonicalJson (code-point
+  // ordering), independently of the normalized mutation hash above.
+  const stable = (value: any): any => Array.isArray(value) ? value.map(stable)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+  const transportHash = createHash('sha256').update(JSON.stringify(stable(receipt.payload))).digest('hex');
+  if (transportHash !== receipt.payloadHash) return null;
+  const candidate = clientOrderMutationSchema.safeParse(receipt.payload);
+  if (!candidate.success || candidate.data.intent !== 'SUBMIT' || candidate.data.clientRevision !== order.clientRevision
+    || clientOrderPayloadHash(candidate.data) !== order.clientPayloadHash) return null;
+  const { geoEvents: _geo, integrity: _integrity, offlineReview: _review, saveReason: _reason,
+    clientRevision, intent, ...payload } = candidate.data;
+  return { clientRevision, intent, payload };
+}

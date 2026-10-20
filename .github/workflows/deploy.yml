@@ -40,7 +40,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test
       - run: npm run type-check
       - run: npm run test:unit -- --runInBand __tests__/clientOrderAmendments.unit.test.ts
-      - run: npm run test:unit -- --runInBand __tests__/acceptedClientOperation.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/acceptedClientOperation.unit.test.ts __tests__/acceptedSubmissionOperation.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/clientOrderSubmissions.unit.test.ts __tests__/clientOrderSubmissionWorker.unit.test.ts __tests__/legacyOrderSubmission.unit.test.ts __tests__/clientOrders.delivery.unit.test.ts __tests__/onecBackgroundTimeout.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockWarehouseGroups.unit.test.ts __tests__/stockBalancesProducts.unit.test.ts __tests__/stockMovements.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockBalancesProducts.unit.test.ts

@@ -16,7 +16,7 @@ import { assertOrderIntegrity, OrderIntegrityError, lockOrderMutation, orderCont
 import { acceptedOrderQuantities, amendmentAvailableQuantity, previewOrderAmendment } from './clientOrderAmendments';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
-import { clientOrderPayloadHash, proveAcceptedClientOperation } from './acceptedClientOperation';
+import { clientOrderPayloadHash, proveAcceptedClientOperation, proveAcceptedSubmissionOperation } from './acceptedClientOperation';
 import { resolveDraftDeliveryMethod } from './clientOrders.delivery';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
@@ -5748,7 +5748,7 @@ function assertClientOrderCanBeSubmitted(order: {
 export async function getClientOrderByClientId(userId: number, clientOrderId: string) {
   const order = await prisma.order.findFirst({
     where: { createdByUserId: userId, clientOrderId },
-    select: { id: true, guid: true, clientOrderId: true, clientRevision: true, clientPayloadHash: true,
+    select: { id: true, guid: true, createdByUserId: true, clientOrderId: true, clientRevision: true, clientPayloadHash: true,
       source: true, syncState: true, status: true, isPostedIn1c: true, number1c: true,
       lastExportError: true, last1cError: true, cancelRequestedAt: true },
   });
@@ -5773,6 +5773,14 @@ export async function getClientOrderByClientId(userId: number, clientOrderId: st
       eventType: 'ORDER_CONTENT_SNAPSHOT', revision: mutation.revision - 1 }, orderBy: { createdAt: 'desc' },
       select: { revision: true, payload: true } }) : null;
     acceptedClientOperation = proveAcceptedClientOperation(order, mutation, submitted, change);
+    if (!acceptedClientOperation) {
+      const receipt = await prisma.clientOrderSubmission.findUnique({
+        where: { userId_clientOrderId_clientRevision: { userId, clientOrderId, clientRevision: order.clientRevision } },
+        select: { userId: true, clientOrderId: true, clientRevision: true, orderGuid: true,
+          state: true, payloadHash: true, payload: true },
+      });
+      acceptedClientOperation = proveAcceptedSubmissionOperation(order, receipt, userId);
+    }
   }
   return { ...detail, acceptedClientOperation };
 }
