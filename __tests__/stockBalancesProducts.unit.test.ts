@@ -7,7 +7,7 @@ jest.mock('../src/modules/onec/onec.lpApp.client', () => ({ getOnecLpAppStock: j
 jest.mock('../src/modules/clientOrders/stockWarehouseGroups', () => ({ enrichStockWarehouseGroups: jest.fn(async rows => rows) }));
 import { enrichProductsWithImages } from '../src/modules/clientOrders/clientOrders.productImages';
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
-  product: { findMany: jest.fn() }, stockBalance: { findMany: jest.fn() },
+  product: { findMany: jest.fn() }, stockBalance: { findMany: jest.fn() }, priceType: { findMany: jest.fn() }, productPrice: { findMany: jest.fn() },
   warehouse: { findMany: jest.fn() }, organization: { findMany: jest.fn() }, $queryRaw: jest.fn(),
   employeeProfile: { findUnique: jest.fn() }, managerStockReservation: { groupBy: jest.fn() },
 } }));
@@ -20,7 +20,7 @@ jest.mock('../src/middleware/checkUserStatus', () => ({ checkUserStatus: (_req: 
 jest.mock('../src/middleware/serviceAccess', () => ({ authorizeServiceAccess: () => (_req: any, _res: any, next: any) => next() }));
 const app = express().use(router);
 const guid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => { jest.clearAllMocks(); jest.mocked(prisma.priceType.findMany).mockResolvedValue([]); jest.mocked(prisma.productPrice.findMany).mockResolvedValue([]); });
 it('never converts an oversubscribed personal reserve into physical stock', () => {
   expect(managerStockAvailability(stockMetrics({ quantity: 3, reserved: 25, available: 0 }), 25)).toBe(3);
   expect(managerStockAvailability(stockMetrics({ quantity: 9, reserved: 6, available: 3 }), 6)).toBe(9);

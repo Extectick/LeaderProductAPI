@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 import prisma from '../src/prisma/client';
 import { listStockProducts, listWarehouseBalances, stockProductsQuery } from '../src/routes/stockBalancesProducts';
-jest.mock('../src/prisma/client', () => ({ __esModule: true, default: { product: { findMany: jest.fn() }, $queryRaw: jest.fn() } }));
+jest.mock('../src/prisma/client', () => ({ __esModule: true, default: { product: { findMany: jest.fn() }, priceType: { findMany: jest.fn(async()=>[]) }, productPrice: { findMany: jest.fn(async()=>[]) }, $queryRaw: jest.fn() } }));
 jest.mock('../src/modules/clientOrders/clientOrders.productImages', () => ({ enrichProductsWithImages: async (rows: unknown) => rows }));
 // Only disposable TEMP tables in the explicitly isolated local test database.
 const db = new Client({ host: '127.0.0.1', port: 54329, database: 'LeaderAPI_test', user: 'postgres', password: 'postgres' });
