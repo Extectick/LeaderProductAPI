@@ -14,4 +14,8 @@ After user authorization, verified no matching order in 1C, then submitted exact
 - Fresh production backup `/var/backups/leader-unsent-draft-20261011/LeaderAPI.dump`, mode 600; full decompression validated by pg_restore. Off-server copy `C:\Share\Backups\leader-api-prod\20261011-unsent-draft\LeaderAPI.dump`, restricted ACL. Bytes 140515427, SHA-256 `b1126a873f9f20da2d9a4db120989de285500604cc4e6826a8684692cd7f66af`.
 - Previous image retained as `rollback-unsent-draft-20261011`; protected env/Compose copies alongside the server backup. No cleanup, volume deletion or 1C extension update.
 
-Deployment and post-release verification are recorded after CI completes. User explicitly authorized production API and OTA release.
+## Production release
+
+User explicitly authorized production API and OTA release. API commit `677d4bf7c46ded180a83b17dd7f13f268ec68f31`, workflow `38120560465`: all checks/build/deploy succeeded. Running immutable image `sha256:0dfaa33fd0fa01ba16b714e20a43056fbe7e6195d92fcf35508e38becbb2e502`; source tag persisted in `.env`, all other settings preserved. API healthy and public HTTPS health 200. Dev image and container start time unchanged.
+
+Read-only verification inside the deployed container confirmed the new draft exemption and retained confirmation for the real exported order. The actual order still has four lines, RUB 162064, SYNCED and posted, no export error; exactly one API order has this owner/client ID. A user-scoped API GET returns clientRevision 6, the 1C number and GUID, enabling exact-revision phone reconciliation. No test order was created in production after deployment.

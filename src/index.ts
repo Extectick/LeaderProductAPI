@@ -10,6 +10,7 @@ import swaggerUi from 'swagger-ui-express';
 import { Server as SocketIOServer } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import prisma from './prisma/client';
+import { startClientOrderSubmissionWorker, stopClientOrderSubmissionWorker } from './services/clientOrderSubmissionWorker';
 
 // Routers
 import authRouter from './routes/auth';
@@ -500,6 +501,7 @@ if (ENV !== 'test') {
     startOnecSyncMaintenance();
     startCrashRetention();
     startClientOrdersExportWorker();
+    startClientOrderSubmissionWorker();
     startClientOrderInvoiceWorker();
 
     // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
@@ -556,6 +558,7 @@ process.on('SIGINT', async () => {
   stopOnecSyncMaintenance();
   stopCrashRetention();
   stopClientOrdersExportWorker();
+  stopClientOrderSubmissionWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});
@@ -571,6 +574,7 @@ process.on('SIGTERM', async () => {
   stopOnecSyncMaintenance();
   stopCrashRetention();
   stopClientOrdersExportWorker();
+  stopClientOrderSubmissionWorker();
   stopClientOrderInvoiceWorker();
   await stopTelegramUpdates().catch(() => {});
   await stopMaxUpdates().catch(() => {});

@@ -1,4 +1,7 @@
 import express from 'express';
+import { acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses, getClientOrderSubmissionOrder, submissionsBatchSchema, submissionsStatusSchema } from './clientOrderSubmissions';
+import { wakeClientOrderSubmissionWorker } from '../../services/clientOrderSubmissionWorker';
+import { getStoredClientOrderForSubmission } from './clientOrders.service';
 import { getCustomerPurchaseHistory, purchaseHistoryQuerySchema } from './customerPurchaseHistory';
 import { OrderIntegrityError } from '../orders/orderIntegrity';
 import { draftBackupSchema, DraftBackupConflict, getDraftBackup, saveDraftBackup } from './clientOrderDraftBackups';
@@ -52,6 +55,7 @@ import {
   copyClientOrder,
   createClientOrder,
   putClientOrderByClientId,
+  previewClientOrderAmendment,
   deleteDraftClientOrder,
   getClientOrderByGuid,
   getClientOrderExportDebug,
@@ -88,6 +92,37 @@ import {
 const router = express.Router();
 
 router.use(authenticateToken, checkUserStatus, authorizeServiceAccess('client_orders'));
+
+const asyncSubmissionsEnabled = (userId: number) => process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED === '1'
+  && (!process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_USER_IDS
+    || process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_USER_IDS.split(',').map(Number).includes(userId));
+
+router.get('/submissions/capabilities', authorizePermissions(['manage_client_orders']), (req: AuthRequest, res) => {
+  res.json(successResponse({ protocol: 'client-order-inbox-v1', enabled: asyncSubmissionsEnabled(req.user!.userId), batchSize: 10 }));
+});
+router.post('/submissions/batch', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  if (!asyncSubmissionsEnabled(req.user!.userId)) return res.status(404).json(errorResponse('Асинхронная отправка пока не включена', ErrorCodes.NOT_FOUND));
+  const parsed = submissionsBatchSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(errorResponse('Проверьте пакет документов (не более 10)', ErrorCodes.VALIDATION_ERROR));
+  try {
+    const receipt = await acceptClientOrderSubmissionBatch(req.user!.userId, parsed.data.items);
+    res.status(202).json(successResponse(receipt, 'Документы приняты сервером; результат записи в 1С появится отдельно'));
+    wakeClientOrderSubmissionWorker();
+  } catch (error) { return handleError(res, error, 'Не удалось принять документы'); }
+});
+router.post('/submissions/status', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = submissionsStatusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(errorResponse('Проверьте идентификаторы операций', ErrorCodes.VALIDATION_ERROR));
+  try { return res.json(successResponse(await getClientOrderSubmissionStatuses(req.user!.userId, parsed.data.ids))); }
+  catch (error) { return handleError(res, error, 'Не удалось проверить обработку документов'); }
+});
+router.get('/submissions/:id/order', authorizePermissions(['view_client_orders']), async (req: AuthRequest<{ id: string }>, res) => {
+  try {
+    const order = await getClientOrderSubmissionOrder(req.user!.userId, String(req.params.id), getStoredClientOrderForSubmission);
+    if (!order) return res.status(404).json(errorResponse('Заказ ещё обрабатывается', ErrorCodes.NOT_FOUND));
+    return res.json(successResponse(order));
+  } catch (error) { return handleError(res, error, 'Не удалось прочитать принятый заказ'); }
+});
 
 const validationMessage = (error: ZodError) => {
   const issue = error.issues[0];
@@ -619,6 +654,14 @@ router.get('/draft-backups/:clientOrderId', authorizePermissions(['view_client_o
     if (!backup) return res.status(404).json(errorResponse('Черновик не найден', ErrorCodes.NOT_FOUND));
     return res.json(successResponse(backup, 'Резервная копия черновика'));
   } catch (error) { return handleError(res, error, 'Не удалось прочитать резервную копию черновика'); }
+});
+
+router.post('/by-client-id/:clientOrderId/review', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {
+  const params = clientOrderIdParamsSchema.safeParse(req.params);
+  const body = clientOrderMutationSchema.safeParse(req.body);
+  if (!params.success || !body.success) return res.status(400).json(errorResponse('Проверьте данные заказа для согласования', ErrorCodes.VALIDATION_ERROR));
+  try { return res.json(successResponse(await previewClientOrderAmendment(req.user!.userId, params.data.clientOrderId, body.data))); }
+  catch (error) { return handleError(res, error, 'Не удалось согласовать изменения. Локальная копия сохранена.'); }
 });
 
 router.put('/by-client-id/:clientOrderId', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {

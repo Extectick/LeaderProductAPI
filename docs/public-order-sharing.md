@@ -24,6 +24,27 @@ Client contact settings are separate from login, verified phone and Telegram/MAX
 
 Use current saved API order rows for manager documents. A cached public snapshot covers live-only 1C documents; refresh it in a bounded, single-flight background path for active links. Never call 1C for every public page view, and keep a last good snapshot on transient failure. No 1C writes or extension changes.
 
+## Public weights
+
+Public items include nullable `weightKg` for the **whole line**, not one piece.
+The aggregate includes nullable `totalWeightKg`, `weightComplete` and
+`missingWeightItems`. A missing catalog mass is unknown, never a fabricated zero;
+a partial sum must not be presented as a complete order weight.
+
+Explicit mass units and original package coefficients are respected. Do not parse
+mass from product names. Arithmetic uses Decimal and excludes cancelled lines.
+Current saved quantities always recompute the line mass. Unit/reference changes
+cannot reuse a different package's cached mass.
+
+Local catalogs do not persist physical mass. A bounded, reference-only 1C read
+therefore fills a private per-unit cache in the existing share snapshot JSON,
+without a schema migration or business-order writes. Public GETs do not await
+1C: at most three refreshes run concurrently, a link has a one-minute retry budget,
+large orders use batches of 50 and successful reference cycles are checked every
+six hours. Transient failures retain the last known reference masses. Concurrent
+rotation/revocation/refresh is protected with a version/token/owner/customer CAS.
+The private cache and all other catalog prices/identifiers stay out of public JSON.
+
 ## Messenger-safe path links
 
 `ORDER_SHARE_PATH_LINKS_ENABLED=1` changes newly copied addresses to `/order/<code>` without rotating the existing capability or changing expiry. Existing `/order/#<code>` links remain supported by the public page. Generic messenger preview cards can omit fragments; path codes stay in the destination sent to the server. This does not suppress the messenger's own external-site warning.

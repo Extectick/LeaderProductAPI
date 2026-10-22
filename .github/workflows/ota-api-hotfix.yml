@@ -1,0 +1,58 @@
+name: Build narrow production OTA API fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Guard the exact production overlay scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = main
+          git merge-base --is-ancestor cbb2e6d "$GITHUB_SHA"
+          unexpected=$(git diff --name-only cbb2e6d "$GITHUB_SHA" | grep -Ev '^(src/routes/ota.ts|src/utils/otaExpoConfig.ts|scripts/publish-ota-update-db.js|__tests__/ota.manifest.unit.test.ts|\.github/workflows/(deploy|ota-api-hotfix).yml|deploy/ota-hotfix/Dockerfile|docs/production-ota-manifest-fix.md)$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "Changes outside the reviewed overlay; use a full release instead: $unexpected"
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test
+      - run: npm run type-check
+      - run: npm run test:unit -- --runInBand __tests__/ota.manifest.unit.test.ts __tests__/crashEvents.unit.test.ts __tests__/crashRoutes.unit.test.ts __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/clientOrders.invoiceShadow.unit.test.ts
+      - run: npm run build
+      - name: Stage only the three reviewed runtime files
+        run: |
+          mkdir -p .ota-hotfix/dist/routes .ota-hotfix/dist/utils .ota-hotfix/scripts
+          cp dist/routes/ota.js .ota-hotfix/dist/routes/
+          cp dist/utils/otaExpoConfig.js .ota-hotfix/dist/utils/
+          cp scripts/publish-ota-update-db.js .ota-hotfix/scripts/
+          cp deploy/ota-hotfix/Dockerfile .ota-hotfix/Dockerfile
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .ota-hotfix
+          push: true
+          platforms: linux/amd64
+          build-args: SOURCE_REVISION=${{ github.sha }}
+          tags: ghcr.io/extectick/leaderproductapi:${{ github.sha }}

@@ -12,9 +12,12 @@ import prisma from '../../prisma/client';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
-import { assertOrderIntegrity, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
+import { assertOrderIntegrity, OrderIntegrityError, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
+import { acceptedOrderQuantities, amendmentAvailableQuantity, previewOrderAmendment } from './clientOrderAmendments';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
+import { clientOrderPayloadHash, proveAcceptedClientOperation, proveAcceptedSubmissionOperation } from './acceptedClientOperation';
+import { resolveDraftDeliveryMethod } from './clientOrders.delivery';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
 import {
@@ -3776,6 +3779,15 @@ async function getClientOrdersTodaySummaryFresh(
   }
 }
 
+/** Inbox reconciliation must not wait for 1C detail/read-through caches. */
+export async function getStoredClientOrderForSubmission(guid: string, userId: number) {
+  const order = await prisma.order.findFirst({ where: { guid, createdByUserId: userId, source: OrderSource.MANAGER_APP }, select: orderDetailSelect });
+  if (!order) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ ещё не подготовлен сервером');
+  return { ...mapOrderDetail(order), draftReview: order.draftReview,
+    lastExportError: normalizeClientOrderPublicError(order.lastExportError),
+    last1cError: normalizeClientOrderPublicError(order.last1cError) };
+}
+
 export async function getClientOrderByGuid(guid: string, userId?: number) {
   const order = await prisma.order.findFirst({
     where: {
@@ -3897,6 +3909,9 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             origin: 'merged',
             source: order.source,
             revision: order.revision,
+            // Old snapshots may have erased only this API field. Use the actual
+            // read-only 1C value rather than hiding both delivery choices.
+            deliveryMethod: mapped.deliveryMethod ?? liveDetail.deliveryMethod,
             queuePosition: null,
             lastExportError: normalizeClientOrderPublicError(order.lastExportError),
             last1cError: resolveMergedClientOrderLast1cError(liveDetail, order.last1cError),
@@ -5476,24 +5491,6 @@ export async function getClientOrdersProductsByGuids(body: ClientOrdersBatchProd
   */
 }
 
-function stableJsonValue(value: unknown): unknown {
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(stableJsonValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, stableJsonValue(item)])
-    );
-  }
-  return value;
-}
-
-function clientOrderPayloadHash(body: ClientOrderMutationBody) {
-  const { clientRevision: _clientRevision, intent: _intent, integrity: _integrity, ...payload } = body;
-  return createHash('sha256').update(JSON.stringify(stableJsonValue(payload))).digest('hex');
-}
-
 type OrderGeoEventInput = NonNullable<ClientOrderCreateBody['geoEvents']>[number];
 
 async function saveOrderGeoEvents(
@@ -5565,7 +5562,8 @@ function referenceStale(kind: string, guid: string): never {
  */
 async function validateOfflineSubmission(
   body: ClientOrderMutationBody,
-  managerGuid: string | null
+  managerGuid: string | null,
+  acceptedQuantities: Map<string, number> = new Map()
 ): Promise<ClientOrderMutationBody> {
   if (!body.offlineReview || body.intent !== 'SUBMIT') return body;
   if (!managerGuid) {
@@ -5645,7 +5643,8 @@ async function validateOfflineSubmission(
       if (line.packageGuid && !pack) referenceStale('Упаковка', line.packageGuid);
       const multiplier = pack?.multiplier && pack.multiplier > 0 ? pack.multiplier : 1;
       const requiredBase = line.isCancelled ? 0 : Number(line.quantity) * multiplier;
-      const available = Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0);
+      const available = amendmentAvailableQuantity(Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0),
+        acceptedQuantities.get(product.guid.toLowerCase()) ?? 0);
       const requirement = requirements.get(product.guid) ?? {
         productGuid: product.guid,
         name: product.name,
@@ -5749,18 +5748,78 @@ function assertClientOrderCanBeSubmitted(order: {
 export async function getClientOrderByClientId(userId: number, clientOrderId: string) {
   const order = await prisma.order.findFirst({
     where: { createdByUserId: userId, clientOrderId },
-    select: { guid: true },
+    select: { id: true, guid: true, createdByUserId: true, clientOrderId: true, clientRevision: true, clientPayloadHash: true,
+      source: true, syncState: true, status: true, isPostedIn1c: true, number1c: true,
+      lastExportError: true, last1cError: true, cancelRequestedAt: true },
   });
   if (!order?.guid) {
     throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ с таким идентификатором устройства не найден');
   }
-  return getClientOrderByGuid(order.guid, userId);
+  const detail = await getClientOrderByGuid(order.guid, userId);
+  // Read-only acceptance evidence lets a phone retire a redundant error copy,
+  // never overwrite its newer content or resend an already posted document.
+  let acceptedClientOperation = null;
+  if (order.syncState === 'SYNCED' && order.isPostedIn1c && order.clientRevision) {
+    const matchingPayload = { AND: [
+      { payload: { path: ['clientOrderId'], equals: clientOrderId } },
+      { payload: { path: ['clientRevision'], equals: order.clientRevision } },
+    ] };
+    const mutation = await prisma.orderEvent.findFirst({ where: { orderId: order.id, ...matchingPayload,
+      eventType: { in: ['CLIENT_ORDER_CREATED', 'CLIENT_ORDER_UPDATED'] } },
+      orderBy: { createdAt: 'desc' }, select: { revision: true, payload: true } });
+    const submitted = mutation ? await prisma.orderEvent.findFirst({ where: { orderId: order.id, ...matchingPayload,
+      eventType: 'CLIENT_ORDER_SUBMITTED', revision: mutation.revision }, select: { revision: true, payload: true } }) : null;
+    const change = mutation ? await prisma.orderEvent.findFirst({ where: { orderId: order.id,
+      eventType: 'ORDER_CONTENT_SNAPSHOT', revision: mutation.revision - 1 }, orderBy: { createdAt: 'desc' },
+      select: { revision: true, payload: true } }) : null;
+    acceptedClientOperation = proveAcceptedClientOperation(order, mutation, submitted, change);
+    if (!acceptedClientOperation) {
+      const receipt = await prisma.clientOrderSubmission.findUnique({
+        where: { userId_clientOrderId_clientRevision: { userId, clientOrderId, clientRevision: order.clientRevision } },
+        select: { userId: true, clientOrderId: true, clientRevision: true, orderGuid: true,
+          state: true, payloadHash: true, payload: true },
+      });
+      acceptedClientOperation = proveAcceptedSubmissionOperation(order, receipt, userId);
+    }
+  }
+  return { ...detail, acceptedClientOperation };
+}
+
+/** Read-only, owner-scoped review. It NEVER saves, queues, or changes a receipt. */
+export async function previewClientOrderAmendment(userId: number, clientOrderId: string, body: ClientOrderMutationBody) {
+  const legacyGuid = clientOrderId.startsWith('legacy-server:') ? clientOrderId.slice('legacy-server:'.length) : null;
+  const order = await prisma.order.findFirst({ where: { createdByUserId: userId, source: OrderSource.MANAGER_APP,
+    ...(legacyGuid ? { guid: legacyGuid } : { clientOrderId }) }, select: orderDetailSelect });
+  if (!order) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Исходный заказ не найден. Локальная копия сохранена.');
+  ensureEditable(order);
+  if (order.status === OrderStatus.CANCELLED) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Отменённый заказ нельзя изменять отправкой.');
+  if (!legacyGuid && order.clientRevision != null && body.clientRevision <= order.clientRevision) throw new ClientOrdersError(409, ErrorCodes.CONFLICT,
+    'На сервере уже есть эта или более новая версия. Обновите заказ перед согласованием; локальные правки сохранены.');
+  if (order.syncState === OrderSyncState.QUEUED || order.syncState === OrderSyncState.CANCEL_REQUESTED) {
+    throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Предыдущая отправка ещё не завершена. Дождитесь результата; изменения сохранены.');
+  }
+  const products = await prisma.product.findMany({ where: { guid: { in: body.items.map(line => line.productGuid) } }, select: { guid: true, name: true } });
+  const names = new Map(products.map(product => [product.guid!.toLowerCase(), product.name]));
+  const referenceNames = await Promise.all([
+    body.organizationGuid !== order.organization?.guid ? prisma.organization.findUnique({ where: { guid: body.organizationGuid }, select: { guid: true, name: true } }) : null,
+    body.counterpartyGuid !== order.counterparty?.guid ? prisma.counterparty.findUnique({ where: { guid: body.counterpartyGuid }, select: { guid: true, name: true } }) : null,
+    body.warehouseGuid && body.warehouseGuid !== order.warehouse?.guid ? prisma.warehouse.findUnique({ where: { guid: body.warehouseGuid }, select: { guid: true, name: true } }) : null,
+    body.agreementGuid && body.agreementGuid !== order.agreement?.guid ? prisma.clientAgreement.findUnique({ where: { guid: body.agreementGuid }, select: { guid: true, name: true } }) : null,
+    body.contractGuid && body.contractGuid !== order.contract?.guid ? prisma.clientContract.findUnique({ where: { guid: body.contractGuid }, select: { guid: true, name: true, number: true } }) : null,
+    body.priceTypeGuid && body.priceTypeGuid !== order.priceType?.guid ? prisma.priceType.findUnique({ where: { guid: body.priceTypeGuid }, select: { guid: true, name: true } }) : null,
+    body.deliveryAddressGuid && body.deliveryAddressGuid !== order.deliveryAddress?.guid ? prisma.deliveryAddress.findFirst({
+      where: { guid: body.deliveryAddressGuid, counterparty: { guid: body.counterpartyGuid } }, select: { guid: true, name: true, fullAddress: true } }) : null,
+  ]);
+  for (const reference of referenceNames) if (reference?.guid) names.set(reference.guid.toLowerCase(), reference.name
+    || ('fullAddress' in reference ? reference.fullAddress : '') || ('number' in reference ? reference.number : '') || reference.guid);
+  return previewOrderAmendment(order, body, userId, names);
 }
 
 export async function putClientOrderByClientId(
   userId: number,
   clientOrderId: string,
-  body: ClientOrderMutationBody
+  body: ClientOrderMutationBody,
+  options?: { storedResultOnly?: boolean }
 ) {
   const sourceUpdatedAt = now();
   const requestedBody = body;
@@ -5780,7 +5839,7 @@ export async function putClientOrderByClientId(
   if (committed) {
     const committedRevision = committed.clientRevision ?? 0;
     if (body.clientRevision < committedRevision) {
-      return getClientOrderByGuid(committed.guid!, userId);
+      return options?.storedResultOnly ? getStoredClientOrderForSubmission(committed.guid!, userId) : getClientOrderByGuid(committed.guid!, userId);
     }
     if (body.clientRevision === committedRevision) {
       const rejectedBackup = committed.draftReview && body.offlineReview ? await getDraftBackup(userId, clientOrderId) : null;
@@ -5794,7 +5853,7 @@ export async function putClientOrderByClientId(
         );
       }
       if (body.intent === 'SAVE' || isOrderQueued(committed) || committed.submitRequestedAt) {
-        return getClientOrderByGuid(committed.guid!, userId);
+        return options?.storedResultOnly ? getStoredClientOrderForSubmission(committed.guid!, userId) : getClientOrderByGuid(committed.guid!, userId);
       }
     }
   }
@@ -5806,8 +5865,12 @@ export async function putClientOrderByClientId(
   const managerGuid = await getManagerGuidForUser(userId);
   let rejectedSubmission: ClientOrdersError | null = null;
   let draftReview: Prisma.InputJsonValue | undefined;
+  const validationOrder = committed && body.offlineReview && body.intent === 'SUBMIT'
+    ? await prisma.order.findFirst({ where: { guid: committed.guid, createdByUserId: userId, source: OrderSource.MANAGER_APP }, select: orderDetailSelect }) : null;
+  const acceptedQuantities = acceptedOrderQuantities(validationOrder, body);
+  const validationContentToken = acceptedQuantities.size ? orderContentToken(validationOrder) : null;
   try {
-    body = await validateOfflineSubmission(body, managerGuid);
+    body = await validateOfflineSubmission(body, managerGuid, acceptedQuantities);
   } catch (error) {
     if (!(error instanceof ClientOrdersError)) throw error;
     const review = { code: error.code, message: error.message, details: error.details ?? null,
@@ -5851,6 +5914,8 @@ export async function putClientOrderByClientId(
         clientPayloadHash: true,
         draftReview: true,
         submitRequestedAt: true,
+        number1c: true,
+        deliveryMethod: true,
         status: true,
         syncState: true,
         source: true,
@@ -5910,6 +5975,7 @@ export async function putClientOrderByClientId(
           syncState: OrderSyncState.QUEUED,
           queuedAt,
           submitRequestedAt: queuedAt,
+          deliveryMethod: resolveDraftDeliveryMethod(existing.deliveryMethod, null, existing.number1c),
           exportAttempts: 0,
           lastExportError: null,
           last1cError: null,
@@ -5935,6 +6001,11 @@ export async function putClientOrderByClientId(
 
     // Correcting a rejected, never-submitted draft cannot reduce accepted 1C facts.
     // All queued/exported orders retain the normal integrity confirmation guard.
+    if (validationContentToken && existing) {
+      const current = await tx.order.findUniqueOrThrow({ where: { id: existing.id }, select: orderDetailSelect });
+      if (orderContentToken(current) !== validationContentToken) throw new OrderIntegrityError(
+        'Заказ изменился во время проверки остатков. Согласуйте изменения и повторите отправку.', { kind: 'ORDER_CONTENT_CONFLICT' });
+    }
     if (existing && (!existing.draftReview || existing.submitRequestedAt
       || existing.syncState !== OrderSyncState.DRAFT || existing.status !== OrderStatus.DRAFT)) {
       await guardAndAuditOrderChange(tx, existing.id, body, userId);
@@ -5980,7 +6051,7 @@ export async function putClientOrderByClientId(
       comment: body.comment ?? null,
       deliveryDate,
       paymentForm: body.paymentForm ?? null,
-      deliveryMethod: body.deliveryMethod ?? null,
+      deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, existing?.deliveryMethod, existing?.number1c),
       invoiceRequested: body.invoiceRequested,
       trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
       trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
@@ -6070,7 +6141,7 @@ export async function putClientOrderByClientId(
     requestClientOrdersExportWakeup();
     if (body.offlineReview) await markDraftSubmitted(userId, clientOrderId, body.clientRevision, result.guid);
   }
-  return getClientOrderByGuid(result.guid, userId);
+  return options?.storedResultOnly ? getStoredClientOrderForSubmission(result.guid, userId) : getClientOrderByGuid(result.guid, userId);
 }
 
 export async function createClientOrder(userId: number, body: ClientOrderCreateBody) {
@@ -6103,7 +6174,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod),
         invoiceRequested: body.invoiceRequested,
         trackingRoutePointId: trackingSnapshot?.routePointId ?? null,
         trackingSnapshot: trackingSnapshot?.snapshot ?? undefined,
@@ -6135,7 +6206,7 @@ export async function createClientOrder(userId: number, body: ClientOrderCreateB
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod),
         invoiceRequested: body.invoiceRequested,
         trackingSnapshot: trackingSnapshot?.snapshot ?? null,
         generalDiscountPercent: body.generalDiscountPercent ?? null,
@@ -6180,7 +6251,7 @@ function buildClientOrderCopyPayload(source: any): ClientOrderCreateBody {
     priceTypeGuid: source.priceType?.guid ?? source.agreement?.priceType?.guid ?? null,
     deliveryDate: dateForCreatePayload(source.deliveryDate),
     paymentForm: source.paymentForm ?? null,
-    deliveryMethod: source.deliveryMethod ?? null,
+    deliveryMethod: resolveDraftDeliveryMethod(source.deliveryMethod),
     comment: source.comment ?? undefined,
     currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
     saveReason: 'manual',
@@ -6236,6 +6307,26 @@ export function buildStoredClientOrderCopyItemData(item: any, sourceUpdatedAt: D
 }
 
 async function copyStoredClientOrder(guid: string, userId: number) {
+  const candidate = await prisma.order.findFirst({
+    where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
+    select: { guid: true, revision: true, number1c: true, deliveryMethod: true },
+  });
+  if (!candidate) return null;
+  let liveDeliveryMethod: string | null = null;
+  if (!candidate.deliveryMethod?.trim() && candidate.number1c) {
+    const managerGuid = await getManagerGuidForUser(userId);
+    if (managerGuid) {
+      try {
+        const live = await onecLive(
+          () => findLiveClientOrder({ managerGuid, appGuid: guid, number1c: candidate.number1c }),
+          'Ошибка получения способа доставки исходного заказа из 1С',
+        );
+        if (live?.appGuid?.toLowerCase() === guid.toLowerCase() && live.number1c === candidate.number1c) {
+          liveDeliveryMethod = live.deliveryMethod;
+        }
+      } catch { /* Copying stays available during outages; only the NEW copy gets the default. */ }
+    }
+  }
   return prisma.$transaction(async (tx) => {
     const source = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
@@ -6301,7 +6392,8 @@ async function copyStoredClientOrder(guid: string, userId: number) {
         comment: source.comment,
         deliveryDate: source.deliveryDate,
         paymentForm: source.paymentForm,
-        deliveryMethod: source.deliveryMethod,
+        deliveryMethod: resolveDraftDeliveryMethod(source.deliveryMethod,
+          source.revision === candidate.revision ? liveDeliveryMethod : null),
         currency: source.currency ?? DEFAULT_ORDER_CURRENCY,
         totalAmount: new Prisma.Decimal(0),
         generalDiscountPercent: source.generalDiscountPercent,
@@ -6393,6 +6485,8 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         source: true,
         isPostedIn1c: true,
         hasRealization: true,
+        deliveryMethod: true,
+        number1c: true,
       },
     });
 
@@ -6430,7 +6524,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
         comment: body.comment ?? null,
         deliveryDate: body.deliveryDate ?? defaultDeliveryDate(),
         paymentForm: body.paymentForm ?? null,
-        deliveryMethod: body.deliveryMethod ?? null,
+        deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, order.deliveryMethod, order.number1c),
         invoiceRequested: body.invoiceRequested,
         currency: DEFAULT_ORDER_CURRENCY,
         totalAmount: prepared.totalAmount,
@@ -6462,7 +6556,7 @@ export async function updateClientOrder(guid: string, userId: number, body: Clie
           comment: body.comment ?? null,
           deliveryDate: body.deliveryDate?.toISOString?.() ?? null,
           paymentForm: body.paymentForm ?? null,
-          deliveryMethod: body.deliveryMethod ?? null,
+          deliveryMethod: resolveDraftDeliveryMethod(body.deliveryMethod, order.deliveryMethod, order.number1c),
           invoiceRequested: body.invoiceRequested,
           trackingSnapshot: null,
           generalDiscountPercent: body.generalDiscountPercent ?? null,
@@ -6498,6 +6592,8 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         warehouseId: true,
         deliveryAddressId: true,
         deliveryDate: true,
+        deliveryMethod: true,
+        number1c: true,
         items: {
           select: {
             quantity: true,
@@ -6558,6 +6654,8 @@ export async function submitClientOrder(guid: string, userId: number, body: Clie
         syncState: OrderSyncState.QUEUED,
         queuedAt,
         submitRequestedAt: queuedAt,
+        deliveryMethod: order.status === OrderStatus.DRAFT
+          ? resolveDraftDeliveryMethod(order.deliveryMethod, null, order.number1c) : undefined,
         cancelRequestedAt: null,
         cancelReason: null,
         exportAttempts: 0,

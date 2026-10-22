@@ -1495,8 +1495,10 @@ export const handleOrdersSnapshotBatch = async (req: Request, res: Response) => 
               organizationId: organizationId ?? undefined,
               comment: item.comment ?? null,
               deliveryDate: item.deliveryDate ?? null,
-              paymentForm: item.paymentForm ?? null,
-              deliveryMethod: item.deliveryMethod ?? null,
+              // Missing legacy fields must not erase a saved delivery choice.
+              // Explicit null still means that 1C intentionally cleared it.
+              paymentForm: item.paymentForm,
+              deliveryMethod: item.deliveryMethod,
               currency: item.currency ?? undefined,
               totalAmount:
                 item.totalAmount !== undefined && item.totalAmount !== null

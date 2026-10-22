@@ -3,9 +3,11 @@ jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
   order: { findUnique: jest.fn() }, user: { findFirst: jest.fn() }, productImage: { findMany: jest.fn(), findFirst: jest.fn() }, $transaction: jest.fn(),
 } }));
 jest.mock('../src/modules/clientOrders/clientOrders.service', () => ({ getClientOrderByGuid: jest.fn() }));
+jest.mock('../src/modules/orderShare/orderShare.weightRefresh', () => ({ scheduleShareWeightRefresh: jest.fn() }));
 import prisma from '../src/prisma/client';
 import { authorizePublicShare, publishOrder, resolvePublicShare, sharedImageKey, publicOrderSelect, presentOwnedShare } from '../src/modules/orderShare/orderShare.service';
 import { encryptShareToken } from '../src/modules/orderShare/orderShare.model';
+import { orderWeightKey } from '../src/modules/orderShare/orderShare.weights';
 const db = prisma as any;
 const link = { id: 'share', ownerId: 1, orderGuid: 'order', localOrderId: 'local', tokenHash: 'hash', counterpartyGuid: 'client',
   expiresAt: new Date(Date.now() + 86400000), revokedAt: null, refreshedAt: new Date() };
@@ -50,6 +52,28 @@ test('public response strips all private keys including identifiers and changes 
   const second = await resolvePublicShare('token');
   expect(second.etag).not.toBe(first.etag);
   expect(second.data.total).toBe('150.00');
+});
+
+test('saved reference weights recompute current quantities and change ETag without a 1C call', async () => {
+  const local = await db.order.findUnique();
+  const item = local.items[0];
+  db.orderShareLink.findUnique.mockResolvedValue({ ...link, snapshot: {
+    _weightReferences: { [orderWeightKey(item)]: '0.815' }, internalSecret: 'do-not-publish',
+  } });
+  const first = await resolvePublicShare('token');
+  expect(first.data).toMatchObject({ totalWeightKg: '1.63', weightComplete: true, missingWeightItems: 0 });
+  expect(first.data.items[0].weightKg).toBe('1.63');
+  expect(JSON.stringify(first.data)).not.toMatch(/_weight|productGuid|weightReferences|do-not-publish/);
+  db.order.findUnique.mockResolvedValue({ ...local, items: [{ ...item, quantity: 3 }] });
+  const changed = await resolvePublicShare('token');
+  expect(changed.data.totalWeightKg).toBe('2.445');
+  expect(changed.etag).not.toBe(first.etag);
+});
+
+test('unknown weights are null and cannot masquerade as a complete zero total', async () => {
+  const result = await resolvePublicShare('token');
+  expect(result.data).toMatchObject({ totalWeightKg: null, weightComplete: false, missingWeightItems: 1 });
+  expect(result.data.items[0].weightKg).toBeNull();
 });
 test('customer/owner change or order deletion permanently revokes access', async () => {
   db.order.findUnique.mockResolvedValue({ createdByUserId: 1, counterparty: { guid: 'another' } });

@@ -1,5 +1,4 @@
 import { canonicalSnapshotPayload } from './onec.orderSnapshotReceipt';
-
 type SnapshotIdentity = {
   guid?: unknown; number1c?: unknown; revision?: unknown; baseRevision?: unknown;
   sourceUpdatedAt?: unknown; items?: unknown;
@@ -39,7 +38,6 @@ export function canRetryMissingReferenceSnapshot(order: FailedSnapshotOrder, inc
   return (basedOnCurrent || alignedWithAck)
     && canonicalSnapshotPayload(incoming) === canonicalSnapshotPayload(failed);
 }
-
 /** Retry only the rejected read snapshot; never acknowledge a pending manager edit. */
 export function canRetryDuplicateLineSnapshot(order: FailedSnapshotOrder, incoming: SnapshotIdentity): boolean {
   if (order.source !== 'MANAGER_APP' || order.syncState !== 'ERROR'

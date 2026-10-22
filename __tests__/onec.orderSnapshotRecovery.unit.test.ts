@@ -58,7 +58,6 @@ describe('retry of a missing catalog reference', () => {
     expect(canRetryMissingReferenceSnapshot(missing(), { ...snapshot(), ...extra })).toBe(false);
   });
 });
-
 describe('snapshot controller recovery', () => {
   let tx: any;
   let res: any;
@@ -83,6 +82,16 @@ describe('snapshot controller recovery', () => {
     res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   });
   const run = async (item: unknown = snapshot()) => handleOrdersSnapshotBatch({ body: { secret: 'secret', items: [item] } } as any, res);
+  it('omitted legacy delivery/payment fields do not clear a stored selection', async () => {
+    await run();
+    const data = tx.order.update.mock.calls[0][0].data;
+    expect(data.deliveryMethod).toBeUndefined();
+    expect(data.paymentForm).toBeUndefined();
+  });
+  it.each([null, 'Самовывоз', 'ДоКлиента'])('applies explicitly transmitted delivery %p', async deliveryMethod => {
+    await run({ ...snapshot(), deliveryMethod, paymentForm: null });
+    expect(tx.order.update.mock.calls[0][0].data).toMatchObject({ deliveryMethod, paymentForm: null });
+  });
   it('defers lock contention without reading or mutating the busy order', async () => {
     tx.$queryRaw.mockResolvedValue([{ locked: false }]);
     await run();

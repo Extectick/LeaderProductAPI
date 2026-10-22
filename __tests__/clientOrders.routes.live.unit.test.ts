@@ -43,6 +43,7 @@ jest.mock('../src/modules/clientOrders/clientOrders.service', () => {
     copyClientOrder: jest.fn(),
     createClientOrder: jest.fn(),
     putClientOrderByClientId: jest.fn(),
+    previewClientOrderAmendment: jest.fn(),
     deleteDraftClientOrder: jest.fn(),
     getClientOrderByGuid: jest.fn(),
     getClientOrderExportDebug: jest.fn(),
@@ -99,6 +100,16 @@ function expectPagedResponse(body: any, expectedItems: number, expectedMeta: { t
 }
 
 describe('/api/client-orders live reference routes', () => {
+  it('previews amendments only for the authenticated owner without calling a write service', async () => {
+    jest.mocked(service.previewClientOrderAmendment).mockResolvedValue({ orderGuid: 'existing', requiresConfirmation: true } as any);
+    const response = await request(app).post('/api/client-orders/by-client-id/client-id-123/review').send({ userId: 999,
+      organizationGuid: 'org', counterpartyGuid: 'cp', clientRevision: 30, intent: 'SUBMIT',
+      items: [{ productGuid: 'p', quantity: 1, basePrice: 100 }] });
+    expect(response.status).toBe(200);
+    expect(service.previewClientOrderAmendment).toHaveBeenCalledWith(1, 'client-id-123', expect.objectContaining({ clientRevision: 30 }));
+    expect(service.putClientOrderByClientId).not.toHaveBeenCalled();
+    expect(service.submitClientOrder).not.toHaveBeenCalled();
+  });
   it('validates history scope, uses the authenticated user and distinguishes unavailable from empty', async () => {
     const context = { organizationGuid: 'dd57a5c7-0b23-11e8-8817-001e676f7f9b', counterpartyGuid: '299c99f7-593e-11ef-8325-1c98ec138053' };
     jest.mocked(getCustomerPurchaseHistory).mockResolvedValue({ ...context, version: 'customer-purchases-v1', items: [] } as any);

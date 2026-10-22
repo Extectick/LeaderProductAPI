@@ -17,6 +17,7 @@ import {
   getOnecLpAppStock,
   getOnecLpAppWarehouses,
   putOnecLpAppClientOrder,
+  postOnecLpAppClientOrder,
 } from '../src/modules/onec/onec.lpApp.client';
 
 const fetchMock = jest.fn();
@@ -112,6 +113,28 @@ describe('onec.lpApp.client client-orders live routes', () => {
     expect(init.method).toBe('PUT');
     expect(JSON.parse(String(init.body))).toEqual({ status: 'draft' });
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+  });
+
+  it('sends byte-identical first POST / JSONB retry / PUT bodies, preserving line order and values', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ item: { documentGuid: 'same-document' } }));
+    const first = { revision: 3, guid: 'app-guid', requestId: 'same-request',
+      createdAt: new Date('2026-10-19T10:00:00Z'),
+      items: [{ quantity: 2, product: { name: 'Товар', guid: 'p1' }, lineGuid: 'line-2' },
+        { lineGuid: 'line-1', product: { guid: 'p2', name: 'Другой' }, quantity: 1 }],
+      comment: null, omitted: undefined };
+    const jsonb = (value: any): any => Array.isArray(value) ? value.map(jsonb)
+      : value && typeof value === 'object'
+        ? Object.fromEntries(Object.keys(value).sort((a, b) => a.length - b.length || a.localeCompare(b)).map(key => [key, jsonb(value[key])]))
+        : value;
+    const restored = jsonb(JSON.parse(JSON.stringify(first)));
+    expect(JSON.stringify(restored)).not.toBe(JSON.stringify(first));
+    await postOnecLpAppClientOrder(first);
+    await postOnecLpAppClientOrder(restored);
+    await putOnecLpAppClientOrder('app-guid', restored);
+    const bodies = fetchMock.mock.calls.map(([, init]) => String(init.body));
+    expect(new Set(bodies).size).toBe(1);
+    expect(JSON.parse(bodies[0])).toEqual(JSON.parse(JSON.stringify(first)));
+    expect(first.items.map(line => line.lineGuid)).toEqual(['line-2', 'line-1']);
   });
 
   it('calls client order details route', async () => {

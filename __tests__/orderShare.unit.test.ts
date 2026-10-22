@@ -56,7 +56,7 @@ test('public projection preserves saved final prices, package coefficients and a
       package: { name: 'кор.', multiplier: '5' }, lineAmount: '63.75', stock: 999, comment: 'private' },
       { isCancelled: true, product: { guid: 'cancelled', name: 'Отменён' }, quantity: 1, price: 300, lineAmount: 300 }] };
   const result = projectShareOrder(order);
-  expect(result.items).toEqual([{ id: 'line', productGuid: 'p', name: 'Товар', quantity: '1.5', unit: 'кор.', unitPrice: '42.5', amount: '63.75' }]);
+  expect(result.items).toEqual([{ id: 'line', productGuid: 'p', name: 'Товар', quantity: '1.5', unit: 'кор.', unitPrice: '42.5', amount: '63.75', weightKg: null }]);
   expect(result.total).toBe('63.75');
   expect(JSON.stringify(result)).not.toMatch(/private|receiptPrice|profit|stock|inn/);
   expect(() => projectShareOrder({ ...order, items: [] })).toThrow();

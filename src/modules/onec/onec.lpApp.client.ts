@@ -1,3 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { canonicalOrderWriteBody } from './onec.orderWriteBody';
+const backgroundRequests = new AsyncLocalStorage<boolean>();
+/** Slow reference validation is allowed in a worker, never on the phone intake path. */
+export function withBackgroundOnecRequests<T>(operation: () => Promise<T>) { return backgroundRequests.run(true, operation); }
 export type OnecLpAppQuery = Record<string, string | number | boolean | null | undefined>;
 
 export class OnecLpAppHttpError extends Error {
@@ -78,7 +83,8 @@ function getPingTimeoutMs() {
 }
 
 function getDirectoryTimeoutMs() {
-  return getProfileTimeoutMs('ONEC_LP_APP_DIRECTORY_TIMEOUT_MS', DEFAULT_DIRECTORY_TIMEOUT_MS);
+  const foregroundMs = getProfileTimeoutMs('ONEC_LP_APP_DIRECTORY_TIMEOUT_MS', DEFAULT_DIRECTORY_TIMEOUT_MS);
+  return backgroundRequests.getStore() ? Math.max(foregroundMs, getProfileTimeoutMs('ONEC_LP_APP_BACKGROUND_DIRECTORY_TIMEOUT_MS', 90_000)) : foregroundMs;
 }
 
 function getProductDataTimeoutMs() {
@@ -387,7 +393,7 @@ export function getOnecLpAppClientOrderDefaults(query: OnecLpAppQuery) {
 export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
   return callOnecLpApp(`/client-orders/${encodeURIComponent(documentGuid)}`, {
     method: 'PUT',
-    body,
+    body: canonicalOrderWriteBody(body),
     timeoutMs: getWriteTimeoutMs(),
   });
 }
@@ -395,7 +401,7 @@ export function putOnecLpAppClientOrder(documentGuid: string, body: unknown) {
 export function postOnecLpAppClientOrder(body: unknown) {
   return callOnecLpApp('/client-orders', {
     method: 'POST',
-    body,
+    body: canonicalOrderWriteBody(body),
     timeoutMs: getWriteTimeoutMs(),
   });
 }
