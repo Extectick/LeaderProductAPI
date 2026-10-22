@@ -11,6 +11,7 @@ import { getOnecLpAppStock } from '../modules/onec/onec.lpApp.client';
 import { enrichStockWarehouseGroups } from '../modules/clientOrders/stockWarehouseGroups';
 import { availableStockForManager } from '../modules/clientOrders/stockAvailability';
 import { InvalidStockCursor, listStockMovements, stockMovementsQuery } from '../modules/clientOrders/stockMovements';
+import { withIncomingCosts } from '../modules/clientOrders/stockIncomingCosts';
 
 export const stockProductsQuery = z.object({
   search: z.string().trim().max(200).default(''),
@@ -92,7 +93,8 @@ export async function listStockProducts(query: Query, userId?: number) {
     const myReserved = own.filter(row => row.productId === id).reduce((sum, row) => sum + Number(row._sum?.reserved ?? 0), 0);
     return { ...product, ...metrics, myReserved, availableForManager: managerStockAvailability(metrics, myReserved), updatedAt: total?.updatedAt ?? null };
   });
-  return { items: await enrichProductsWithImages(items, { lazySyncMissing: false }),
+  const withCosts = await withIncomingCosts(items);
+  return { items: await enrichProductsWithImages(withCosts, { lazySyncMissing: false }),
     offset: query.offset, nextOffset: query.offset + page.length, hasMore: products.length > query.limit };
 }
 
@@ -118,7 +120,8 @@ export async function listWarehouseBalances(guid: string, query: Query, userId?:
     return { id: row.guid, warehouse: { guid: row.guid, name: row.name }, ...metrics,
       myReserved, availableForManager: managerStockAvailability(metrics, myReserved), updatedAt: row.updatedAt };
   });
-  return { items, offset: query.offset, nextOffset: query.offset + items.length, hasMore: rows.length > query.limit, groupedBy: 'warehouse' };
+  const [priced] = await withIncomingCosts([{guid}]);
+  return { items, incomingCost: priced.incomingCost, offset: query.offset, nextOffset: query.offset + items.length, hasMore: rows.length > query.limit, groupedBy: 'warehouse' };
 }
 const seriesResponse = z.object({ version: z.literal('stock-series-v1'), hasMore: z.boolean(), items: z.array(z.object({
   id: z.string(), warehouse: z.object({ guid: z.string().uuid(), name: z.string() }), seriesGuid: z.string(), seriesNumber: z.string(),
@@ -130,12 +133,14 @@ export async function listSeriesBalances(guid: string, query: Query, userId?: nu
   const payload = seriesResponse.parse(await getOnecLpAppStock({ productGuid: guid, bySeries: '1',
     managerGuid: managerGuid || undefined, warehouseGuids: query.warehouseGuids?.join(',') || query.warehouseGuid,
     offset: query.offset, limit: query.limit }));
-  return { items: payload.items.map(row => ({ ...row,
+  const items = payload.items.map(row => ({ ...row,
     availableForManager: row.available === null ? null : availableStockForManager({
       quantity: row.inStock - (row.shipping ?? 0),
       freeAvailableRaw: row.inStock - (row.shipping ?? 0) - row.reserved,
       myReserved: row.myReserved, available: row.available }),
-    available: row.available === null ? null : Math.max(row.inStock - (row.shipping ?? 0) - row.reserved, 0) })),
+    available: row.available === null ? null : Math.max(row.inStock - (row.shipping ?? 0) - row.reserved, 0) }));
+  const [priced] = await withIncomingCosts([{guid}]);
+  return { items, incomingCost: priced.incomingCost,
     offset: query.offset, nextOffset: query.offset + payload.items.length, hasMore: payload.hasMore, groupedBy: 'series' };
 }
 
@@ -192,7 +197,8 @@ router.get('/products/:guid/balances', ...access, async (req: AuthRequest, res) 
     const items = rows.slice(0, query.limit).map(row => ({ id: row.id, warehouse: row.warehouse,
       organization: row.organization, seriesNumber: row.seriesNumber, expiresAt: row.seriesExpiresAt,
       productionDate: row.seriesProductionDate, updatedAt: row.lastSyncedAt ?? row.updatedAt, ...stockMetrics(row) }));
-    res.json(successResponse({ items, offset: query.offset, nextOffset: query.offset + items.length, hasMore: rows.length > query.limit }));
+    const [priced] = await withIncomingCosts([{guid}]);
+    res.json(successResponse({ items, incomingCost: priced.incomingCost, offset: query.offset, nextOffset: query.offset + items.length, hasMore: rows.length > query.limit }));
   } catch { res.status(500).json(errorResponse('Не удалось загрузить детализацию остатков', ErrorCodes.INTERNAL_ERROR)); }
 });
 export default router;

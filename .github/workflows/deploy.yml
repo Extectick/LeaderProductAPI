@@ -42,7 +42,7 @@ jobs:
       - run: npm run test:unit -- --runInBand __tests__/clientOrderAmendments.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/acceptedClientOperation.unit.test.ts __tests__/acceptedSubmissionOperation.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/clientOrderSubmissions.unit.test.ts __tests__/clientOrderSubmissionWorker.unit.test.ts __tests__/legacyOrderSubmission.unit.test.ts __tests__/clientOrders.delivery.unit.test.ts __tests__/onecBackgroundTimeout.unit.test.ts
-      - run: npm run test:unit -- --runInBand __tests__/stockWarehouseGroups.unit.test.ts __tests__/stockBalancesProducts.unit.test.ts __tests__/stockMovements.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/stockWarehouseGroups.unit.test.ts __tests__/stockBalancesProducts.unit.test.ts __tests__/stockIncomingCosts.unit.test.ts __tests__/stockMovements.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockBalancesProducts.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/stockAvailability.unit.test.ts __tests__/offlineExportPolicy.unit.test.ts __tests__/clientOrders.onec-live.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/orderShare.unit.test.ts __tests__/orderShare.service.unit.test.ts __tests__/orderShare.weights.unit.test.ts __tests__/orderShare.weightRefresh.unit.test.ts __tests__/orderShare.invoiceShadow.unit.test.ts __tests__/orderShare.errors.unit.test.ts
