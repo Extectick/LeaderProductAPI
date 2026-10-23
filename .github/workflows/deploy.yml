@@ -7,6 +7,11 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      help_diagnostics:
+        description: 'Read-only development Help diagnostics; skip build and deployment'
+        required: false
+        type: boolean
+        default: false
       image_tag:
         description: 'Docker image tag to publish/deploy'
         required: false
@@ -26,7 +31,13 @@ env:
   IMAGE_NAME: extectick/leaderproductapi
 
 jobs:
+  help-diagnostics:
+    if: github.event_name == 'workflow_dispatch' && inputs.help_diagnostics && github.ref == 'refs/heads/dev'
+    uses: ./.github/workflows/help-dev-diagnostics.yml
+    secrets: inherit
+
   order-integrity-check:
+    if: inputs.help_diagnostics != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
