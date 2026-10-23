@@ -24,6 +24,12 @@ async function main() {
     S3_ACCESS_KEY: 'minioadmin',
     S3_SECRET_KEY: 'minioadmin',
     S3_ENV_PREFIX: 'help-qa',
+    // Exercise the dedicated Help configuration, without inheriting machine secrets.
+    HELP_S3_ENDPOINT: 'http://127.0.0.1:9009',
+    HELP_S3_REGION: 'us-east-1',
+    HELP_S3_ACCESS_KEY: 'minioadmin',
+    HELP_S3_SECRET_KEY: 'minioadmin',
+    HELP_S3_BUCKET: 'help-private-test-help-private',
   };
   console.log(`Isolated Help QA database: ${database}. Retained after execution; no database is reset or deleted.`);
   const run = (script, args) => {

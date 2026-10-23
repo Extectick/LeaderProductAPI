@@ -3,10 +3,12 @@ import multer from 'multer';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
-import { CreateBucketCommand, HeadBucketCommand, PutObjectCommand, GetObjectCommand, GetBucketPolicyCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { authenticateToken, AuthRequest } from '../../middleware/auth';
 import prisma from '../../prisma/client';
-import { s3, s3EnvPrefix } from '../../storage/minio';
+import { s3EnvPrefix } from '../../storage/minio';
+import { helpS3, helpBucket, ensureHelpBucket, helpStorageRequest, HelpStorageError } from './help.storage';
+export { helpBucket } from './help.storage';
 import { detectHelpFile } from './help.policy';
 import * as service from './help.service';
 import { publishHelpUpdates } from './help.socket';
@@ -16,21 +18,7 @@ const idSchema=z.coerce.number().int().positive();
 const messageSchema=z.object({clientMessageId:z.string().min(8).max(100),text:z.string().max(20000).default(''),attachmentIds:z.array(z.string().uuid()).max(5).default([]).refine(a=>new Set(a).size===a.length),replyToId:idSchema.optional(),forwardedFromId:idSchema.optional(),rating:z.number().int().min(0).max(5).optional()}).strict();
 const createSchema=messageSchema.extend({clientTicketId:z.string().min(8).max(100),sourceTicketId:idSchema.optional()});
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:20*1024*1024,files:5,fields:2,fieldSize:1024}}).array('files',5);
-export const helpBucket=process.env.HELP_S3_BUCKET || `${process.env.S3_BUCKET||'leader-product'}-help-private`;
-let bucketReady:Promise<void>|null=null;
 const activeUploads=new Set<number>();
-async function ensureBucket() {
-  if(!bucketReady) bucketReady=(async()=>{
-    try { await s3.send(new HeadBucketCommand({Bucket:helpBucket})); }
-    catch(error:any) { if(error?.$metadata?.httpStatusCode!==404) throw error; await s3.send(new CreateBucketCommand({Bucket:helpBucket})); }
-    try {
-      const policy=await s3.send(new GetBucketPolicyCommand({Bucket:helpBucket}));
-      const statements=JSON.parse(policy.Policy||'{}').Statement||[];
-      if(statements.some((statement:any)=>statement.Effect==='Allow' && (statement.Principal==='*'||JSON.stringify(statement.Principal||{}).includes('"*"')))) throw new service.HelpError(503,'HELP_STORAGE_NOT_PRIVATE','Хранилище вложений не настроено как приватное');
-    } catch(error:any) { if(error?.$metadata?.httpStatusCode!==404 && error?.name!=='NoSuchBucketPolicy') throw error; }
-  })().catch(e=>{bucketReady=null;throw e;});
-  return bucketReady;
-}
 const route=(fn:(req:Request,res:Response,actor:service.HelpActor)=>Promise<any>)=>(req:Request,res:Response,next:NextFunction)=>{
   Promise.resolve().then(async()=>fn(req,res,await service.helpActor((req as AuthRequest).user!.userId))).catch(next);
 };
@@ -72,11 +60,11 @@ router.post('/attachments',route(async(req,res,actor)=>{
   if(!files?.length) throw new service.HelpError(400,'NO_FILES','Выберите файл');
   const typed=files.map(f=>({file:f,detected:detectHelpFile(f.buffer)}));
   if(typed.some(f=>!f.detected)) throw new service.HelpError(415,'UNSUPPORTED_FILE','Этот формат не поддерживается');
-  await ensureBucket();
+  await ensureHelpBucket();
   const attachments=[];
   for(const {file,detected} of typed) {
     const objectKey=`${s3EnvPrefix}/help/${crypto.randomUUID()}`;
-    await s3.send(new PutObjectCommand({Bucket:helpBucket,Key:objectKey,Body:file.buffer,ContentType:detected!.mimeType,CacheControl:'private, no-store'}));
+    await helpStorageRequest(()=>helpS3.send(new PutObjectCommand({Bucket:helpBucket,Key:objectKey,Body:file.buffer,ContentType:detected!.mimeType,CacheControl:'private, no-store'})));
     const name=Buffer.from(file.originalname,'latin1').toString('utf8').replace(/[\x00-\x1f\\/]/g,'_').slice(0,180)||'Файл';
     const row=await prisma.helpAttachment.create({data:{ownerId:actor.userId,name,mimeType:detected!.mimeType,kind:detected!.kind,size:file.size,objectKey,sha256:crypto.createHash('sha256').update(file.buffer).digest('hex')}});
     attachments.push(service.attachmentDto(row));
@@ -91,7 +79,8 @@ router.get('/attachments/:id',route(async(req,res,actor)=>{
   else if(row.ownerId!==actor.userId) throw new service.HelpError(404,'HELP_NOT_FOUND','Файл не найден');
   const range=typeof req.headers.range==='string'?req.headers.range:undefined;
   if(range&&!/^bytes=(?:\d+-\d*|-\d+)$/.test(range)) throw new service.HelpError(416,'INVALID_RANGE','Некорректный диапазон');
-  const result=await s3.send(new GetObjectCommand({Bucket:helpBucket,Key:row.objectKey,Range:range}));
+  await ensureHelpBucket();
+  const result=await helpStorageRequest(()=>helpS3.send(new GetObjectCommand({Bucket:helpBucket,Key:row.objectKey,Range:range})));
   res.status(result.ContentRange?206:200);
   res.setHeader('Content-Type',row.mimeType);
   res.setHeader('X-Content-Type-Options','nosniff');
@@ -104,7 +93,7 @@ router.get('/attachments/:id',route(async(req,res,actor)=>{
 }));
 router.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{
   if(res.headersSent) return res.end();
-  if(err instanceof service.HelpError) return res.status(err.status).json({code:err.code,message:err.message});
+  if(err instanceof service.HelpError||err instanceof HelpStorageError) return res.status(err.status).json({code:err.code,message:err.message});
   if(err instanceof z.ZodError) return res.status(400).json({code:'VALIDATION_ERROR',message:'Проверьте поля запроса',issues:err.issues.map(i=>({path:i.path,message:i.message}))});
   if(err instanceof multer.MulterError) return res.status(413).json({code:'UPLOAD_LIMIT',message:'Не более 5 файлов, до 20 МиБ каждый'});
   if(err?.$metadata?.httpStatusCode===416) return res.status(416).json({code:'INVALID_RANGE',message:'Диапазон за пределами файла'});

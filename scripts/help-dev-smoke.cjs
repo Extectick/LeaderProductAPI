@@ -79,12 +79,11 @@ async function main() {
     await request(stranger, file.url, 'GET', undefined, 404);
     const anonymous = await fetch(baseUrl + file.url, { signal: AbortSignal.timeout(10000) });
     assert(anonymous.status === 401, 'Anonymous download bypassed authorization');
-    const { s3 } = require('../dist/storage/minio');
+    const { helpS3, helpBucket } = require('../dist/modules/help/help.storage');
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
     const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
     const object = await prisma.helpAttachment.findUniqueOrThrow({ where: { id: file.id } });
-    const bucket = process.env.HELP_S3_BUCKET || `${process.env.S3_BUCKET || 'leader-product'}-help-private`;
-    const signed = new URL(await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: object.objectKey }), { expiresIn: 30 }));
+    const signed = new URL(await getSignedUrl(helpS3, new GetObjectCommand({ Bucket: helpBucket, Key: object.objectKey }), { expiresIn: 30 }));
     signed.search = '';
     const direct = await fetch(signed, { signal: AbortSignal.timeout(20000) });
     assert([401, 403, 404].includes(direct.status), `S3 object is publicly readable: HTTP ${direct.status}`);

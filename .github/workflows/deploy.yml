@@ -63,7 +63,7 @@ jobs:
       - run: npm run test:unit -- --runInBand __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/clientOrders.invoiceShadow.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderWriteSafety.unit.test.ts __tests__/clientOrdersExportRetry.unit.test.ts __tests__/onec.lp-app-client.client-orders.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderSnapshotRecovery.unit.test.ts
-      - run: npm run test:unit -- --runInBand __tests__/help.policy.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/help.policy.unit.test.ts __tests__/help.storage.unit.test.ts
 
   build-and-push:
     needs: order-integrity-check

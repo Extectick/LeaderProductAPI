@@ -9,7 +9,7 @@ import jwt from 'jsonwebtoken';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { Server as SocketServer } from 'socket.io';
 import { HeadBucketCommand, CreateBucketCommand } from '@aws-sdk/client-s3';
-import { s3 } from '../src/storage/minio';
+import { helpS3 as s3 } from '../src/modules/help/help.storage';
 import helpRouter, { helpBucket } from '../src/modules/help/help.routes';
 import { registerHelpSocket, isHelpRoom, publishHelpUpdates } from '../src/modules/help/help.socket';
 import prisma, { pool } from '../src/prisma/client';
@@ -354,6 +354,20 @@ describe('Help actual PostgreSQL service integration', () => {
     await request(api).get(forwarded.attachments[0].url).set('Authorization', bearer(owner)).expect(200);
     // Queue managers may inspect every ticket; an ordinary nonmember must not.
     await request(api).get(forwarded.attachments[0].url).set('Authorization', bearer(stranger)).expect(404);
+  });
+
+  test('storage denial returns safe503, creates no metadata, and upload can retry', async () => {
+    const before=await prisma.helpAttachment.count();
+    const spy=jest.spyOn(s3,'send').mockImplementationOnce(()=>{throw Object.assign(new Error('private provider details'),{name:'AccessDenied',$metadata:{httpStatusCode:403}});});
+    try {
+      const denied=await request(api).post('/help/attachments').set('Authorization',bearer(owner))
+        .attach('files',Buffer.from('Отзыв'),{filename:'review.txt',contentType:'text/plain'}).expect(503);
+      expect(denied.body.code).toBe('HELP_STORAGE_UNAVAILABLE');
+      expect(JSON.stringify(denied.body)).not.toContain('private provider details');
+      expect(await prisma.helpAttachment.count()).toBe(before);
+    } finally { spy.mockRestore(); }
+    await request(api).post('/help/attachments').set('Authorization',bearer(owner))
+      .attach('files',Buffer.from('Повторная загрузка'),{filename:'retry.txt',contentType:'text/plain'}).expect(201);
   });
 
   test('closure edits attach/remove files, reject another owner files and preserve deadline', async () => {
