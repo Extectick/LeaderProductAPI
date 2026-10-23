@@ -1,0 +1,63 @@
+/* Additive dev-only Help migration. No db push, resets, drops or unrelated migrations. */
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { Client } = require('pg');
+
+const migrationId = '20261023070000_help_service';
+const sql = fs.readFileSync(path.join(__dirname, '..', 'prisma', 'migrations', migrationId, 'migration.sql'), 'utf8');
+const checksum = crypto.createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
+const tables = [...sql.matchAll(/CREATE TABLE "(Help\w+)"/g)].map(match => match[1]);
+const indexes = [...sql.matchAll(/CREATE (?:UNIQUE )?INDEX "(Help\w+)"/g)].map(match => match[1]);
+const constraints = [...sql.matchAll(/(?:ADD )?CONSTRAINT "(Help\w+)"/g)].map(match => match[1]);
+
+async function validate(client) {
+  for (const table of tables) {
+    const block = sql.match(new RegExp(`CREATE TABLE "${table}" \\(([\\s\\S]*?)\\n\\);`));
+    if (!block) throw new Error(`Missing schema definition for ${table}`);
+    const expected = [...block[1].matchAll(/^\s+"(\w+)"\s+(\w+)(?:\(\d+\))?(\s+NOT NULL)?/gm)];
+    const { rows } = await client.query('SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1', [table]);
+    const types = { SERIAL: 'integer', INTEGER: 'integer', TEXT: 'text', BOOLEAN: 'boolean', TIMESTAMP: 'timestamp without time zone' };
+    for (const [, name, type, notNull] of expected) {
+      const col = rows.find(row => row.column_name === name);
+      if (!col || col.data_type !== types[type] || (notNull && col.is_nullable !== 'NO')) throw new Error(`Schema verification failed: ${table}.${name}`);
+    }
+    if (rows.length !== expected.length) throw new Error(`Unexpected columns in ${table}; refusing to overwrite another schema version`);
+  }
+  const foundIndexes = await client.query('SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname=ANY($1::text[])', [indexes]);
+  if (foundIndexes.rowCount !== indexes.length) throw new Error('Help indexes are incomplete');
+  const foundConstraints = await client.query('SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND conname=ANY($1::text[])', [constraints]);
+  if (foundConstraints.rowCount !== constraints.length) throw new Error('Help constraints are incomplete');
+  const registration = await client.query(`SELECT EXISTS(SELECT 1 FROM "Service" WHERE "key"='help') AS service, EXISTS(SELECT 1 FROM "Permission" WHERE "name"='manage_help') AS permission`);
+  if (!registration.rows[0].service || !registration.rows[0].permission) throw new Error('Help catalog or permission registration is missing');
+}
+
+async function main() {
+  if (process.env.HELP_MIGRATION_TARGET !== 'dev') throw new Error('Set HELP_MIGRATION_TARGET=dev for the explicitly approved development target');
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  const url = new URL(process.env.DATABASE_URL);
+  const database = decodeURIComponent(url.pathname.slice(1));
+  if (!database || process.env.HELP_MIGRATION_DATABASE_CONFIRM !== database) throw new Error('HELP_MIGRATION_DATABASE_CONFIRM must match the intended development database name');
+  if (process.env.DB_ACCEPT_DATA_LOSS !== '0') throw new Error('DB_ACCEPT_DATA_LOSS must explicitly be 0');
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout='15s'");
+    await client.query("SET LOCAL statement_timeout='60s'");
+    await client.query('SELECT pg_advisory_xact_lock(181932, 0)');
+    const present = await client.query('SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename=ANY($1::text[])', [tables]);
+    if (present.rowCount && present.rowCount !== tables.length) throw new Error('Partial Help schema found; no changes applied');
+    if (!present.rowCount) await client.query(sql);
+    await validate(client);
+    const previous = await client.query('SELECT checksum FROM "HelpSchemaVersion" WHERE id=$1', [migrationId]);
+    if (previous.rows[0] && previous.rows[0].checksum !== checksum) throw new Error('Applied Help migration checksum differs; no changes applied');
+    await client.query('INSERT INTO "HelpSchemaVersion" (id,checksum) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [migrationId,checksum]);
+    await client.query('COMMIT');
+    console.log(JSON.stringify({ ok: true, migration: migrationId, action: present.rowCount ? 'verified' : 'applied', tables: tables.length, checksum }));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { await client.end(); }
+}
+main().catch(error => { console.error('[help migration]', error.message); process.exitCode = 1; });

@@ -52,6 +52,7 @@ jobs:
       - run: npm run test:unit -- --runInBand __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/clientOrders.invoiceShadow.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderWriteSafety.unit.test.ts __tests__/clientOrdersExportRetry.unit.test.ts __tests__/onec.lp-app-client.client-orders.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderSnapshotRecovery.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/help.policy.unit.test.ts
 
   build-and-push:
     needs: order-integrity-check
@@ -199,7 +200,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USER: ${{ github.actor }}
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          IMAGE_TAG: ${{ github.sha }}
           GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -210,18 +211,30 @@ jobs:
             set -euo pipefail
             cd /opt/leader-api-dev
 
-            git fetch origin "$GIT_REF"
-            git checkout -B "$GIT_REF" "origin/$GIT_REF"
+            git fetch origin "$IMAGE_TAG"
+            git checkout -B "$GIT_REF" "$IMAGE_TAG"
 
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
             export IMAGE_TAG
             docker compose -f docker-compose.server-dev.yml pull api
             docker compose -f docker-compose.server-dev.yml up -d postgres-dev redis-dev
+            # Back up only the isolated development database before the additive Help migration.
+            # Keep the running API untouched if backup or migration validation fails.
+            umask 077
+            mkdir -p backups
+            backup="backups/help-${IMAGE_TAG}-$(date -u +%Y%m%dT%H%M%SZ).dump"
+            docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+            test -s "$backup"
+            docker compose -f docker-compose.server-dev.yml exec -T postgres-dev pg_restore --list < "$backup" > /dev/null
+            dev_db=$(docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'printf %s "$POSTGRES_DB"')
+            docker compose -f docker-compose.server-dev.yml run --rm --no-deps -e HELP_MIGRATION_TARGET=dev -e HELP_MIGRATION_DATABASE_CONFIRM="$dev_db" --entrypoint node api scripts/apply-help-migration.js
+            docker compose -f docker-compose.server-dev.yml run --rm --no-deps --entrypoint node api scripts/init-db.js
             docker compose -f docker-compose.server-dev.yml up -d --no-deps api
 
             for attempt in $(seq 1 30); do
               if curl --fail --silent --show-error http://127.0.0.1:3001/health >/dev/null; then
                 docker compose -f docker-compose.server-dev.yml ps
+                docker compose -f docker-compose.server-dev.yml exec -T -e HELP_SMOKE_TARGET=dev -e HELP_SMOKE_DATABASE_CONFIRM="$dev_db" api node scripts/help-dev-smoke.cjs
                 exit 0
               fi
               sleep 2

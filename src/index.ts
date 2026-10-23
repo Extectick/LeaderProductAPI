@@ -20,6 +20,8 @@ import { orderShareManagerRouter, publicOrderRouter } from './modules/orderShare
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
+import helpRouter from './modules/help/help.routes';
+import { registerHelpSocket, startHelpDelivery, isHelpRoom } from './modules/help/help.socket';
 import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
 import trackingV2Router from './routes/trackingV2';
@@ -202,6 +204,7 @@ app.use('/ota', otaRouter);
 app.use('/update-files', filesRouter);
 app.use('/files', filesRouter);
 app.use('/notifications', notificationsRouter);
+app.use('/help', helpRouter);
 app.use('/api/1c/lp-app', onecLpAppRouter);
 app.use('/api/1c', onecRouter);
 app.use('/api/marketplace', marketplaceRouter);
@@ -447,7 +450,8 @@ io.on('connection', (socket) => {
     syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
   }
 
-  socket.on('join', (room: string) => { if (room) socket.join(room); });
+  registerHelpSocket(io, socket);
+  socket.on('join', (room: string) => { if (typeof room === 'string' && room && !isHelpRoom(room)) socket.join(room); });
   socket.on('leave', (room: string) => { if (room) socket.leave(room); });
   socket.on('presence:focus', (payload: unknown) => {
     if (!Number.isFinite(userId) || userId <= 0) return;
@@ -478,6 +482,7 @@ io.on('connection', (socket) => {
 
 // ---- Start ----
 if (ENV !== 'test') {
+  void startHelpDelivery(io).catch(error => console.error('[help] delivery startup failed', { code: error?.code }));
   (async () => {
     // 1) Подключаемся к Redis один раз, терпеливо ждём до 15с, но не падаем, если недоступен
     try {

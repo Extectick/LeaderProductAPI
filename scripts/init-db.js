@@ -85,7 +85,7 @@ async function ensureClientOrdersSearchExtensions(pool) {
 }
 
 async function main() {
-  const initMode = process.env.DB_INIT_MODE || 'push'; // push | migrate
+  const initMode = process.env.DB_INIT_MODE || 'push'; // push | migrate | verify
   const autoSeed = process.env.DB_AUTO_SEED !== '0';
   const acceptDataLoss = process.env.DB_ACCEPT_DATA_LOSS !== '0';
 
@@ -152,7 +152,13 @@ async function main() {
     throw new Error(lines.join('\n'));
   }
 
-  if (initMode === 'migrate') {
+  if (initMode === 'verify') {
+    // Dev release migrations run explicitly before replacing the healthy API.
+    // Refuse drift instead of applying unrelated changes during container startup.
+    run('npx prisma migrate diff --from-config-datasource --to-schema ./prisma --exit-code');
+    await pool.end();
+    return;
+  } else if (initMode === 'migrate') {
     console.log('[init] prisma migrate deploy...');
     run('npx prisma migrate deploy --schema ./prisma');
   } else {

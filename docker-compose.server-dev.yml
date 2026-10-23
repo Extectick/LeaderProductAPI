@@ -9,6 +9,9 @@ services:
       - .env
     environment:
       NODE_ENV: development
+      DB_ACCEPT_DATA_LOSS: "0"
+      DB_AUTO_SEED: "0"
+      DB_INIT_MODE: verify
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?DB_PASSWORD is required}@postgres-dev:5432/${DB_NAME:-LeaderAPI_dev}?schema=public
       REDIS_URL: redis://redis-dev:6379
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-lp-dev:}

@@ -286,6 +286,13 @@ enum AuthProvider {
 }
 
 model User {
+  helpOwnedTickets HelpTicket[]
+  helpMemberships HelpMember[]
+  helpMessages HelpMessage[]
+  helpAttachments HelpAttachment[]
+  helpReactions HelpReaction[]
+  helpEvents HelpEvent[]
+  helpNotifications HelpNotification[]
   id                   Int                   @id @default(autoincrement())
   email                String?               @unique
   passwordHash         String?

@@ -1,0 +1,121 @@
+// Help is a separate domain from Appeals. AI remains disabled in this release.
+model HelpSchemaVersion {
+  id String @id
+  checksum String
+  appliedAt DateTime @default(now())
+}
+
+model HelpTicket {
+  id Int @id @default(autoincrement())
+  ownerId Int
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  clientTicketId String
+  requestHash String
+  title String
+  status String @default("OPEN")
+  itRequested Boolean @default(true)
+  sourceTicketId Int?
+  sourceTicket HelpTicket? @relation("HelpSource", fields: [sourceTicketId], references: [id])
+  linkedTickets HelpTicket[] @relation("HelpSource")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  closedAt DateTime?
+  messageSequence Int @default(0)
+  members HelpMember[]
+  messages HelpMessage[]
+  events HelpEvent[]
+  @@unique([ownerId, clientTicketId])
+  @@index([ownerId, status, updatedAt])
+  @@index([status, itRequested, updatedAt])
+}
+
+model HelpMember {
+  ticketId Int
+  userId Int
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role String
+  lastReadSequence Int @default(0)
+  joinedAt DateTime @default(now())
+  ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  @@id([ticketId, userId])
+  @@index([userId])
+}
+
+model HelpMessage {
+  id Int @id @default(autoincrement())
+  ticketId Int
+  authorId Int
+  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  authorRole String
+  kind String @default("TEXT")
+  clientMessageId String
+  requestHash String
+  sequence Int
+  text String @default("")
+  replyToId Int?
+  replyTo HelpMessage? @relation("HelpReply", fields: [replyToId], references: [id])
+  replies HelpMessage[] @relation("HelpReply")
+  forwardedFromId Int?
+  rating Int?
+  createdAt DateTime @default(now())
+  editedAt DateTime?
+  ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  attachments HelpAttachment[]
+  reactions HelpReaction[]
+  @@unique([ticketId, authorId, clientMessageId])
+  @@unique([ticketId, sequence])
+}
+
+model HelpAttachment {
+  id String @id @default(uuid())
+  ownerId Int
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  messageId Int?
+  message HelpMessage? @relation(fields: [messageId], references: [id])
+  name String
+  mimeType String
+  kind String
+  size Int
+  objectKey String
+  sha256 String
+  createdAt DateTime @default(now())
+  @@index([ownerId, messageId])
+  @@index([objectKey])
+}
+
+model HelpReaction {
+  messageId Int
+  userId Int
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  emoji String
+  message HelpMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  @@id([messageId, userId, emoji])
+}
+
+model HelpEvent {
+  id Int @id @default(autoincrement())
+  ticketId Int
+  type String
+  actorId Int
+  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  messageId Int?
+  createdAt DateTime @default(now())
+  ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  @@index([ticketId, id])
+}
+
+model HelpNotification {
+  id Int @id @default(autoincrement())
+  eventId Int
+  ticketId Int
+  messageId Int?
+  userId Int
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  attempts Int @default(0)
+  dueAt DateTime @default(now())
+  deliveredAt DateTime?
+  createdAt DateTime @default(now())
+  @@unique([eventId, userId])
+  @@index([deliveredAt, dueAt])
+}
