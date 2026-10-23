@@ -212,17 +212,28 @@ jobs:
             cd /opt/leader-api-dev
 
             git fetch origin "$IMAGE_TAG"
-            git checkout -B "$GIT_REF" "$IMAGE_TAG"
+            # Preserve the server checkout and its local Compose settings unchanged.
+            # A three-way merge in an isolated release checkout fails safely on conflict.
+            mkdir -p releases
+            release_dir=$(mktemp -d "/opt/leader-api-dev/releases/help-${IMAGE_TAG:0:12}-XXXXXX")
+            git worktree add --detach "$release_dir" "$IMAGE_TAG"
+            git diff HEAD -- docker-compose.server-dev.yml > "$release_dir/local-server-config.patch"
+            if [ -s "$release_dir/local-server-config.patch" ]; then
+              git -C "$release_dir" apply --3way "$release_dir/local-server-config.patch"
+            fi
+            ln -s /opt/leader-api-dev/.env "$release_dir/.env"
+            cd "$release_dir"
 
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
             export IMAGE_TAG
+            docker compose -f docker-compose.server-dev.yml config --format json | python3 -c 'import json,sys; a=json.load(sys.stdin)["services"]["api"]; e=a.get("environment",{}); assert e.get("NODE_ENV")=="development", "Wrong environment"; assert str(e.get("DB_ACCEPT_DATA_LOSS"))=="0" and e.get("DB_INIT_MODE")=="verify", "Unsafe database initialization"; assert all(v.get("type")!="bind" for v in a.get("volumes",[])), "Unreviewed server bind mount"; assert all(p.get("host_ip")=="127.0.0.1" for p in a.get("ports",[])), "Unexpected public port"; print("Development release configuration verified")'
             docker compose -f docker-compose.server-dev.yml pull api
             docker compose -f docker-compose.server-dev.yml up -d postgres-dev redis-dev
             # Back up only the isolated development database before the additive Help migration.
             # Keep the running API untouched if backup or migration validation fails.
             umask 077
-            mkdir -p backups
-            backup="backups/help-${IMAGE_TAG}-$(date -u +%Y%m%dT%H%M%SZ).dump"
+            mkdir -p /opt/leader-api-dev/backups
+            backup="/opt/leader-api-dev/backups/help-${IMAGE_TAG}-$(date -u +%Y%m%dT%H%M%SZ).dump"
             docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
             test -s "$backup"
             docker compose -f docker-compose.server-dev.yml exec -T postgres-dev pg_restore --list < "$backup" > /dev/null
