@@ -1,4 +1,4 @@
-import { createHelpStorageGuard, helpStorageConfig, helpStorageRequest } from '../src/modules/help/help.storage';
+import { createHelpStorageGuard, helpStorageConfig, helpStorageRequest, resolveHelpBucket } from '../src/modules/help/help.storage';
 
 const missingPolicy=Object.assign(new Error(),{name:'NoSuchBucketPolicy',$metadata:{httpStatusCode:404}});
 const denied=Object.assign(new Error('must never expose provider details'),{name:'AccessDenied',$metadata:{httpStatusCode:403}});
@@ -12,6 +12,10 @@ const mockClient=(policy:any={Statement:[]},grants:any[]=[])=>({send:jest.fn(asy
 })});
 
 describe('isolated Help storage configuration and fail-closed privacy',()=>{
+  test('uses existing bucket by default and preserves explicit dedicated storage',()=>{
+    expect(resolveHelpBucket({S3_BUCKET:'existing-private'})).toBe('existing-private');
+    expect(resolveHelpBucket({S3_BUCKET:'existing-private',HELP_S3_BUCKET:'dedicated'})).toBe('dedicated');
+  });
   beforeEach(()=>jest.spyOn(console,'warn').mockImplementation(()=>{}));
   afterEach(()=>jest.restoreAllMocks());
   test('default config uses shared credentials without changing the source environment',()=>{

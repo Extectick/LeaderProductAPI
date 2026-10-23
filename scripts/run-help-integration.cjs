@@ -29,7 +29,8 @@ async function main() {
     HELP_S3_REGION: 'us-east-1',
     HELP_S3_ACCESS_KEY: 'minioadmin',
     HELP_S3_SECRET_KEY: 'minioadmin',
-    HELP_S3_BUCKET: 'help-private-test-help-private',
+    // Exercise existing private bucket reuse; dedicated override is unit-tested.
+    HELP_S3_BUCKET: '',
   };
   console.log(`Isolated Help QA database: ${database}. Retained after execution; no database is reset or deleted.`);
   const run = (script, args) => {

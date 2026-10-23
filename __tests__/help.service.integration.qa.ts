@@ -11,6 +11,7 @@ import { Server as SocketServer } from 'socket.io';
 import { HeadBucketCommand, CreateBucketCommand } from '@aws-sdk/client-s3';
 import { helpS3 as s3 } from '../src/modules/help/help.storage';
 import helpRouter, { helpBucket } from '../src/modules/help/help.routes';
+import filesRouter from '../src/routes/files';
 import { registerHelpSocket, isHelpRoom, publishHelpUpdates } from '../src/modules/help/help.socket';
 import prisma, { pool } from '../src/prisma/client';
 import {
@@ -37,6 +38,7 @@ let permissionId: number;
 const api = express();
 api.use(express.json());
 api.use('/help', helpRouter);
+api.use('/files', filesRouter);
 const token = (actor: HelpActor) => jwt.sign({ userId: actor.userId, role: 'help_qa_employee' }, process.env.ACCESS_TOKEN_SECRET!, { expiresIn: '5m' });
 const bearer = (actor: HelpActor) => `Bearer ${token(actor)}`;
 async function ticket(actor = owner, text?: string) {
@@ -335,6 +337,10 @@ describe('Help actual PostgreSQL service integration', () => {
     const slice = await request(api).get(files[0].url).set('Authorization', bearer(owner)).set('Range', 'bytes=0-7').expect(206);
     expect(slice.body.equals(png.subarray(0, 8))).toBe(true);
     const row = await prisma.helpAttachment.findUniqueOrThrow({ where: { id: files[0].id } });
+    expect(helpBucket).toBe(process.env.S3_BUCKET);
+    expect(row.objectKey.startsWith('help-qa/help/')).toBe(true);
+    await request(api).get('/files/'+row.objectKey).expect(404);
+    await request(api).get('/files/'+row.objectKey).set('Authorization',bearer(owner)).expect(404);
     const direct = await fetch(`http://127.0.0.1:9009/${helpBucket}/${row.objectKey}`);
     expect(direct.status).toBe(403);
     const id = await ticket();

@@ -43,6 +43,12 @@ router.get('/*key', async (req, res) => {
   const rawKey = (req.params as any)?.key ?? '';
   const combinedKey = Array.isArray(rawKey) ? rawKey.join('/') : String(rawKey || '');
   const key = normalizeKey(combinedKey);
+  // Help objects share private S3 storage but require ticket membership, not a
+  // general file token or public cache. Reject every environment's Help prefix.
+  if (/^[^/]+\/help(?:\/|$)/.test(key)) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.status(404).json(errorResponse('Файл не найден', ErrorCodes.NOT_FOUND));
+  }
   if (!key) {
     return res.status(400).json(
       errorResponse('Некорректный ключ файла', ErrorCodes.VALIDATION_ERROR)

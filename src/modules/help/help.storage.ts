@@ -5,7 +5,7 @@ export class HelpStorageError extends Error {
   constructor(readonly code='HELP_STORAGE_UNAVAILABLE',message='Хранилище вложений временно недоступно. Попробуйте позже или обратитесь к администратору.') { super(message); }
 }
 
-/** Independent client: Help overrides never alter shared/public file storage. */
+/** Independent client: Help overrides never alter shared file storage. */
 export function helpStorageConfig(env:NodeJS.ProcessEnv):S3ClientConfig {
   // Never combine one dedicated key with the other shared key.
   const dedicatedKeys=!!(env.HELP_S3_ACCESS_KEY||env.HELP_S3_SECRET_KEY);
@@ -16,7 +16,12 @@ export function helpStorageConfig(env:NodeJS.ProcessEnv):S3ClientConfig {
   };
 }
 export const helpS3=new S3Client(helpStorageConfig(process.env));
-export const helpBucket=process.env.HELP_S3_BUCKET||`${process.env.S3_BUCKET||'leader-product'}-help-private`;
+// Existing private storage is supported; the guard below still rejects public
+// policies/ACLs. An explicit dedicated bucket remains available when required.
+export function resolveHelpBucket(env:NodeJS.ProcessEnv):string {
+  return env.HELP_S3_BUCKET||env.S3_BUCKET||'leader-product';
+}
+export const helpBucket=resolveHelpBucket(process.env);
 
 export async function helpStorageRequest<T>(operation:()=>Promise<T>):Promise<T> {
   try { return await operation(); }

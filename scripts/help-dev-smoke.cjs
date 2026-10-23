@@ -83,6 +83,13 @@ async function main() {
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
     const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
     const object = await prisma.helpAttachment.findUniqueOrThrow({ where: { id: file.id } });
+    assert(object.objectKey.startsWith('dev/help/'), 'Attachment escaped dev/help prefix');
+    const genericUrl = '/files/' + object.objectKey.split('/').map(encodeURIComponent).join('/');
+    const generic = await fetch(baseUrl + genericUrl, { signal: AbortSignal.timeout(10000) });
+    assert(generic.status === 404, 'General files proxy exposed Help object');
+    const { signFileToken } = require('../dist/utils/fileTokens');
+    const genericWithToken = await fetch(baseUrl + genericUrl + '?token=' + encodeURIComponent(signFileToken(object.objectKey)), { signal: AbortSignal.timeout(10000) });
+    assert(genericWithToken.status === 404, 'General file token bypassed ticket ACL');
     const signed = new URL(await getSignedUrl(helpS3, new GetObjectCommand({ Bucket: helpBucket, Key: object.objectKey }), { expiresIn: 30 }));
     signed.search = '';
     const direct = await fetch(signed, { signal: AbortSignal.timeout(20000) });
