@@ -17,6 +17,7 @@ import { acceptedOrderQuantities, amendmentAvailableQuantity, previewOrderAmendm
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
 import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
 import { clientOrderPayloadHash, proveAcceptedClientOperation, proveAcceptedSubmissionOperation } from './acceptedClientOperation';
+import { matchesDeliveryDateRange } from './orderCalendarDate';
 import { resolveDraftDeliveryMethod } from './clientOrders.delivery';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
@@ -2988,9 +2989,7 @@ function orderMatchesListQuery(
   if (query.itemsMin !== undefined && itemsCount < query.itemsMin) return false;
   if (query.itemsMax !== undefined && itemsCount > query.itemsMax) return false;
 
-  const deliveryDate = orderDateTime(order.deliveryDate);
-  if (query.deliveryDateFrom && (deliveryDate === null || deliveryDate < query.deliveryDateFrom.getTime())) return false;
-  if (query.deliveryDateTo && (deliveryDate === null || deliveryDate > endOfDateTime(query.deliveryDateTo))) return false;
+  if (!matchesDeliveryDateRange(order.deliveryDate, query.deliveryDateFrom, query.deliveryDateTo)) return false;
 
   const updatedDate = orderDateTime(order.updatedAt || order.sentTo1cAt || order.createdAt);
   if (query.updatedFrom && (updatedDate === null || updatedDate < query.updatedFrom.getTime())) return false;
@@ -3058,7 +3057,7 @@ async function buildLocalOrdersWhere(query: ClientOrdersListQuery, userId: numbe
     : null;
   const endOfDay = (date: Date) => {
     const next = new Date(date);
-    next.setHours(23, 59, 59, 999);
+    next.setUTCHours(23, 59, 59, 999);
     return next;
   };
   const and: Prisma.OrderWhereInput[] = [];

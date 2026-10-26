@@ -1,4 +1,5 @@
 import express from 'express';
+import { clientOrderStatesSchema, getClientOrderStates } from './clientOrderStates';
 import { acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses, getClientOrderSubmissionOrder, submissionsBatchSchema, submissionsStatusSchema } from './clientOrderSubmissions';
 import { wakeClientOrderSubmissionWorker } from '../../services/clientOrderSubmissionWorker';
 import { getStoredClientOrderForSubmission } from './clientOrders.service';
@@ -96,6 +97,13 @@ router.use(authenticateToken, checkUserStatus, authorizeServiceAccess('client_or
 const asyncSubmissionsEnabled = (userId: number) => process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_ENABLED === '1'
   && (!process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_USER_IDS
     || process.env.CLIENT_ORDERS_ASYNC_SUBMISSIONS_USER_IDS.split(',').map(Number).includes(userId));
+
+router.post('/states', authorizePermissions(['view_client_orders']), async (req: AuthRequest, res) => {
+  const parsed = clientOrderStatesSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(errorResponse('Укажите не более 50 заказов', ErrorCodes.VALIDATION_ERROR));
+  try { return res.json(successResponse(await getClientOrderStates(req.user!.userId, parsed.data.identifiers, parsed.data.proofClientOrderIds))); }
+  catch (error) { return handleError(res, error, 'Не удалось проверить состояние заказов'); }
+});
 
 router.get('/submissions/capabilities', authorizePermissions(['manage_client_orders']), (req: AuthRequest, res) => {
   res.json(successResponse({ protocol: 'client-order-inbox-v1', enabled: asyncSubmissionsEnabled(req.user!.userId), batchSize: 10 }));
