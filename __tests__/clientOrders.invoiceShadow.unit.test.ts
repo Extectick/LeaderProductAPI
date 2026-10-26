@@ -3,7 +3,7 @@ import { getClientOrderByGuid } from '../src/modules/clientOrders/clientOrders.s
 import { getLiveClientOrder, restoreClientOrderDetailSnapshot } from '../src/modules/clientOrders/clientOrders.onecLive';
 import { readThroughClientOrdersCache } from '../src/modules/clientOrders/clientOrders.cache';
 import { OnecLpAppHttpError, OnecLpAppNetworkError, OnecLpAppTimeoutError } from '../src/modules/onec/onec.lpApp.client';
-import { isInvoiceShadowOrder } from '../src/modules/clientOrders/clientOrders.invoiceShadow';
+import { invoiceShadowListSnapshot, isInvoiceShadowOrder } from '../src/modules/clientOrders/clientOrders.invoiceShadow';
 
 jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
   order: { findFirst: jest.fn() }, employeeProfile: { findUnique: jest.fn() },
@@ -117,5 +117,27 @@ describe('invoice-only order details (НОУТ-120880)', () => {
     jest.mocked(prisma.order.findFirst).mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'foreign' } as any);
     await expect(getClientOrderByGuid(guid, 28)).rejects.toMatchObject({ status: 404 });
     expect(getLiveClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('does not resurrect a deletion-marked shadow through the live detail', async () => {
+    jest.mocked(getLiveClientOrder).mockResolvedValueOnce({ ...detail(), isDeleted: true });
+    await expect(getClientOrderByGuid(guid, 95)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('projects saved invoice content instead of zero lines/stale bookkeeping, without DB writes', () => {
+    const snapshot = shadow().last1cSnapshot;
+    expect(invoiceShadowListSnapshot(snapshot, guid)).toMatchObject({ status: 'CLOSED', isPostedIn1c: true, totalAmount: 111798, itemsCount: 4 });
+    expect(invoiceShadowListSnapshot({ ...snapshot, item: { ...snapshot.item, isDeleted: true } }, guid)).toBeNull();
+    expect(invoiceShadowListSnapshot(snapshot, 'another-order')).toBeNull();
+  });
+
+  it('shows actual posting for a synced API-owned detail without changing content or tokens', async () => {
+    const order = { ...shadow(), clientOrderId: 'phone', last1cSnapshot: { item: detail() },
+      isPostedIn1c: false, hasRealization: false, status: 'SENT_TO_1C', items: [{ ...detail().items[0], quantity: 7 }] };
+    jest.mocked(prisma.order.findFirst).mockResolvedValueOnce(order as any);
+    const result = await getClientOrderByGuid(guid, 95);
+    expect(result).toMatchObject({ status: 'CLOSED', isPostedIn1c: true });
+    expect(result.items[0].quantity).toBe(7);
+    expect(order.isPostedIn1c).toBe(false);
   });
 });

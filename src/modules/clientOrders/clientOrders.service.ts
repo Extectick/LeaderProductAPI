@@ -15,9 +15,11 @@ import { appendOrderEvent } from '../orders/orderEvents';
 import { assertOrderIntegrity, OrderIntegrityError, lockOrderMutation, orderContentSnapshot, orderContentToken } from '../orders/orderIntegrity';
 import { acceptedOrderQuantities, amendmentAvailableQuantity, previewOrderAmendment } from './clientOrderAmendments';
 import { decimalToNumber, mapOrderDetail, orderDetailSelect, toDecimal } from '../orders/orderModel';
-import { invoiceShadowDetail, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
+import { invoiceShadowDetail, invoiceShadowListSnapshot, isInvoiceShadowOrder } from './clientOrders.invoiceShadow';
 import { clientOrderPayloadHash, proveAcceptedClientOperation, proveAcceptedSubmissionOperation } from './acceptedClientOperation';
 import { matchesDeliveryDateRange } from './orderCalendarDate';
+import { offlineProductPriceKey, reviewOfflineOrderPrices } from './offlineOrderPrices';
+import { cancellationDocumentMatches, CANCEL_FAILURE_POLICY, CANCEL_REALIZATION_MESSAGE } from './clientOrderCancellation';
 import { resolveDraftDeliveryMethod } from './clientOrders.delivery';
 import { draftBackupHash, getDraftBackup, markDraftSubmitted, recordDraftReview, saveDraftBackup } from './clientOrderDraftBackups';
 import { MarketplaceError } from '../marketplace/marketplace.service';
@@ -381,8 +383,9 @@ export function resolveMergedClientOrderLast1cError(
   return normalizeClientOrderPublicError(live.last1cError ?? localLast1cError);
 }
 
-function latestExportValidationFromEvents(events: Array<{ eventType: string; payload: unknown }>) {
+export function latestExportValidationFromEvents(events: Array<{ eventType: string; payload: unknown }>) {
   for (const event of events) {
+    if (['ONEC_ORDER_PUSH_OK', 'ONEC_ORDER_CANCEL_PUSH_OK', 'ONEC_ORDER_CANCEL_DENIED', 'ONEC_ORDER_PUSH_SAVED_NOT_POSTED'].includes(event.eventType)) return null;
     if (event.eventType !== 'ONEC_ORDER_PUSH_ERROR') continue;
     const payload = jsonRecord(event.payload);
     if (!payload) continue;
@@ -3589,8 +3592,27 @@ export async function listClientOrders(query: ClientOrdersListQuery, userId: num
       prisma.order.count({ where }),
     ]);
 
+    // Fetch full snapshots only for invoice-only rows on the fallback page, not
+    // for every order/list request. No historical Order rows are rewritten.
+    const shadowIds = fallbackItems.filter(item => !item.clientOrderId && item.syncState === OrderSyncState.SYNCED
+      && item._count.items === 0 && item.number1c).map(item => item.id);
+    const snapshots = shadowIds.length ? await prisma.order.findMany({ where: { id: { in: shadowIds } },
+      select: { id: true, last1cSnapshot: true } }) : [];
+    const byId = new Map(snapshots.map(item => [item.id, item.last1cSnapshot]));
+    const projected = fallbackItems.map(item => {
+      const mapped = mapClientOrderSummary(item, queuePositions);
+      const snapshot = byId.get(item.id) as { invoiceShadow?: boolean } | undefined;
+      if (!snapshot?.invoiceShadow) return { ...mapped, stale: true };
+      const saved = invoiceShadowListSnapshot(snapshot, item.guid!);
+      // An empty bookkeeping row (or a known deleted document) is not fallback
+      // document content. Keep the DB record and invoice artifacts untouched.
+      if (!saved) return null;
+      return { ...mapped, ...saved, guid: mapped.guid, appGuid: mapped.appGuid,
+        revision: mapped.revision, source: mapped.source, origin: 'merged', items: [],
+        readOnly: true, readOnlyReason: 'Сохранённый снимок 1С. Документ доступен только для просмотра.', stale: true };
+    }).filter(item => item !== null);
     return {
-      items: fallbackItems.map((item) => mapClientOrderSummary(item, queuePositions)),
+      items: projected,
       total: fallbackTotal,
       statusCounts: localStatusCounts,
       limit: query.limit,
@@ -3895,6 +3917,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             'Ошибка получения заказа клиента из 1С',
             { allowCachedWhenCircuitOpen: true }
           );
+          if (liveDetail.isDeleted) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ помечен на удаление в 1С.');
           if (invoiceShadow) {
             return enrichOrderItemsWithImages(invoiceShadowDetail(mapped, liveDetail));
           }
@@ -3908,6 +3931,10 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
             origin: 'merged',
             source: order.source,
             revision: order.revision,
+            // A fresh read determines presentation, not the old bookkeeping
+            // status. Never use it to acknowledge a pending local amendment.
+            status: order.syncState === OrderSyncState.SYNCED ? liveDetail.status : mapped.status,
+            isPostedIn1c: order.syncState === OrderSyncState.SYNCED ? liveDetail.isPostedIn1c : mapped.isPostedIn1c,
             // Old snapshots may have erased only this API field. Use the actual
             // read-only 1C value rather than hiding both delivery choices.
             deliveryMethod: mapped.deliveryMethod ?? liveDetail.deliveryMethod,
@@ -3945,6 +3972,7 @@ export async function getClientOrderByGuid(guid: string, userId?: number) {
     const matchesOrder = documentGuid.toLowerCase() === order.guid?.toLowerCase()
       || (typeof snapshotItem?.appGuid === 'string' && snapshotItem.appGuid.toLowerCase() === order.guid?.toLowerCase());
     const saved = documentGuid && matchesOrder ? restoreClientOrderDetailSnapshot(snapshotItem, documentGuid) : null;
+    if (saved?.isDeleted) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, 'Заказ помечен на удаление в 1С.');
     if (!saved) {
       throw new ClientOrdersError(502, ErrorCodes.ONEC_UNAVAILABLE, 'Не удалось загрузить товары заказа из 1С. Повторите открытие документа.');
     }
@@ -5559,7 +5587,7 @@ function referenceStale(kind: string, guid: string): never {
  * Offline drafts are never trusted for commercial data. This check deliberately
  * bypasses read-through caches and asks 1C for one coherent manager-aware batch.
  */
-async function validateOfflineSubmission(
+export async function validateOfflineSubmission(
   body: ClientOrderMutationBody,
   managerGuid: string | null,
   acceptedQuantities: Map<string, number> = new Map()
@@ -5582,15 +5610,27 @@ async function validateOfflineSubmission(
       body.deliveryAddressGuid
         ? findLiveDeliveryAddress(body.deliveryAddressGuid, body.counterpartyGuid)
         : Promise.resolve(null),
-      getLiveProductsByGuids({
-        productGuids: [...new Set(body.items.map((item) => item.productGuid))],
-        organizationGuid: body.organizationGuid,
-        counterpartyGuid: body.counterpartyGuid,
-        agreementGuid: body.agreementGuid ?? undefined,
-        warehouseGuid: body.warehouseGuid ?? undefined,
-        priceTypeGuid: body.priceTypeGuid ?? undefined,
-        managerGuid,
-      }),
+      (async () => {
+        const groups = new Map<string, Set<string>>();
+        for (const line of body.items) {
+          const type = (line.priceTypeGuid ?? body.priceTypeGuid ?? '').toLowerCase();
+          const guids = groups.get(type) ?? new Set<string>();
+          guids.add(line.productGuid.toLowerCase());
+          groups.set(type, guids);
+        }
+        const batches = [...groups].flatMap(([priceTypeGuid, guids]) => {
+          const ids = [...guids];
+          return Array.from({ length: Math.ceil(ids.length / 200) }, (_, i) => ({ priceTypeGuid, productGuids: ids.slice(i * 200, (i + 1) * 200) }));
+        });
+        const results = await mapWithConcurrency(batches, 4, async batch => {
+          const items = await getLiveProductsByGuids({ ...batch,
+            priceTypeGuid: batch.priceTypeGuid || undefined,
+            organizationGuid: body.organizationGuid, counterpartyGuid: body.counterpartyGuid,
+            agreementGuid: body.agreementGuid ?? undefined, warehouseGuid: body.warehouseGuid ?? undefined, managerGuid });
+          return items.map(product => [offlineProductPriceKey(product.guid, batch.priceTypeGuid), product] as const);
+        });
+        return new Map(results.flat());
+      })(),
     ]);
 
     if (!organization || organization.isActive === false || organization.isSelectable === false) {
@@ -5622,19 +5662,9 @@ async function validateOfflineSubmission(
       referenceStale('Адрес доставки', body.deliveryAddressGuid);
     }
 
-    const byGuid = new Map(products.map((product) => [product.guid.toLowerCase(), product]));
     const requirements = new Map<string, { productGuid: string; name: string; required: number; available: number }>();
-    const priceChanges: Array<{
-      lineGuid: string | null;
-      productGuid: string;
-      productName: string;
-      oldPrice: number;
-      currentPrice: number;
-    }> = [];
-    let oldTotal = 0;
-    let currentTotal = 0;
-    const normalizedItems = body.items.map((line) => {
-      const product = byGuid.get(line.productGuid.toLowerCase());
+    const priceInputs = body.items.map((line) => {
+      const product = products.get(offlineProductPriceKey(line.productGuid, line.priceTypeGuid ?? body.priceTypeGuid));
       if (!product || product.isActive === false) referenceStale('Товар', line.productGuid);
       const pack = line.packageGuid
         ? product.packages.find((item) => item.guid.toLowerCase() === line.packageGuid!.toLowerCase())
@@ -5644,35 +5674,17 @@ async function validateOfflineSubmission(
       const requiredBase = line.isCancelled ? 0 : Number(line.quantity) * multiplier;
       const available = amendmentAvailableQuantity(Number(product.stock?.available ?? product.stock?.freeAvailable ?? 0),
         acceptedQuantities.get(product.guid.toLowerCase()) ?? 0);
-      const requirement = requirements.get(product.guid) ?? {
+      const requirement = requirements.get(product.guid.toLowerCase()) ?? {
         productGuid: product.guid,
         name: product.name,
         required: 0,
         available: Number.isFinite(available) ? available : 0,
       };
       requirement.required += Number.isFinite(requiredBase) ? requiredBase : 0;
-      requirements.set(product.guid, requirement);
-
-      const draftPrice = Number(line.basePrice ?? 0);
-      const currentPrice = Number(product.basePrice ?? 0);
-      const manualPrice = line.manualPrice !== null && line.manualPrice !== undefined
-        ? Number(line.manualPrice)
-        : null;
-      oldTotal += (manualPrice ?? draftPrice) * requiredBase;
-      currentTotal += (manualPrice ?? currentPrice) * requiredBase;
-      if (manualPrice !== null) return line;
-      if (!line.isCancelled && Math.abs(draftPrice - currentPrice) > 0.0001) {
-        priceChanges.push({
-          lineGuid: line.lineGuid ?? null,
-          productGuid: product.guid,
-          productName: product.name,
-          oldPrice: draftPrice,
-          currentPrice,
-        });
-      }
-      return body.offlineReview?.pricePolicy === 'USE_CURRENT'
-        ? { ...line, basePrice: currentPrice }
-        : line;
+      // Different price types must not split stock demand for the same product.
+      requirement.available = Math.min(requirement.available, Number.isFinite(available) ? available : 0);
+      requirements.set(product.guid.toLowerCase(), requirement);
+      return { line, productName: product.name, currentPrice: product.basePrice, quantityBase: requiredBase };
     });
 
     const shortages = [...requirements.values()]
@@ -5686,21 +5698,19 @@ async function validateOfflineSubmission(
         { items: shortages }
       );
     }
-    if (priceChanges.length && body.offlineReview.pricePolicy === 'ASK') {
+    const prices = reviewOfflineOrderPrices(priceInputs, body.offlineReview.pricePolicy, body.generalDiscountPercent);
+    if (prices.requiresReview) {
       throw new ClientOrdersError(
         409,
         ErrorCodes.PRICE_REVIEW_REQUIRED,
-        'Цены изменились после последней синхронизации',
-        {
-          items: priceChanges,
-          oldTotal: Math.round(oldTotal * 100) / 100,
-          currentTotal: Math.round(currentTotal * 100) / 100,
-          totalDifference: Math.round((currentTotal - oldTotal) * 100) / 100,
-        }
+        prices.details.missingPrices.length
+          ? 'Для части товаров не получена актуальная цена. Выберите другой вид цены или явно оставьте цены заказа.'
+          : 'Цены требуют проверки перед отправкой',
+        prices.details
       );
     }
 
-    return { ...body, items: normalizedItems };
+    return { ...body, items: prices.items };
   } catch (error) {
     throwOfflineOnecUnavailable(error);
   }
@@ -6925,7 +6935,15 @@ export async function restoreClientOrder(guid: string, userId: number, body: Cli
 }
 
 export async function cancelClientOrder(guid: string, userId: number, body: ClientOrderCancelBody) {
-  await prisma.$transaction(async (tx) => {
+  const initial = await prisma.order.findFirst({ where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
+    select: { revision: true, status: true, syncState: true } });
+  if (!initial) throw new ClientOrdersError(404, ErrorCodes.NOT_FOUND, `Заказ ${guid} не найден`);
+  assertRevision(initial.revision, body.revision);
+  const live = initial.status !== OrderStatus.DRAFT && initial.status !== OrderStatus.CANCELLED && !isOrderQueued(initial)
+    ? await onecLive(async () => getLiveClientOrder(guid, { appGuid: guid, managerGuid: await getManagerGuidForUser(userId) ?? '' }), 'Не удалось проверить возможность отмены в 1С')
+    : null;
+  if (live && !cancellationDocumentMatches(live, guid)) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Не удалось сверить заказ перед отменой. Обновите документ.');
+  const denied = await prisma.$transaction(async (tx) => {
     await lockOrderMutation(tx, guid);
     const order = await tx.order.findFirst({
       where: { guid, source: OrderSource.MANAGER_APP, createdByUserId: userId },
@@ -6938,6 +6956,8 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
         source: true,
         isPostedIn1c: true,
         hasRealization: true,
+        lastExportError: true,
+        last1cError: true,
       },
     });
 
@@ -6949,6 +6969,14 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
       return;
     }
     assertRevision(order.revision, body.revision);
+
+    if (live?.hasRealization) {
+      await appendOrderEvent(tx, { orderId: order.id, revision: order.revision,
+        source: OrderEventSource.APP_CANCEL_REQUEST, eventType: 'ONEC_ORDER_CANCEL_DENIED', actorUserId: userId,
+        note: CANCEL_REALIZATION_MESSAGE,
+        payload: { message: CANCEL_REALIZATION_MESSAGE, willRetry: false, stateVerified: true } });
+      return true;
+    }
 
     if (isOrderQueued(order)) {
       await unqueueClientOrderInTransaction(tx, order, userId, body.reason ?? 'Снят с очереди менеджером из приложения');
@@ -6984,9 +7012,16 @@ export async function cancelClientOrder(guid: string, userId: number, body: Clie
         cancelRequestedAt: cancelledAt.toISOString(),
         requiresOnecCancel,
         reason: body.reason ?? null,
+        failurePolicy: CANCEL_FAILURE_POLICY,
+        previousStatus: order.status,
+        previousSyncState: order.syncState,
+        previousExportError: order.lastExportError,
+        previous1cError: order.last1cError,
       },
     });
   });
+
+  if (denied) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, CANCEL_REALIZATION_MESSAGE, { action: 'CANCEL_DENIED' });
 
   return getClientOrderByGuid(guid, userId);
 }
