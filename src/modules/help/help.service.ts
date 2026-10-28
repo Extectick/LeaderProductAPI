@@ -2,7 +2,8 @@ import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import prisma from '../../prisma/client';
 import { explainServiceAccessForUser } from '../../services/serviceAccess';
-import { canEditHelpMessage, canReopenHelpTicket, helpTitle, HELP_REACTIONS, HELP_REOPEN_MS } from './help.policy';
+import { canEditHelpMessage, canReopenHelpTicket, helpTitle, HELP_MAX_ATTACHMENTS, HELP_REACTIONS, HELP_REOPEN_MS } from './help.policy';
+import { helpDateQuery, helpHistoryQuery, helpSearchQuery, helpSyncQuery, type HelpDateQuery, type HelpHistoryQuery, type HelpSearchQuery, type HelpSyncQuery } from './help.history';
 
 export class HelpError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
@@ -36,17 +37,20 @@ async function lock(db: Tx, id: number) { await db.$executeRaw`SELECT pg_advisor
 export async function helpTransaction<T>(id: number, fn: (db: Tx) => Promise<T>) {
   return prisma.$transaction(async db => { await lock(db, id); return fn(db); }, { timeout: 15000 });
 }
-const messageInclude = { attachments: true, reactions: true, replyTo: { include: { attachments: true } } } as const;
+const attachmentOrder = [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }] as const;
+const attachmentInclude = { orderBy: [...attachmentOrder] };
+const messageInclude = { attachments: attachmentInclude, reactions: true, replyTo: { include: { attachments: attachmentInclude } } } as const;
 const miniUserSelect = { id: true, firstName: true, lastName: true, avatarUrl: true, employeeProfile: { select: { avatarUrl: true } } } as const;
-export function attachmentDto(file: { id: string; name: string; mimeType: string; kind: string; size: number }) {
-  return { id: file.id, name: file.name, mimeType: file.mimeType, kind: file.kind, size: file.size, url: `/help/attachments/${file.id}` };
+export function attachmentDto(file: { id: string; name: string; mimeType: string; kind: string; size: number; width?: number | null; height?: number | null; thumbnailDataUri?: string | null; position?: number }) {
+  return { id: file.id, name: file.name, mimeType: file.mimeType, kind: file.kind, size: file.size, url: `/help/attachments/${file.id}`,
+    width: file.width ?? null, height: file.height ?? null, thumbnailDataUri: file.thumbnailDataUri ?? null, position: file.position ?? 0 };
 }
-async function userMap(ids: number[]) {
-  const users = await prisma.user.findMany({ where: { id: { in: [...new Set(ids)] } }, select: miniUserSelect });
+async function userMap(ids: number[], db: Tx | typeof prisma = prisma) {
+  const users = await db.user.findMany({ where: { id: { in: [...new Set(ids)] } }, select: miniUserSelect });
   return new Map(users.map(u => [u.id, { id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') || 'Сотрудник', avatarUrl: u.employeeProfile?.avatarUrl || u.avatarUrl }]));
 }
-async function mapMessages(rows: any[], actor: HelpActor) {
-  const users = await userMap(rows.flatMap(m => [m.authorId, ...(m.replyTo ? [m.replyTo.authorId] : [])]));
+async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma = prisma) {
+  const users = await userMap(rows.flatMap(m => [m.authorId, ...(m.replyTo ? [m.replyTo.authorId] : [])]), db);
   const author = (id: number) => users.get(id) || { id, name: 'Сотрудник', avatarUrl: null };
   return rows.map(m => {
     const reactions = new Map<string, number[]>();
@@ -56,18 +60,19 @@ async function mapMessages(rows: any[], actor: HelpActor) {
       attachments: m.attachments.map(attachmentDto), reactions: [...reactions].map(([emoji,userIds]) => ({ emoji, count:userIds.length, mine:userIds.includes(actor.userId), userIds })) };
   });
 }
-async function ticketDto(ticket: any, actor: HelpActor) {
-  const users = await userMap(ticket.members.map((m: any) => m.userId));
-  const lastMessage = await prisma.helpMessage.findFirst({ where: { ticketId: ticket.id }, orderBy: { sequence: 'desc' }, include: messageInclude });
+async function ticketDto(ticket: any, actor: HelpActor, db: Tx | typeof prisma = prisma) {
+  const users = await userMap(ticket.members.map((m: any) => m.userId), db);
+  const lastMessage = await db.helpMessage.findFirst({ where: { ticketId: ticket.id }, orderBy: { sequence: 'desc' }, include: messageInclude });
   const member = ticket.members.find((m: any) => m.userId === actor.userId);
-  const unreadCount = await prisma.helpMessage.count({ where: { ticketId: ticket.id, authorId: { not: actor.userId }, sequence: { gt: member?.lastReadSequence || 0 } } });
-  const source = ticket.sourceTicketId ? await prisma.helpTicket.findFirst({ where: { id: ticket.sourceTicketId, ...visibleHelpWhere(actor, actor.canManage) }, select: { id:true,title:true } }) : null;
-  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => ({userId:m.userId,role:m.role,user:users.get(m.userId)})), unreadCount, lastMessage:lastMessage ? (await mapMessages([lastMessage],actor))[0] : null, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:false };
+  const unreadCount = await db.helpMessage.count({ where: { ticketId: ticket.id, authorId: { not: actor.userId }, sequence: { gt: member?.lastReadSequence || 0 } } });
+  const source = ticket.sourceTicketId ? await db.helpTicket.findFirst({ where: { id: ticket.sourceTicketId, ...visibleHelpWhere(actor, actor.canManage) }, select: { id:true,title:true } }) : null;
+  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => ({userId:m.userId,role:m.role,user:users.get(m.userId),lastReadSequence:m.lastReadSequence})), unreadCount, lastReadSequence:member?.lastReadSequence || 0, lastSequence:ticket.messageSequence, lastMessage:lastMessage ? (await mapMessages([lastMessage],actor,db))[0] : null, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:false };
 }
 export async function helpDetail(id: number, actor: HelpActor) {
-  const ticket = await requireHelpTicket(prisma,id,actor);
-  const rows = await prisma.helpMessage.findMany({ where:{ticketId:id},orderBy:{sequence:'desc'},take:100,include:messageInclude });
-  return { ticket:await ticketDto(ticket,actor),messages:await mapMessages(rows.reverse(),actor) };
+  return prisma.$transaction(async db => {
+    const ticket = await requireHelpTicket(db,id,actor);
+    return { ticket:await ticketDto(ticket,actor,db), ...await historyPage(db,ticket,actor,{limit:100}) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
 export async function listHelpTickets(actor: HelpActor, status: string, queue: boolean, cursor?: number, q?: string) {
   const query=(q||'').trim();
@@ -82,11 +87,94 @@ export async function listHelpTickets(actor: HelpActor, status: string, queue: b
   const rows = await prisma.helpTicket.findMany({ where:{AND:[visibleHelpWhere(actor,queue),{status},search]},include:{members:true},orderBy:[{updatedAt:'desc'},{id:'desc'}],take:51,...(cursor ? {cursor:{id:cursor},skip:1}:{}) });
   return { tickets:await Promise.all(rows.slice(0,50).map(t=>ticketDto(t,actor))), nextCursor:rows.length>50 ? rows[49].id:null };
 }
-export async function helpMessages(id:number,actor:HelpActor,before?:number) {
-  await requireHelpTicket(prisma,id,actor);
-  const rows=await prisma.helpMessage.findMany({where:{ticketId:id,...(before?{sequence:{lt:before}}:{})},orderBy:{sequence:'desc'},take:101,include:messageInclude});
-  const page=rows.slice(0,100).reverse();
-  return {messages:await mapMessages(page,actor),nextCursor:rows.length>100?page[0].sequence:null};
+async function historyMetadata(db: Tx, ticket: Awaited<ReturnType<typeof requireHelpTicket>>, actor: HelpActor) {
+  const lastReadSequence = ticket.members.find(member => member.userId === actor.userId)?.lastReadSequence || 0;
+  const firstUnread = await db.helpMessage.findFirst({ where: { ticketId: ticket.id, authorId: { not: actor.userId }, sequence: { gt: lastReadSequence } }, orderBy: { sequence: 'asc' }, select: { sequence: true } });
+  const lastEvent = await db.helpEvent.findFirst({ where: { ticketId: ticket.id }, orderBy: { id: 'desc' }, select: { id: true } });
+  return { lastReadSequence, firstUnreadSequence: firstUnread?.sequence ?? null, lastSequence: ticket.messageSequence, eventCursor: lastEvent?.id ?? 0, snapshotCursor: lastEvent?.id ?? 0 };
+}
+
+async function historyPage(db: Tx, ticket: Awaited<ReturnType<typeof requireHelpTicket>>, actor: HelpActor, query: HelpHistoryQuery) {
+  const id = ticket.id, limit = query.limit;
+  let around = query.around;
+  if (query.aroundMessageId !== undefined) {
+    const target = await db.helpMessage.findFirst({ where: { id: query.aroundMessageId, ticketId: id }, select: { sequence: true } });
+    if (!target) throw new HelpError(404, 'HELP_MESSAGE_NOT_FOUND', 'Сообщение не найдено');
+    around = target.sequence;
+  }
+  let page;
+  if (around !== undefined) {
+    const older = await db.helpMessage.findMany({ where: { ticketId: id, sequence: { lte: around } }, orderBy: { sequence: 'desc' }, take: Math.ceil(limit / 2), include: messageInclude });
+    const newer = await db.helpMessage.findMany({ where: { ticketId: id, sequence: { gt: around } }, orderBy: { sequence: 'asc' }, take: limit - older.length, include: messageInclude });
+    // Near either end, fill the remaining window from the other direction.
+    const missing = limit - older.length - newer.length;
+    if (missing > 0 && older.length) older.push(...await db.helpMessage.findMany({ where: { ticketId: id, sequence: { lt: older[older.length - 1].sequence } }, orderBy: { sequence: 'desc' }, take: missing, include: messageInclude }));
+    page = [...older.reverse(), ...newer];
+  } else if (query.after !== undefined) {
+    page = await db.helpMessage.findMany({ where: { ticketId: id, sequence: { gt: query.after } }, orderBy: { sequence: 'asc' }, take: limit, include: messageInclude });
+  } else {
+    page = (await db.helpMessage.findMany({ where: { ticketId: id, ...(query.before !== undefined ? { sequence: { lt: query.before } } : {}) }, orderBy: { sequence: 'desc' }, take: limit, include: messageInclude })).reverse();
+  }
+  const first = page[0]?.sequence, last = page[page.length - 1]?.sequence;
+  // An interactive transaction owns one connection; do not enqueue concurrent
+  // node-postgres queries on that connection.
+  const older = first === undefined ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { lt: first } }, select: { id: true } });
+  const newer = last === undefined ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { gt: last } }, select: { id: true } });
+  const metadata = await historyMetadata(db,ticket,actor);
+  const olderCursor = older ? first! : null, newerCursor = newer ? last! : null;
+  return { messages:await mapMessages(page,actor,db), nextCursor:olderCursor, olderCursor, newerCursor, hasOlder:!!older, hasNewer:!!newer, ...metadata };
+}
+
+export async function helpMessages(id: number, actor: HelpActor, input: number | Partial<HelpHistoryQuery> = {}) {
+  const query = helpHistoryQuery.parse(typeof input === 'number' ? { before: input } : input);
+  return prisma.$transaction(async db => historyPage(db,await requireHelpTicket(db,id,actor),actor,query), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+
+export async function searchHelpMessages(id: number, actor: HelpActor, input: Partial<HelpSearchQuery>) {
+  const query = helpSearchQuery.parse(input);
+  return prisma.$transaction(async db => {
+    await requireHelpTicket(db,id,actor);
+    const literal = query.q.replace(/[\\%_]/g, character => `\\${character}`);
+    const where: Prisma.HelpMessageWhereInput = { ticketId: id, text: { contains: literal, mode: 'insensitive' } };
+    const total = await db.helpMessage.count({ where });
+    const rows = await db.helpMessage.findMany({ where: { ...where, ...(query.before !== undefined ? { sequence: { lt: query.before } } : {}) }, orderBy: { sequence: 'desc' }, take: query.limit + 1, include: messageInclude });
+    const page = rows.slice(0,query.limit);
+    const lastEvent = await db.helpEvent.findFirst({ where: { ticketId: id }, orderBy: { id: 'desc' }, select: { id: true } });
+    return { messages: await mapMessages(page,actor,db), total, nextCursor: rows.length > query.limit ? page[page.length - 1].sequence : null, snapshotCursor: lastEvent?.id ?? 0 };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+
+/** Resolve a local-calendar day without loading the intervening history or marking it read. */
+export async function findHelpMessageByDate(id: number, actor: HelpActor, input: HelpDateQuery) {
+  const query = helpDateQuery.parse(input);
+  return prisma.$transaction(async db => {
+    await requireHelpTicket(db,id,actor);
+    const message = await db.helpMessage.findFirst({
+      where: { ticketId: id, createdAt: { gte: new Date(query.from), lt: new Date(query.to) } },
+      orderBy: { sequence: 'asc' }, select: { id: true, sequence: true },
+    });
+    if (!message) throw new HelpError(404, 'HELP_DATE_MESSAGE_NOT_FOUND', 'За выбранный день сообщений нет');
+    return { messageId: message.id, sequence: message.sequence };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+
+export async function syncHelpTicket(id: number, actor: HelpActor, input: Partial<HelpSyncQuery> = {}) {
+  const query = helpSyncQuery.parse(input);
+  return prisma.$transaction(async db => {
+    const ticket = await requireHelpTicket(db,id,actor);
+    const rows = await db.helpEvent.findMany({ where: { ticketId: id, id: { gt: query.after } }, orderBy: { id: 'asc' }, take: query.limit + 1 });
+    const events = rows.slice(0,query.limit);
+    const messageIds = [...new Set(events.flatMap(e => e.messageId === null ? [] : [e.messageId]))];
+    const changed = await db.helpMessage.findMany({ where: { ticketId: id, id: { in: messageIds } }, orderBy: { sequence: 'asc' }, include: messageInclude });
+    const retainedIds = new Set(changed.map(m => m.id));
+    const metadata = await historyMetadata(db,ticket,actor);
+    const nextCursor = events[events.length - 1]?.id ?? query.after;
+    return {
+      ticket: await ticketDto(ticket,actor,db), events, messages: await mapMessages(changed,actor,db),
+      deletedMessageIds: messageIds.filter(messageId => !retainedIds.has(messageId)),
+      ...metadata, nextCursor, eventCursor: nextCursor, hasMore: rows.length > query.limit,
+    };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
 async function event(db:Tx,ticketId:number,actorId:number,type:string,messageId?:number) {
   // Global event IDs must follow commit order, otherwise reconnect cursors could skip
@@ -115,22 +203,22 @@ async function addMessage(db:Tx,ticketId:number,actor:HelpActor,input:HelpMessag
   if (!text && !ids.length && kind==='TEXT' && !input.forwardedFromId) throw new HelpError(400,'EMPTY_MESSAGE','Введите сообщение или прикрепите файл');
   let forwarded:any=null;
   if(input.forwardedFromId) {
-    forwarded=await db.helpMessage.findUnique({where:{id:input.forwardedFromId},include:{attachments:true}});
+    forwarded=await db.helpMessage.findUnique({where:{id:input.forwardedFromId},include:{attachments:attachmentInclude}});
     if(!forwarded) throw new HelpError(404,'HELP_NOT_FOUND','Сообщение не найдено');
     await requireHelpTicket(db,forwarded.ticketId,actor);
   }
   if(input.replyToId && !await db.helpMessage.findFirst({where:{id:input.replyToId,ticketId}})) throw new HelpError(400,'INVALID_REPLY','Ответ должен ссылаться на сообщение этого обращения');
   const files=await db.helpAttachment.findMany({where:{id:{in:ids},ownerId:actor.userId,messageId:null}});
   if(files.length!==ids.length) throw new HelpError(400,'INVALID_ATTACHMENTS','Вложения недоступны или уже отправлены');
-  if(files.length+(forwarded?.attachments.length||0)>5) throw new HelpError(400,'TOO_MANY_FILES','Не более 5 файлов');
+  if(files.length+(forwarded?.attachments.length||0)>HELP_MAX_ATTACHMENTS) throw new HelpError(400,'TOO_MANY_FILES','Не более 10 файлов');
   const updated=await db.helpTicket.update({where:{id:ticketId},data:{messageSequence:{increment:1},updatedAt:new Date()}});
   const message=await db.helpMessage.create({data:{ticketId,authorId:actor.userId,authorRole:ticket.ownerId===actor.userId?'USER':'IT',kind:kind==='REOPEN'?'TEXT':kind,clientMessageId:input.clientMessageId,requestHash:requestHash(input,kind),sequence:updated.messageSequence,text:forwarded?.text||text,replyToId:input.replyToId,forwardedFromId:input.forwardedFromId,rating:kind==='CLOSURE'?(input.rating??0):null}});
-  if(ids.length) {
-    const bound=await db.helpAttachment.updateMany({where:{id:{in:ids},ownerId:actor.userId,messageId:null},data:{messageId:message.id}});
-    if(bound.count!==ids.length) throw new HelpError(409,'ATTACHMENT_CONFLICT','Вложение уже отправлено');
+  for(const [position,id] of ids.entries()) {
+    const bound=await db.helpAttachment.updateMany({where:{id,ownerId:actor.userId,messageId:null},data:{messageId:message.id,position}});
+    if(bound.count!==1) throw new HelpError(409,'ATTACHMENT_CONFLICT','Вложение уже отправлено');
   }
   // Forward metadata references the same immutable private object; each copy has its own ACL.
-  for(const f of forwarded?.attachments||[]) await db.helpAttachment.create({data:{ownerId:actor.userId,messageId:message.id,name:f.name,mimeType:f.mimeType,kind:f.kind,size:f.size,objectKey:f.objectKey,sha256:f.sha256}});
+  for(const [index,f] of (forwarded?.attachments||[]).entries()) await db.helpAttachment.create({data:{ownerId:actor.userId,messageId:message.id,name:f.name,mimeType:f.mimeType,kind:f.kind,size:f.size,objectKey:f.objectKey,sha256:f.sha256,width:f.width,height:f.height,thumbnailDataUri:f.thumbnailDataUri,position:ids.length+index}});
   await db.helpMember.update({where:{ticketId_userId:{ticketId,userId:actor.userId}},data:{lastReadSequence:message.sequence}});
   await event(db,ticketId,actor.userId,kind==='CLOSURE'?'TICKET_CLOSED':kind==='REOPEN'?'TICKET_REOPENED':'MESSAGE_CREATED',message.id);
   return message;
@@ -182,15 +270,17 @@ export async function editHelpMessage(id:number,actor:HelpActor,text:string,rati
   if(!message) throw new HelpError(404,'HELP_NOT_FOUND','Сообщение не найдено');
   await helpTransaction(message.ticketId,async db=>{
     await requireHelpTicket(db,message.ticketId,actor,false);
-    const m=await db.helpMessage.findUniqueOrThrow({where:{id},include:{attachments:true}});
+    const m=await db.helpMessage.findUniqueOrThrow({where:{id},include:{attachments:attachmentInclude}});
     if(!canEditHelpMessage(m.authorId,actor.userId,m.createdAt)||m.kind==='SYSTEM') throw new HelpError(403,'EDIT_EXPIRED','Изменить своё сообщение можно в течение часа');
     const ids=attachmentIds??m.attachments.map(f=>f.id);
-    if(ids.length>5||new Set(ids).size!==ids.length) throw new HelpError(400,'INVALID_ATTACHMENTS','Не более 5 разных файлов');
+    if(ids.length>HELP_MAX_ATTACHMENTS||new Set(ids).size!==ids.length) throw new HelpError(400,'INVALID_ATTACHMENTS','Не более 10 разных файлов');
     if(!text.trim()&&!ids.length&&m.kind!=='CLOSURE') throw new HelpError(400,'EMPTY_MESSAGE','Сообщение не может быть пустым');
     if(rating!==undefined&&m.kind!=='CLOSURE') throw new HelpError(400,'INVALID_RATING','Оценка доступна только для сообщения о закрытии');
     if(attachmentIds!==undefined) {
-      const bound=await db.helpAttachment.updateMany({where:{id:{in:ids},ownerId:actor.userId,OR:[{messageId:id},{messageId:null}]},data:{messageId:id}});
-      if(bound.count!==ids.length) throw new HelpError(400,'INVALID_ATTACHMENTS','Вложения недоступны или уже отправлены');
+      for(const [position,attachmentId] of ids.entries()) {
+        const bound=await db.helpAttachment.updateMany({where:{id:attachmentId,ownerId:actor.userId,OR:[{messageId:id},{messageId:null}]},data:{messageId:id,position}});
+        if(bound.count!==1) throw new HelpError(400,'INVALID_ATTACHMENTS','Вложения недоступны или уже отправлены');
+      }
       await db.helpAttachment.updateMany({where:{messageId:id,id:{notIn:ids}},data:{messageId:null}});
     }
     await db.helpMessage.update({where:{id},data:{text:text.trim(),editedAt:new Date(),...(rating!==undefined?{rating}:{})}});
@@ -220,18 +310,21 @@ export async function helpItAction(id:number,actor:HelpActor,claim:boolean) {
   });
 }
 export async function readHelpTicket(id:number,actor:HelpActor,sequence?:number) {
-  await helpTransaction(id,async db=>{
+  return helpTransaction(id,async db=>{
     const t=await requireHelpTicket(db,id,actor,false);
     const member=t.members.find(m=>m.userId===actor.userId)!;
     const value=Math.max(member.lastReadSequence,Math.min(sequence??t.messageSequence,t.messageSequence));
-    if(value===member.lastReadSequence) return;
+    if(value===member.lastReadSequence) return false;
     await db.helpMember.update({where:{ticketId_userId:{ticketId:id,userId:actor.userId}},data:{lastReadSequence:value}});
     await event(db,id,actor.userId,'READ_UPDATED');
+    return true;
   });
 }
 export async function readAllHelp(actor:HelpActor) {
   const members=await prisma.helpMember.findMany({where:{userId:actor.userId,...(actor.canManage?{}:{role:'OWNER'})},include:{ticket:true}});
-  for(const m of members) await readHelpTicket(m.ticketId,actor,m.ticket.messageSequence);
+  const changed: number[] = [];
+  for(const m of members) if (await readHelpTicket(m.ticketId,actor,m.ticket.messageSequence)) changed.push(m.ticketId);
+  return changed;
 }
 export async function replayHelp(actor:HelpActor,after:number) {
   const events=await prisma.helpEvent.findMany({where:{id:{gt:after},ticket:visibleHelpWhere(actor,actor.canManage)},orderBy:{id:'asc'},take:200});

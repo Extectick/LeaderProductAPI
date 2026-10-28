@@ -78,6 +78,10 @@ model HelpAttachment {
   size Int
   objectKey String
   sha256 String
+  width Int?
+  height Int?
+  thumbnailDataUri String?
+  position Int @default(0)
   createdAt DateTime @default(now())
   @@index([ownerId, messageId])
   @@index([objectKey])

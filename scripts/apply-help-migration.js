@@ -10,6 +10,11 @@ const checksum = crypto.createHash('sha256').update(sql.replace(/\r\n/g, '\n')).
 const tables = [...sql.matchAll(/CREATE TABLE "(Help\w+)"/g)].map(match => match[1]);
 const indexes = [...sql.matchAll(/CREATE (?:UNIQUE )?INDEX "(Help\w+)"/g)].map(match => match[1]);
 const constraints = [...sql.matchAll(/(?:ADD )?CONSTRAINT "(Help\w+)"/g)].map(match => match[1]);
+const previewMigrationId = '20261028120000_help_attachment_previews';
+const previewSql = fs.readFileSync(path.join(__dirname, '..', 'prisma', 'migrations', previewMigrationId, 'migration.sql'), 'utf8');
+const previewChecksum = crypto.createHash('sha256').update(previewSql.replace(/\r\n/g, '\n')).digest('hex');
+const previewColumns = { width: ['integer', 'YES'], height: ['integer', 'YES'], thumbnailDataUri: ['text', 'YES'], position: ['integer', 'NO'] };
+const previewConstraints = [...previewSql.matchAll(/ADD CONSTRAINT "(Help\w+)"/g)].map(match => match[1]);
 
 async function validate(client) {
   for (const table of tables) {
@@ -22,7 +27,11 @@ async function validate(client) {
       const col = rows.find(row => row.column_name === name);
       if (!col || col.data_type !== types[type] || (notNull && col.is_nullable !== 'NO')) throw new Error(`Schema verification failed: ${table}.${name}`);
     }
-    if (rows.length !== expected.length) throw new Error(`Unexpected columns in ${table}; refusing to overwrite another schema version`);
+    const additional = rows.filter(row => !expected.some(column => column[1] === row.column_name));
+    if (additional.length && (table !== 'HelpAttachment' || additional.length !== Object.keys(previewColumns).length
+      || additional.some(row => !previewColumns[row.column_name] || row.data_type !== previewColumns[row.column_name][0] || row.is_nullable !== previewColumns[row.column_name][1]))) {
+      throw new Error(`Unexpected columns in ${table}; refusing to overwrite another schema version`);
+    }
   }
   const foundIndexes = await client.query('SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname=ANY($1::text[])', [indexes]);
   if (foundIndexes.rowCount !== indexes.length) throw new Error('Help indexes are incomplete');
@@ -53,8 +62,20 @@ async function main() {
     const previous = await client.query('SELECT checksum FROM "HelpSchemaVersion" WHERE id=$1', [migrationId]);
     if (previous.rows[0] && previous.rows[0].checksum !== checksum) throw new Error('Applied Help migration checksum differs; no changes applied');
     await client.query('INSERT INTO "HelpSchemaVersion" (id,checksum) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [migrationId,checksum]);
+    let previews;
+    if (process.argv.includes('--attachment-previews')) {
+      const columns = await client.query('SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=ANY($2::text[])', ['HelpAttachment', Object.keys(previewColumns)]);
+      if (!columns.rowCount) await client.query(previewSql);
+      else if (columns.rowCount !== Object.keys(previewColumns).length || columns.rows.some(row => row.data_type !== previewColumns[row.column_name][0] || row.is_nullable !== previewColumns[row.column_name][1])) throw new Error('Partial or incompatible Help attachment preview schema');
+      const checks = await client.query('SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND conname=ANY($1::text[])', [previewConstraints]);
+      if (checks.rowCount !== previewConstraints.length) throw new Error('Help attachment preview constraints are incomplete');
+      const saved = await client.query('SELECT checksum FROM "HelpSchemaVersion" WHERE id=$1', [previewMigrationId]);
+      if (saved.rows[0] && saved.rows[0].checksum !== previewChecksum) throw new Error('Applied attachment preview migration checksum differs');
+      await client.query('INSERT INTO "HelpSchemaVersion" (id,checksum) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [previewMigrationId,previewChecksum]);
+      previews = { migration: previewMigrationId, action: columns.rowCount ? 'verified' : 'applied', checksum: previewChecksum };
+    }
     await client.query('COMMIT');
-    console.log(JSON.stringify({ ok: true, migration: migrationId, action: present.rowCount ? 'verified' : 'applied', tables: tables.length, checksum }));
+    console.log(JSON.stringify({ ok: true, migration: migrationId, action: present.rowCount ? 'verified' : 'applied', tables: tables.length, checksum, ...(previews ? { previews } : {}) }));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

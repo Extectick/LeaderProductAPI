@@ -1,5 +1,7 @@
 export const HELP_EDIT_MS = 60 * 60 * 1000;
 export const HELP_REOPEN_MS = 72 * 60 * 60 * 1000;
+export const HELP_MAX_ATTACHMENTS = 10;
+export const HELP_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const HELP_REACTIONS = ['❤️', '👍', '👎', '🔥', '🥰', '👏', '😀', '😢', '🎉', '🙏'];
 export function canEditHelpMessage(authorId: number, userId: number, createdAt: Date, now = Date.now()) {
   const age = now - createdAt.getTime();

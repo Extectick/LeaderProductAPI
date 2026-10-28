@@ -6,6 +6,7 @@ import { Client } from 'pg';
 import express from 'express';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import sharp from 'sharp';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { Server as SocketServer } from 'socket.io';
 import { HeadBucketCommand, CreateBucketCommand } from '@aws-sdk/client-s3';
@@ -17,7 +18,7 @@ import prisma, { pool } from '../src/prisma/client';
 import {
   createHelpTicket, sendHelpMessage, helpDetail, helpActor, listHelpTickets,
   changeHelpStatus, editHelpMessage, reactHelpMessage, helpItAction,
-  readHelpTicket, replayHelp, type HelpActor,
+  readHelpTicket, replayHelp, helpMessages, searchHelpMessages, findHelpMessageByDate, syncHelpTicket, type HelpActor,
 } from '../src/modules/help/help.service';
 
 // Dedicated .qa.ts is excluded from the shared integration runner and its destructive setup.
@@ -66,6 +67,154 @@ beforeAll(async () => {
 afterAll(async () => { await prisma.$disconnect(); await pool.end(); });
 
 describe('Help actual PostgreSQL service integration', () => {
+  test('bidirectional history and distant jumps preserve sequence boundaries and never mark messages read', async () => {
+    const id = await ticket(owner, 'Начало длинной истории');
+    await helpItAction(id, it, true);
+    await prisma.helpMessage.createMany({ data: Array.from({length: 260}, (_, i) => ({
+      ticketId: id, sequence: i + 2, authorId: it.userId, authorRole: 'IT', text: `Ответ ${i + 2}`,
+      clientMessageId: randomUUID(), requestHash: 'qa-history',
+    })) });
+    await prisma.helpTicket.update({ where: { id }, data: { messageSequence: 261 } });
+    const tail = await helpDetail(id,owner);
+    expect(tail.messages.map(m => m.sequence)).toEqual(Array.from({length:100},(_,i)=>i+162));
+    expect(tail).toMatchObject({ hasOlder:true, hasNewer:false, olderCursor:162, newerCursor:null, lastReadSequence:1, firstUnreadSequence:2, lastSequence:261 });
+    expect(tail.ticket).toMatchObject({ unreadCount:260, lastReadSequence:1, lastSequence:261 });
+    const middle = await helpMessages(id,owner,{around:120,limit:20});
+    expect(middle.messages.map(m=>m.sequence)).toEqual(Array.from({length:20},(_,i)=>i+111));
+    expect(middle).toMatchObject({hasOlder:true,hasNewer:true,olderCursor:111,newerCursor:130});
+    const older = await helpMessages(id,owner,{before:111,limit:20});
+    const newer = await helpMessages(id,owner,{after:130,limit:20});
+    expect(older.messages.map(m=>m.sequence)).toEqual(Array.from({length:20},(_,i)=>i+91));
+    expect(newer.messages.map(m=>m.sequence)).toEqual(Array.from({length:20},(_,i)=>i+131));
+    const target = middle.messages[9];
+    expect((await helpMessages(id,owner,{aroundMessageId:target.id,limit:20})).messages.map(m=>m.id)).toEqual(middle.messages.map(m=>m.id));
+    for(const around of [1,261,999]) expect((await helpMessages(id,owner,{around,limit:20})).messages).toHaveLength(20);
+    expect((await helpMessages(id,owner,162)).messages.slice(-1)[0]?.sequence).toBe(161); // old service call remains valid
+    expect((await prisma.helpMember.findUniqueOrThrow({where:{ticketId_userId:{ticketId:id,userId:owner.userId}}})).lastReadSequence).toBe(1);
+    const foreign = await ticket(stranger);
+    const foreignMessage = (await helpDetail(foreign,stranger)).messages[0];
+    await expect(helpMessages(id,owner,{aroundMessageId:foreignMessage.id})).rejects.toMatchObject({status:404});
+    await expect(helpMessages(id,stranger,{around:120})).rejects.toMatchObject({status:404});
+  });
+
+  test('ticket search counts all matches, pages by sequence and treats SQL wildcards as literal text', async () => {
+    const id = await ticket(owner,'РедкийПоиск начало');
+    for(const text of ['Обычный текст','редкийпоиск середина','Цена 100%_тест','РЕДКИЙПОИСК конец']) await sendHelpMessage(id,owner,input(text));
+    const page = await searchHelpMessages(id,owner,{q:'редкийпоиск',limit:2});
+    expect(page.total).toBe(3);
+    expect(page.messages.map(m=>m.sequence)).toEqual([5,3]);
+    expect(page.nextCursor).toBe(3);
+    const next = await searchHelpMessages(id,owner,{q:'редкийпоиск',limit:2,before:page.nextCursor!});
+    expect(next.messages.map(m=>m.sequence)).toEqual([1]);
+    expect(next).toMatchObject({total:3,nextCursor:null});
+    expect((await searchHelpMessages(id,owner,{q:'%_'})).messages.map(m=>m.sequence)).toEqual([4]);
+    expect((await searchHelpMessages(id,owner,{q:'not found'}))).toMatchObject({messages:[],total:0,nextCursor:null});
+    await expect(searchHelpMessages(id,stranger,{q:'редкийпоиск'})).rejects.toMatchObject({status:404});
+  });
+
+  test('date jump resolves the first sequence inside timezone-aware day bounds without marking history read', async () => {
+    const id = await ticket();
+    const first = (await helpDetail(id,owner)).messages[0];
+    await prisma.helpMessage.update({ where:{id:first.id}, data:{createdAt:new Date('2026-10-27T16:59:59.999Z')} });
+    await prisma.helpMessage.createMany({ data:[
+      { sequence:2, createdAt:new Date('2026-10-27T17:00:00.000Z') },
+      { sequence:3, createdAt:new Date('2026-10-28T16:59:59.999Z') },
+      { sequence:4, createdAt:new Date('2026-10-28T17:00:00.000Z') },
+    ].map(row=>({ ...row,ticketId:id,authorId:owner.userId,authorRole:'USER' as const,text:'Проверка границы дня',clientMessageId:randomUUID(),requestHash:'qa-date' })) });
+    await prisma.helpTicket.update({where:{id},data:{messageSequence:4}});
+    const query = {from:'2026-10-28T00:00:00+07:00',to:'2026-10-29T00:00:00+07:00'};
+    const expected = await prisma.helpMessage.findUniqueOrThrow({where:{ticketId_sequence:{ticketId:id,sequence:2}}});
+    expect(await findHelpMessageByDate(id,owner,query)).toEqual({messageId:expected.id,sequence:2});
+    const response = await request(api).get(`/help/tickets/${id}/date`).set('Authorization',bearer(owner)).query(query);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({messageId:expected.id,sequence:2});
+    expect((await findHelpMessageByDate(id,owner,{from:'2026-10-29T00:00:00+07:00',to:'2026-10-30T00:00:00+07:00'})).sequence).toBe(4);
+    expect((await helpDetail(id,owner)).lastReadSequence).toBe(1);
+    await expect(findHelpMessageByDate(id,stranger,query)).rejects.toMatchObject({status:404,code:'HELP_NOT_FOUND'});
+    await expect(findHelpMessageByDate(id,owner,{from:'2026-10-30T00:00:00Z',to:'2026-10-31T00:00:00Z'}))
+      .rejects.toMatchObject({status:404,code:'HELP_DATE_MESSAGE_NOT_FOUND',message:'За выбранный день сообщений нет'});
+  });
+
+  test('date route accepts a DST day and rejects invalid bounds before any history lookup', async () => {
+    const id = await ticket();
+    const first = (await helpDetail(id,owner)).messages[0];
+    await prisma.helpMessage.update({where:{id:first.id},data:{createdAt:new Date('2026-11-02T04:30:00Z')}});
+    // Transaction timestamps need not increase with sequence; navigation follows sequence order.
+    await prisma.helpMessage.create({data:{ticketId:id,sequence:2,authorId:owner.userId,authorRole:'USER',text:'Второе по порядку',createdAt:new Date('2026-11-01T04:00:00Z'),clientMessageId:randomUUID(),requestHash:'qa-date-order'}});
+    await prisma.helpTicket.update({where:{id},data:{messageSequence:2}});
+    // The repeated autumn hour makes this local day 25 hours long.
+    const query = {from:'2026-11-01T00:00:00-04:00',to:'2026-11-02T00:00:00-05:00'};
+    const response = await request(api).get(`/help/tickets/${id}/date`).set('Authorization',bearer(owner)).query(query);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({messageId:first.id,sequence:1});
+    expect((await request(api).get(`/help/tickets/${id}/date`).query(query)).status).toBe(401);
+    const denied = await request(api).get(`/help/tickets/${id}/date`).set('Authorization',bearer(stranger)).query(query);
+    expect(denied.status).toBe(404);expect(denied.body.code).toBe('HELP_NOT_FOUND');
+    for(const invalid of [
+      {to:query.to}, {...query,from:'not-a-date'}, {...query,from:'2026-11-01T00:00:00'},
+      {...query,from:'2026-02-30T00:00:00Z'}, {from:query.from,to:query.from}, {from:query.to,to:query.from},
+      {from:'2026-11-01T00:00:00Z',to:'2026-11-03T00:00:00.001Z'}, {...query,unexpected:'1'},
+    ]) {
+      const result = await request(api).get(`/help/tickets/${id}/date`).set('Authorization',bearer(owner)).query(invalid);
+      expect(result.status).toBe(400);expect(result.body.code).toBe('VALIDATION_ERROR');
+    }
+    const empty = await request(api).get(`/help/tickets/${id}/date`).set('Authorization',bearer(owner))
+      .query({from:'2026-11-03T00:00:00Z',to:'2026-11-05T00:00:00Z'});
+    expect(empty.status).toBe(404);expect(empty.body.code).toBe('HELP_DATE_MESSAGE_NOT_FOUND');
+  });
+
+  test('snapshot sync replays bounded event batches with current edits, reactions and monotonic read receipts', async () => {
+    const id = await ticket();
+    const baseline = await helpDetail(id,owner);
+    const message = baseline.messages[0];
+    await editHelpMessage(message.id,owner,'Исправлено');
+    await reactHelpMessage(message.id,owner,'👍',false);
+    await helpItAction(id,it,true);
+    await sendHelpMessage(id,it,input('Новый ответ'));
+    const first = await syncHelpTicket(id,owner,{after:baseline.eventCursor,limit:1});
+    expect(first.events).toHaveLength(1);
+    expect(first).toMatchObject({hasMore:true,deletedMessageIds:[],lastReadSequence:1,firstUnreadSequence:2,lastSequence:2});
+    expect(first.snapshotCursor).toBeGreaterThan(first.nextCursor);
+    expect(first.messages[0]).toMatchObject({id:message.id,text:'Исправлено',reactions:[{emoji:'👍',count:1,mine:true}]});
+    const second = await syncHelpTicket(id,owner,{after:first.nextCursor,limit:200});
+    expect(second.events.every(e=>e.id>first.nextCursor)).toBe(true);
+    expect(second.hasMore).toBe(false);
+    expect(second.messages.some(m=>m.text==='Новый ответ')).toBe(true);
+    await readHelpTicket(id,owner,2);
+    await readHelpTicket(id,owner,1);
+    const read = await syncHelpTicket(id,owner,{after:second.nextCursor});
+    expect(read).toMatchObject({lastReadSequence:2,firstUnreadSequence:null,lastSequence:2});
+    expect(read.ticket.members.find((m:any)=>m.userId===owner.userId)?.lastReadSequence).toBe(2);
+    const empty = await syncHelpTicket(id,owner,{after:read.nextCursor});
+    expect(empty).toMatchObject({events:[],messages:[],deletedMessageIds:[],hasMore:false,nextCursor:read.nextCursor});
+    await sendHelpMessage(id,owner,input('Сообщение для проверки отсутствующей записи'));
+    const removed = await prisma.helpMessage.findFirstOrThrow({where:{ticketId:id},orderBy:{sequence:'desc'}});
+    await prisma.helpMessage.delete({where:{id:removed.id}});
+    const tombstone = await syncHelpTicket(id,owner,{after:read.nextCursor});
+    expect(tombstone.deletedMessageIds).toEqual([removed.id]);
+    expect(tombstone.messages).toEqual([]);
+    await expect(syncHelpTicket(id,stranger)).rejects.toMatchObject({status:404});
+    await prisma.helpMember.delete({where:{ticketId_userId:{ticketId:id,userId:it.userId}}});
+    await expect(syncHelpTicket(id,{userId:it.userId,canManage:false})).rejects.toMatchObject({status:404});
+  });
+
+  test('history/search/sync routes reject ambiguous or oversized cursors and enforce current ACL', async () => {
+    const id = await ticket();
+    for(const query of [{before:1,after:2},{around:1,aroundMessageId:1},{limit:101},{after:2147483648},{around:0}]) {
+      expect((await request(api).get(`/help/tickets/${id}/messages`).query(query).set('Authorization',bearer(owner))).status).toBe(400);
+    }
+    for(const query of [{q:''},{q:'x'.repeat(101)},{q:'valid',limit:101}]) {
+      expect((await request(api).get(`/help/tickets/${id}/search`).query(query).set('Authorization',bearer(owner))).status).toBe(400);
+    }
+    expect((await request(api).get(`/help/tickets/${id}/sync`).query({after:-1}).set('Authorization',bearer(owner))).status).toBe(400);
+    for(const suffix of ['messages','search?q=заказ','sync']) {
+      expect((await request(api).get(`/help/tickets/${id}/${suffix}`).set('Authorization',bearer(stranger))).status).toBe(404);
+    }
+    const page = await request(api).get(`/help/tickets/${id}/messages`).query({limit:1}).set('Authorization',bearer(owner));
+    expect(page.status).toBe(200);
+    expect(page.body).toMatchObject({hasOlder:false,hasNewer:false,lastSequence:1});
+  });
+
   test('server search finds old tickets beyond first page by title, number and message without leaking another owner', async () => {
     const id=await ticket(owner,'Редкий заголовок поиска');
     await sendHelpMessage(id,owner,input('Уникальный поисковый маркер АрхивЗапрос'));
@@ -104,6 +253,14 @@ describe('Help actual PostgreSQL service integration', () => {
     const second = run();
     expect({ status: second.status, stderr: second.stderr }).toEqual({ status: 0, stderr: '' });
     expect(JSON.parse(second.stdout)).toMatchObject({ ok: true, action: 'verified', tables: 8 });
+    const previewRun = () => spawnSync(process.execPath, ['scripts/apply-help-migration.js','--attachment-previews'], { cwd:process.cwd(),env,encoding:'utf8',timeout:20000 });
+    const previews = previewRun();
+    expect({status:previews.status,stderr:previews.stderr}).toEqual({status:0,stderr:''});
+    expect(JSON.parse(previews.stdout)).toMatchObject({ok:true,previews:{action:'applied'}});
+    const verified = previewRun();
+    expect({status:verified.status,stderr:verified.stderr}).toEqual({status:0,stderr:''});
+    expect(JSON.parse(verified.stdout)).toMatchObject({ok:true,previews:{action:'verified'}});
+    expect(run().status).toBe(0); // The baseline verifier also recognizes this exact additive extension.
     const denied = spawnSync(process.execPath, ['scripts/apply-help-migration.js'], { cwd: process.cwd(), env: { ...env, HELP_MIGRATION_TARGET: 'prod' }, encoding: 'utf8', timeout: 5000 });
     expect(denied.status).toBe(1);
     expect(denied.stderr).toContain('explicitly approved development target');
@@ -362,6 +519,51 @@ describe('Help actual PostgreSQL service integration', () => {
     await request(api).get(forwarded.attachments[0].url).set('Authorization', bearer(stranger)).expect(404);
   });
 
+  test('ten-image albums preserve explicit send/edit/reply/forward order and private display metadata', async () => {
+    const config = await request(api).get('/help/config').set('Authorization',bearer(owner)).expect(200);
+    expect(config.body).toMatchObject({maxAttachments:10,maxFileBytes:20*1024*1024});
+    let upload = request(api).post('/help/attachments').set('Authorization',bearer(owner));
+    for(let index=0;index<10;index++) {
+      const image = await sharp({create:{width:80+index,height:40+index,channels:3,background:'#5588aa'}}).jpeg().withMetadata({orientation:6}).toBuffer();
+      upload = upload.attach('files',image,{filename:`photo-${index}.jpg`,contentType:'image/jpeg'});
+    }
+    const uploaded = await upload.expect(201), files = uploaded.body.attachments;
+    expect(files).toHaveLength(10);
+    files.forEach((file:any,index:number)=>{
+      expect(file).toMatchObject({name:`photo-${index}.jpg`,width:40+index,height:80+index,position:index});
+      expect(file.thumbnailDataUri).toMatch(/^data:image\/jpeg;base64,/);
+      expect(Buffer.byteLength(file.thumbnailDataUri)).toBeLessThanOrEqual(2048);
+      expect(file.objectKey).toBeUndefined();expect(file.sha256).toBeUndefined();
+    });
+    const id = await ticket(), ids = files.map((file:any)=>file.id).reverse();
+    const sent = await request(api).post(`/help/tickets/${id}/messages`).set('Authorization',bearer(owner))
+      .send({...input('Альбом'),attachmentIds:ids}).expect(200);
+    const album = sent.body.messages.at(-1);
+    expect(album.attachments.map((file:any)=>file.id)).toEqual(ids);
+    expect(album.attachments.map((file:any)=>file.position)).toEqual(Array.from({length:10},(_,index)=>index));
+    await sendHelpMessage(id,owner,{...input('Ответ на альбом'),replyToId:album.id});
+    expect((await helpDetail(id,owner)).messages.slice(-1)[0]!.replyTo!.attachments.map((file:any)=>file.id)).toEqual(ids);
+    const editOrder = [...ids.slice(3),...ids.slice(0,3)];
+    const edited = await request(api).patch(`/help/messages/${album.id}`).set('Authorization',bearer(owner))
+      .send({text:'Альбом после перестановки',attachmentIds:editOrder}).expect(200);
+    const changed = edited.body.messages.find((message:any)=>message.id===album.id);
+    expect(changed.attachments.map((file:any)=>file.id)).toEqual(editOrder);
+    const destination = await ticket();
+    await sendHelpMessage(destination,owner,{...input(''),forwardedFromId:album.id});
+    const forwarded = (await helpDetail(destination,owner)).messages.slice(-1)[0]!;
+    expect(forwarded.attachments.map((file:any)=>({name:file.name,width:file.width,height:file.height,thumbnailDataUri:file.thumbnailDataUri,position:file.position})))
+      .toEqual(changed.attachments.map((file:any)=>({name:file.name,width:file.width,height:file.height,thumbnailDataUri:file.thumbnailDataUri,position:file.position})));
+    expect(forwarded.attachments.every((file:any)=>!ids.includes(file.id))).toBe(true);
+    const denied = await request(api).get(`/help/tickets/${destination}`).set('Authorization',bearer(stranger)).expect(404);
+    expect(JSON.stringify(denied.body)).not.toContain('thumbnailDataUri');
+    const extra = await request(api).post('/help/attachments').set('Authorization',bearer(owner))
+      .attach('files',Buffer.from('Дополнительный файл'),{filename:'extra.txt',contentType:'text/plain'}).expect(201);
+    await expect(sendHelpMessage(destination,owner,{...input(''),forwardedFromId:album.id,attachmentIds:[extra.body.attachments[0].id]})).rejects.toMatchObject({code:'TOO_MANY_FILES'});
+    await request(api).post(`/help/tickets/${id}/messages`).set('Authorization',bearer(owner)).send({...input(),attachmentIds:Array.from({length:11},()=>randomUUID())}).expect(400);
+    await request(api).patch(`/help/messages/${album.id}`).set('Authorization',bearer(owner)).send({text:'Слишком много',attachmentIds:[...ids,extra.body.attachments[0].id]}).expect(400);
+    expect((await helpDetail(id,owner)).messages.find(message=>message.id===album.id)!.attachments.map((file:any)=>file.id)).toEqual(editOrder);
+  });
+
   test('storage denial returns safe503, creates no metadata, and upload can retry', async () => {
     const before=await prisma.helpAttachment.count();
     const spy=jest.spyOn(s3,'send').mockImplementationOnce(()=>{throw Object.assign(new Error('private provider details'),{name:'AccessDenied',$metadata:{httpStatusCode:403}});});
@@ -408,8 +610,10 @@ describe('Help actual PostgreSQL service integration', () => {
       .attach('files', Buffer.from([77, 90, 0, 0, 1, 0]), { filename: 'safe.pdf', contentType: 'application/pdf' }).expect(415);
     expect(await prisma.helpAttachment.count()).toBe(before);
     let tooMany = request(api).post('/help/attachments').set('Authorization', bearer(owner));
-    for (let i = 0; i < 6; i++) tooMany = tooMany.attach('files', Buffer.from('text'), { filename: `file${i}.txt`, contentType: 'text/plain' });
+    for (let i = 0; i < 11; i++) tooMany = tooMany.attach('files', Buffer.from('text'), { filename: `file${i}.txt`, contentType: 'text/plain' });
     await tooMany.expect(413);
+    await request(api).post('/help/attachments').set('Authorization',bearer(owner))
+      .attach('files',Buffer.alloc(20*1024*1024+1,97),{filename:'oversized.txt',contentType:'text/plain'}).expect(413);
   });
 });
 
@@ -470,6 +674,50 @@ describe('Help actual websocket authorization', () => {
     baseUrl = `http://127.0.0.1:${address.port}`;
   });
   afterAll(async () => { for (const client of clients) client.connection.close(); await new Promise<void>(resolve => io.close(() => resolve())); });
+
+  test('REST mutations immediately notify sockets and reconnect sync repairs messages, edits, reactions, status and receipts', async () => {
+    const id = await ticket();
+    await helpItAction(id,it,true);
+    const baseline = await helpDetail(id,owner);
+    const observer = await connectSocket(baseUrl,owner);
+    clients.push(observer);
+    expect(await observer.ack('help:subscribe',{ticketId:id})).toEqual({ok:true});
+    let cursor = baseline.eventCursor;
+    const delivered: string[] = [];
+    const receive = async (type: string) => {
+      const event = await observer.event('help:event');
+      expect(event).toMatchObject({ticketId:id,type});
+      expect(event.id).toBeGreaterThan(cursor);
+      expect(event).not.toHaveProperty('text');
+      cursor = event.id; delivered.push(type);
+    };
+    const sent = await request(api).post(`/help/tickets/${id}/messages`).set('Authorization',bearer(owner)).send(input('Живое сообщение')).expect(200);
+    await receive('MESSAGE_CREATED');
+    const messageId = sent.body.messages.slice(-1)[0].id;
+    await request(api).patch(`/help/messages/${messageId}`).set('Authorization',bearer(owner)).send({text:'Исправление в реальном времени'}).expect(200);
+    await receive('MESSAGE_UPDATED');
+    await request(api).put(`/help/messages/${messageId}/reactions/${encodeURIComponent('👍')}`).set('Authorization',bearer(it)).send({}).expect(200);
+    await receive('REACTIONS_UPDATED');
+    await request(api).post(`/help/tickets/${id}/close`).set('Authorization',bearer(owner)).send(input('Решено')).expect(200);
+    await receive('TICKET_CLOSED');
+    await request(api).post(`/help/tickets/${id}/reopen`).set('Authorization',bearer(owner)).send(input('Нужна повторная проверка')).expect(200);
+    await receive('TICKET_REOPENED');
+    const incoming = await request(api).post(`/help/tickets/${id}/messages`).set('Authorization',bearer(it)).send(input('Входящее сообщение')).expect(200);
+    await receive('MESSAGE_CREATED');
+    await request(api).post(`/help/tickets/${id}/read`).set('Authorization',bearer(owner)).send({sequence:incoming.body.lastSequence}).expect(200);
+    await receive('READ_UPDATED');
+    const hydrated = await syncHelpTicket(id,owner,{after:baseline.eventCursor});
+    expect(hydrated.events.map(e=>e.type)).toEqual(delivered);
+    expect(hydrated.messages.find(m=>m.id===messageId)).toMatchObject({text:'Исправление в реальном времени',reactions:[{emoji:'👍',count:1,mine:false}]});
+    observer.connection.close();
+    await request(api).post(`/help/tickets/${id}/messages`).set('Authorization',bearer(it)).send(input('Сообщение во время отключения')).expect(200);
+    const reconnected = await connectSocket(baseUrl,owner);
+    clients.push(reconnected);
+    expect(await reconnected.ack('help:subscribe',{ticketId:id})).toEqual({ok:true});
+    const repaired = await request(api).get(`/help/tickets/${id}/sync`).query({after:cursor}).set('Authorization',bearer(owner)).expect(200);
+    expect(repaired.body.events.map((e:any)=>e.type)).toEqual(['MESSAGE_CREATED']);
+    expect(repaired.body.messages.map((m:any)=>m.text)).toEqual(['Сообщение во время отключения']);
+  });
 
   test('foreign subscription/generic join cannot receive private events; revoked permission stops delivery', async () => {
     const id = await ticket();
