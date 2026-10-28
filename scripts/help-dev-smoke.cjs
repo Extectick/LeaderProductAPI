@@ -75,8 +75,8 @@ async function main() {
     const newer = await request(owner, `/help/tickets/${ticketId}/messages?after=${older.newerCursor}&limit=1`);
     assert(older.hasNewer && newer.messages[0]?.id === latest.messages[0].id, 'Bidirectional cursor pagination skipped a message');
     const firstMessage = created.messages[0];
-    const around = await request(owner, `/help/tickets/${ticketId}/messages?aroundMessageId=${firstMessage.id}&limit=2`);
-    assert(around.messages.some(message => message.id === firstMessage.id) && around.hasNewer, 'Bounded message jump is invalid');
+    const around = await request(owner, `/help/tickets/${ticketId}/messages?aroundMessageId=${firstMessage.id}&limit=1`);
+    assert(around.messages.length === 1 && around.messages[0].id === firstMessage.id && !around.hasOlder && around.hasNewer, 'Bounded message jump is invalid');
     const searchPath = `/help/tickets/${ticketId}/search?q=${encodeURIComponent(marker)}&limit=1`;
     const search = await request(owner, searchPath);
     assert(search.total === 1 && search.messages[0]?.id === firstMessage.id, 'Ticket message search failed');
