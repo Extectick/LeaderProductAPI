@@ -63,7 +63,7 @@ jobs:
       - run: npm run test:unit -- --runInBand __tests__/orderIntegrity.unit.test.ts __tests__/clientOrdersExportIntegrity.unit.test.ts __tests__/clientOrders.schemas.unit.test.ts __tests__/clientOrders.service.unit.test.ts __tests__/clientOrders.invoiceShadow.unit.test.ts __tests__/onec.orderQueuePayload.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderWriteSafety.unit.test.ts __tests__/clientOrdersExportRetry.unit.test.ts __tests__/onec.lp-app-client.client-orders.unit.test.ts
       - run: npm run test:unit -- --runInBand __tests__/onec.orderSnapshotRecovery.unit.test.ts
-      - run: npm run test:unit -- --runInBand __tests__/help.policy.unit.test.ts __tests__/help.storage.unit.test.ts __tests__/help.files-proxy.unit.test.ts
+      - run: npm run test:unit -- --runInBand __tests__/help.policy.unit.test.ts __tests__/help.storage.unit.test.ts __tests__/help.files-proxy.unit.test.ts __tests__/help.image.unit.test.ts
 
   build-and-push:
     needs: order-integrity-check
@@ -248,8 +248,9 @@ jobs:
             docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
             test -s "$backup"
             docker compose -f docker-compose.server-dev.yml exec -T postgres-dev pg_restore --list < "$backup" > /dev/null
+            printf 'Development backup verified: %s\n' "$backup"
             dev_db=$(docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'printf %s "$POSTGRES_DB"')
-            docker compose -f docker-compose.server-dev.yml run --rm --no-deps -e HELP_MIGRATION_TARGET=dev -e HELP_MIGRATION_DATABASE_CONFIRM="$dev_db" --entrypoint node api scripts/apply-help-migration.js
+            docker compose -f docker-compose.server-dev.yml run --rm --no-deps -e HELP_MIGRATION_TARGET=dev -e HELP_MIGRATION_DATABASE_CONFIRM="$dev_db" --entrypoint node api scripts/apply-help-migration.js --attachment-previews
             docker compose -f docker-compose.server-dev.yml run --rm --no-deps --entrypoint node api scripts/init-db.js
             docker compose -f docker-compose.server-dev.yml up -d --no-deps api
 

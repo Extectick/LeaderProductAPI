@@ -52,6 +52,7 @@ async function main() {
     stranger = await user('stranger', role);
     const config = await request(owner, '/help/config');
     assert(config.aiEnabled === false, 'AI must remain disabled');
+    assert(config.maxAttachments === 10 && config.maxFileBytes === 20 * 1024 * 1024, 'Attachment limits differ from the messenger contract');
     checks.push('config_ai_disabled');
 
     const payload = { clientTicketId: identity(), clientMessageId: identity(), text: `[DEV QA ${marker}] Проверка сервиса помощи` };
@@ -67,13 +68,40 @@ async function main() {
     await request(specialist, `/help/tickets/${ticketId}/messages`, 'POST', { clientMessageId: identity(), text: 'DEV QA IT: проверено', replyToId: created.messages[0].id });
     checks.push('it_claim_reply');
 
-    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+    const latest = await request(owner, `/help/tickets/${ticketId}/messages?limit=1`);
+    assert(latest.messages.length === 1 && latest.hasOlder && !latest.hasNewer, 'Latest history window metadata is invalid');
+    assert(Number.isInteger(latest.lastReadSequence) && Number.isInteger(latest.firstUnreadSequence), 'Opening read/unread anchors are missing');
+    const older = await request(owner, `/help/tickets/${ticketId}/messages?before=${latest.olderCursor}&limit=1`);
+    const newer = await request(owner, `/help/tickets/${ticketId}/messages?after=${older.newerCursor}&limit=1`);
+    assert(older.hasNewer && newer.messages[0]?.id === latest.messages[0].id, 'Bidirectional cursor pagination skipped a message');
+    const firstMessage = created.messages[0];
+    const around = await request(owner, `/help/tickets/${ticketId}/messages?aroundMessageId=${firstMessage.id}&limit=2`);
+    assert(around.messages.some(message => message.id === firstMessage.id) && around.hasNewer, 'Bounded message jump is invalid');
+    const searchPath = `/help/tickets/${ticketId}/search?q=${encodeURIComponent(marker)}&limit=1`;
+    const search = await request(owner, searchPath);
+    assert(search.total === 1 && search.messages[0]?.id === firstMessage.id, 'Ticket message search failed');
+    const from = new Date(firstMessage.createdAt); from.setUTCHours(0, 0, 0, 0);
+    const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
+    const datePath = `/help/tickets/${ticketId}/date?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`;
+    const day = await request(owner, datePath);
+    assert(day.messageId === firstMessage.id && day.sequence === firstMessage.sequence, 'Day lookup did not resolve the first message');
+    const sync = await request(owner, `/help/tickets/${ticketId}/sync?after=0&limit=1`);
+    const remaining = await request(owner, `/help/tickets/${ticketId}/sync?after=${sync.nextCursor}`);
+    assert(sync.hasMore && sync.events.length === 1 && remaining.nextCursor > sync.nextCursor && !remaining.hasMore, 'Durable replay cursor paging failed');
+    assert(remaining.snapshotCursor >= remaining.nextCursor && remaining.messages.some(message => message.id === latest.messages[0].id), 'Durable replay snapshot omitted the latest message');
+    for (const endpoint of [`/help/tickets/${ticketId}/messages`, searchPath, datePath, `/help/tickets/${ticketId}/sync`]) {
+      await request(stranger, endpoint, 'GET', undefined, 404);
+    }
+    checks.push('cursor_history_search_date_sync_acl');
+
+    const png = await require('sharp')({ create: { width: 32, height: 24, channels: 4, background: '#3399cc' } }).png().toBuffer();
     const form = new FormData();
-    form.append('files', new Blob([png], { type: 'image/png' }), 'dev-qa.png');
+    for (let index = 0; index < 9; index += 1) form.append('files', new Blob([png], { type: 'image/png' }), `dev-qa-${index}.png`);
     form.append('files', new Blob(['DEV QA attachment'], { type: 'text/plain' }), 'dev-qa.txt');
     const upload = await request(owner, '/help/attachments', 'POST', form, 201);
-    assert(upload.attachments?.length === 2, 'Mixed upload failed');
+    assert(upload.attachments?.length === 10, 'Ten-file mixed upload failed');
     const file = upload.attachments[0];
+    assert(file.width === 32 && file.height === 24 && file.thumbnailDataUri?.startsWith('data:image/jpeg;base64,') && Buffer.byteLength(file.thumbnailDataUri) <= 2048, 'Private image preview metadata is invalid');
     const download = await fetch(baseUrl + file.url, { headers: headers(owner), signal: AbortSignal.timeout(30000) });
     assert(download.status === 200 && Buffer.from(await download.arrayBuffer()).equals(png), 'Private image bytes differ');
     await request(stranger, file.url, 'GET', undefined, 404);
@@ -94,8 +122,10 @@ async function main() {
     signed.search = '';
     const direct = await fetch(signed, { signal: AbortSignal.timeout(20000) });
     assert([401, 403, 404].includes(direct.status), `S3 object is publicly readable: HTTP ${direct.status}`);
-    await request(owner, `/help/tickets/${ticketId}/messages`, 'POST', { clientMessageId: identity(), text: 'DEV QA фото и файл', attachmentIds: upload.attachments.map(a => a.id) });
-    checks.push('real_s3_mixed_upload_private_download');
+    const attachmentIds = upload.attachments.map(a => a.id).reverse();
+    const withAlbum = await request(owner, `/help/tickets/${ticketId}/messages`, 'POST', { clientMessageId: identity(), text: 'DEV QA фото и файл', attachmentIds });
+    assert(JSON.stringify(withAlbum.messages.at(-1)?.attachments.map(a => a.id)) === JSON.stringify(attachmentIds), 'Saved album order differs from the submitted order');
+    checks.push('ten_attachments_preview_order_private_download');
 
     if (typeof WebSocket === 'function') {
       const connect = async actor => {
