@@ -9,6 +9,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { cacheGet, cacheSet } from '../../lib/redis';
 import prisma from '../../prisma/client';
+import { ORDER_PICKER_RECEIPT_PRICE_TYPE_GUID } from './receiptPriceSource';
 import { requestClientOrdersExportWakeup } from '../../services/clientOrdersExportWorker';
 import { ErrorCodes } from '../../utils/apiResponse';
 import { appendOrderEvent } from '../orders/orderEvents';
@@ -1860,7 +1861,7 @@ async function upsertLiveProduct(tx: Tx, item: LiveProduct | null, warehouseId: 
   await upsertLiveProductPrice(
     tx,
     product.id,
-    { guid: 'receipt-price-type', name: 'ЦенаПоступления', code: 'ЦенаПоступления' },
+    { guid: ORDER_PICKER_RECEIPT_PRICE_TYPE_GUID, name: 'ЦенаПоступления', code: 'ЦенаПоступления' },
     item.receiptPrice,
     item.currency,
     sourceUpdatedAt
