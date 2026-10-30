@@ -93,8 +93,16 @@ jobs:
             dc(){ docker compose -p leader-api-dev -f docker-compose.server-dev.yml -f docker-compose.server-dev.help-simulator.yml --profile help-simulator "$@"; }
             dc config --format json | python3 -c 'import json,sys;c=json.load(sys.stdin); a=c["services"]["api"];w=c["services"]["help-assistant-worker"];assert a["environment"]["NODE_ENV"]=="development";assert "postgres-dev:5432/" in a["environment"]["DATABASE_URL"];assert a["environment"]["DATABASE_URL"]==w["environment"]["DATABASE_URL"];assert str(a["environment"]["DB_ACCEPT_DATA_LOSS"])=="0";assert all(p.get("host_ip")=="127.0.0.1" for p in a.get("ports",[]));assert not w.get("ports");assert not a.get("volumes") and not w.get("volumes");print("Dev API/worker isolation verified")'
             docker pull "$HELP_SIMULATOR_IMAGE"
-            backup="/opt/leader-api-dev/backups/before-help-ai-${RELEASE_SHA:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
-            dc exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+            prepared=/opt/leader-api-dev/help-assistant-prepared-backup.txt
+            if [ -f "$prepared" ]; then
+              backup=$(cat "$prepared")
+              case "$(realpath "$backup")" in /opt/leader-api-dev/backups/before-help-ai-*.dump) ;; *) echo 'Invalid prepared dev backup'; exit 1;; esac
+              test "$(find "$backup" -mmin -120 -type f | wc -l)" = 1
+              echo 'Using operator-prepared development backup from this deployment attempt'
+            else
+              backup="/opt/leader-api-dev/backups/before-help-ai-${RELEASE_SHA:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
+              dc exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+            fi
             test -s "$backup"
             dc exec -T postgres-dev pg_restore --list < "$backup" >/dev/null
             printf 'Verified dev backup: %s\n' "$backup"
@@ -116,4 +124,5 @@ jobs:
             test "$prod_stamp" = "$(docker inspect leader_api --format '{{.Id}} {{.State.StartedAt}}' 2>/dev/null || true)"
             printf '%s\n' "$release_dir" > /opt/leader-api-dev/help-assistant-current-release.txt
             docker inspect leader_api_dev leader_help_assistant_dev --format '{{.Name}} running={{.State.Running}} image={{.Config.Image}}'
+            rm -f /opt/leader-api-dev/help-assistant-prepared-backup.txt
             printf 'Dev assistant ready, delay=300000ms, release=%s\n' "$release_dir"
