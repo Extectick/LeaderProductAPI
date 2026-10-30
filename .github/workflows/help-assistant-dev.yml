@@ -1,0 +1,119 @@
+name: Help assistant development deployment
+on:
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: help-assistant-development
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/dev' && inputs.mode == 'inspect'
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -eu
+            test -d /opt/leader-api-dev
+            docker inspect leader_api_dev --format 'dev image={{.Config.Image}} running={{.State.Running}}'
+            docker inspect leader_api_dev --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+            docker inspect leader_api --format 'production image={{.Config.Image}} started={{.State.StartedAt}}' 2>/dev/null || true
+            docker exec leader_api_dev node -e 'const u=new URL(process.env.DATABASE_URL);console.log(JSON.stringify({environment:process.env.NODE_ENV,dbHost:u.hostname,dbName:u.pathname.slice(1),aiEnabled:process.env.HELP_AI_ENABLED||"false"}));'
+            curl --fail --silent http://127.0.0.1:3001/health >/dev/null
+  build:
+    if: github.ref == 'refs/heads/dev' && inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/extectick/leaderproductapi:help-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  deploy:
+    if: github.ref == 'refs/heads/dev' && inputs.mode == 'deploy'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          RELEASE_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER,RELEASE_SHA
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            cd /opt/leader-api-dev
+            test "$(docker exec leader_api_dev printenv NODE_ENV)" = development
+            old_image=$(docker inspect leader_api_dev --format '{{.Config.Image}}')
+            old_id=$(docker inspect leader_api_dev --format '{{.Id}}')
+            prod_stamp=$(docker inspect leader_api --format '{{.Id}} {{.State.StartedAt}}' 2>/dev/null || true)
+            old_files=$(docker inspect leader_api_dev --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}')
+            old_base=${old_files%%,*}
+            test -f "$old_base"
+            test "$(basename "$old_base")" = docker-compose.server-dev.yml
+            git fetch origin "$RELEASE_SHA"
+            mkdir -p releases backups
+            release_dir=$(mktemp -d "/opt/leader-api-dev/releases/help-ai-${RELEASE_SHA:0:12}-XXXXXX")
+            git worktree add --detach "$release_dir" "$RELEASE_SHA"
+            # Carry forward the exact active server configuration, including private 1C routing.
+            cp "$old_base" "$release_dir/docker-compose.server-dev.yml"
+            ln -s /opt/leader-api-dev/.env "$release_dir/.env"
+            printf '%s\n' "$old_image" > "$release_dir/previous-image.txt"
+            printf '%s\n' "$old_files" > "$release_dir/previous-compose-files.txt"
+            cd "$release_dir"
+            umask 077
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+            export HELP_SIMULATOR_IMAGE="ghcr.io/extectick/leaderproductapi:help-$RELEASE_SHA"
+            export HELP_AI_SIMULATOR_DURATION_MS=300000
+            dc(){ docker compose -p leader-api-dev -f docker-compose.server-dev.yml -f docker-compose.server-dev.help-simulator.yml --profile help-simulator "$@"; }
+            dc config --format json | python3 -c 'import json,sys;c=json.load(sys.stdin); a=c["services"]["api"];w=c["services"]["help-assistant-worker"];assert a["environment"]["NODE_ENV"]=="development";assert "postgres-dev:5432/" in a["environment"]["DATABASE_URL"];assert a["environment"]["DATABASE_URL"]==w["environment"]["DATABASE_URL"];assert str(a["environment"]["DB_ACCEPT_DATA_LOSS"])=="0";assert all(p.get("host_ip")=="127.0.0.1" for p in a.get("ports",[]));assert not w.get("ports");assert not a.get("volumes") and not w.get("volumes");print("Dev API/worker isolation verified")'
+            dc pull api help-assistant-worker
+            backup="/opt/leader-api-dev/backups/before-help-ai-${RELEASE_SHA:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
+            dc exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+            test -s "$backup"
+            dc exec -T postgres-dev pg_restore --list < "$backup" >/dev/null
+            printf 'Verified dev backup: %s\n' "$backup"
+            dev_db=$(dc exec -T postgres-dev sh -c 'printf %s "$POSTGRES_DB"')
+            dc run --rm --no-deps -e HELP_MIGRATION_TARGET=dev -e HELP_MIGRATION_DATABASE_CONFIRM="$dev_db" -e DB_ACCEPT_DATA_LOSS=0 --entrypoint node api scripts/apply-help-assistant-migration.cjs
+            dc run --rm --no-deps --entrypoint node api scripts/verify-help-assistant-schema.cjs
+            dc up -d --no-deps api
+            healthy=false
+            for attempt in $(seq 1 45); do
+              if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then healthy=true; break; fi
+              sleep 2
+            done
+            if [ "$healthy" != true ]; then echo 'Updated dev API did not become healthy; worker was not started'; exit 1; fi
+            dc up -d --no-deps help-assistant-worker
+            sleep 3
+            test "$(docker inspect leader_help_assistant_dev --format '{{.State.Running}}')" = true
+            dc exec -T api node -e 'const a=require("./dist/modules/help/help.assistant");const c=a.helpAssistantConfiguration();if(!c.enabled||c.provider!=="simulator"||c.durationMs!==300000)process.exit(1);console.log(JSON.stringify(c));'
+            dc exec -T help-assistant-worker node scripts/verify-help-assistant-schema.cjs
+            test "$prod_stamp" = "$(docker inspect leader_api --format '{{.Id}} {{.State.StartedAt}}' 2>/dev/null || true)"
+            printf '%s\n' "$release_dir" > /opt/leader-api-dev/help-assistant-current-release.txt
+            docker inspect leader_api_dev leader_help_assistant_dev --format '{{.Name}} running={{.State.Running}} image={{.Config.Image}}'
+            printf 'Dev assistant ready, delay=300000ms, release=%s\n' "$release_dir"

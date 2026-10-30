@@ -24,7 +24,9 @@
     "ota:publish-db": "node scripts/publish-ota-update-db.js",
     "audit:employee-moderation": "node scripts/audit-employee-moderation-consistency.js",
     "fix:employee-moderation": "node scripts/fix-employee-moderation-consistency.js",
-    "fix:employee-moderation:apply": "node scripts/fix-employee-moderation-consistency.js --apply"
+    "fix:employee-moderation:apply": "node scripts/fix-employee-moderation-consistency.js --apply",
+    "worker:help": "node dist/workers/helpAssistantWorker.js",
+    "worker:help:dev": "node -r ts-node/register src/workers/helpAssistantWorker.ts"
   },
   "keywords": [],
   "author": "",

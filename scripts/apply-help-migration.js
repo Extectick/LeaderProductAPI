@@ -17,6 +17,8 @@ const previewColumns = { width: ['integer', 'YES'], height: ['integer', 'YES'], 
 const previewConstraints = [...previewSql.matchAll(/ADD CONSTRAINT "(Help\w+)"/g)].map(match => match[1]);
 
 async function validate(client) {
+  const assistant=(await client.query(`SELECT to_regclass('"HelpAssistantJob"') AS present`)).rows[0].present;
+
   for (const table of tables) {
     const block = sql.match(new RegExp(`CREATE TABLE "${table}" \\(([\\s\\S]*?)\\n\\);`));
     if (!block) throw new Error(`Missing schema definition for ${table}`);
@@ -25,10 +27,11 @@ async function validate(client) {
     const types = { SERIAL: 'integer', INTEGER: 'integer', TEXT: 'text', BOOLEAN: 'boolean', TIMESTAMP: 'timestamp without time zone' };
     for (const [, name, type, notNull] of expected) {
       const col = rows.find(row => row.column_name === name);
-      if (!col || col.data_type !== types[type] || (notNull && col.is_nullable !== 'NO')) throw new Error(`Schema verification failed: ${table}.${name}`);
+      if (!col || col.data_type !== types[type] || (notNull && col.is_nullable !== 'NO' && !(assistant && ((table==='HelpMessage'&&name==='authorId')||(table==='HelpEvent'&&name==='actorId'))))) throw new Error(`Schema verification failed: ${table}.${name}`);
     }
     const additional = rows.filter(row => !expected.some(column => column[1] === row.column_name));
-    if (additional.length && (table !== 'HelpAttachment' || additional.length !== Object.keys(previewColumns).length
+    const assistantColumns=assistant&&table==='HelpMessage'&&additional.length===1&&additional[0].column_name==='assistantState'&&additional[0].data_type==='jsonb'&&additional[0].is_nullable==='YES';
+    if (additional.length && !assistantColumns && (table !== 'HelpAttachment' || additional.length !== Object.keys(previewColumns).length
       || additional.some(row => !previewColumns[row.column_name] || row.data_type !== previewColumns[row.column_name][0] || row.is_nullable !== previewColumns[row.column_name][1]))) {
       throw new Error(`Unexpected columns in ${table}; refusing to overwrite another schema version`);
     }

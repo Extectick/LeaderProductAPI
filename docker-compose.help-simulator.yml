@@ -1,0 +1,45 @@
+# Optional LOCAL development override. Requires the explicit reviewed migration first.
+# Merge with docker-compose.yml + docker-compose.dev.yml, profile help-simulator.
+services:
+  api:
+    environment:
+      NODE_ENV: development
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: simulator
+      HELP_AI_SIMULATOR_DURATION_MS: ${HELP_AI_SIMULATOR_DURATION_MS:-300000}
+      DB_INIT_MODE: verify
+      DB_ACCEPT_DATA_LOSS: "0"
+      DB_AUTO_SEED: "0"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: ["sh", "-c", "node scripts/verify-help-assistant-schema.cjs && npm run dev:docker"]
+
+  help-assistant-worker:
+    profiles: ["help-simulator"]
+    build:
+      context: .
+      target: development
+    image: leaderproductapi:dev
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: simulator
+      HELP_AI_SIMULATOR_DURATION_MS: ${HELP_AI_SIMULATOR_DURATION_MS:-300000}
+      DB_INIT_MODE: verify
+      DB_ACCEPT_DATA_LOSS: "0"
+      DB_AUTO_SEED: "0"
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "node scripts/verify-help-assistant-schema.cjs && npm run worker:help:dev"]
+    stop_grace_period: 75s
+    healthcheck:
+      disable: true

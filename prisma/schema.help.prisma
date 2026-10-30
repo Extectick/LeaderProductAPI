@@ -1,4 +1,4 @@
-// Help is a separate domain from Appeals. AI remains disabled in this release.
+// Help is a separate domain from Appeals. Assistant execution is explicitly configured.
 model HelpSchemaVersion {
   id String @id
   checksum String
@@ -24,6 +24,7 @@ model HelpTicket {
   members HelpMember[]
   messages HelpMessage[]
   events HelpEvent[]
+  assistantJobs HelpAssistantJob[]
   @@unique([ownerId, clientTicketId])
   @@index([ownerId, status, updatedAt])
   @@index([status, itRequested, updatedAt])
@@ -44,8 +45,9 @@ model HelpMember {
 model HelpMessage {
   id Int @id @default(autoincrement())
   ticketId Int
-  authorId Int
-  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  authorId Int?
+  author User? @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  assistantState Json?
   authorRole String
   kind String @default("TEXT")
   clientMessageId String
@@ -62,6 +64,7 @@ model HelpMessage {
   ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   attachments HelpAttachment[]
   reactions HelpReaction[]
+  assistantJob HelpAssistantJob?
   @@unique([ticketId, authorId, clientMessageId])
   @@unique([ticketId, sequence])
 }
@@ -101,8 +104,8 @@ model HelpEvent {
   id Int @id @default(autoincrement())
   ticketId Int
   type String
-  actorId Int
-  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  actorId Int?
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
   messageId Int?
   createdAt DateTime @default(now())
   ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
@@ -120,6 +123,72 @@ model HelpNotification {
   dueAt DateTime @default(now())
   deliveredAt DateTime?
   createdAt DateTime @default(now())
+  deliveries HelpNotificationDelivery[]
   @@unique([eventId, userId])
   @@index([deliveredAt, dueAt])
+}
+
+
+// Durable work; no provider work occurs inside a request/database transaction.
+model HelpAssistantJob {
+  id String @id
+  taskId String
+  ticketId Int
+  ownerId Int
+  ticket HelpTicket @relation(fields:[ticketId],references:[id],onDelete:Cascade)
+  owner User @relation(fields:[ownerId],references:[id],onDelete:Restrict)
+  messageId Int @unique
+  message HelpMessage @relation(fields:[messageId],references:[id],onDelete:Cascade)
+  revision Int
+  contextStartSequence Int
+  context Json
+  status String @default("QUEUED")
+  step Int @default(0)
+  attempts Int @default(0)
+  provider String
+  durationMs Int @default(5000)
+  nextAt DateTime @default(now())
+  leaseUntil DateTime?
+  leaseToken String?
+  errorCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+  @@index([status, nextAt, leaseUntil])
+  @@index([ticketId, createdAt])
+  @@unique([taskId, revision])
+}
+
+// Presence is per authenticated session and expires even after process/socket loss.
+model HelpSession {
+  userId Int
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  sessionId String
+  deviceId String
+  socketId String
+  active Boolean @default(false)
+  ticketId Int?
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+  @@id([userId, sessionId])
+  @@index([userId, expiresAt])
+}
+
+model HelpNotificationAck {
+  userId Int
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  eventId Int
+  sessionId String
+  kind String
+  createdAt DateTime @default(now())
+  @@id([userId, eventId, sessionId])
+  @@index([eventId, userId])
+}
+model HelpNotificationDelivery {
+  notificationId Int
+  notification HelpNotification @relation(fields:[notificationId],references:[id],onDelete:Cascade)
+  tokenHash String
+  status String
+  updatedAt DateTime @updatedAt
+  @@id([notificationId, tokenHash])
 }

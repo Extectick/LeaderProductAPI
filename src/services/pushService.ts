@@ -16,14 +16,14 @@ type PushPayload = {
   ttl?: number;
 };
 
-export async function sendPushToUser(userId: number, payload: PushPayload) {
+export async function sendPushToUser(userId: number, payload: PushPayload, options?: {includeTokens?:string[]}) {
   const tokens = await prisma.deviceToken.findMany({
     where: { userId },
   });
 
   const expoTokens = tokens
     .map((t) => t.token)
-    .filter((token) => Expo.isExpoPushToken(token));
+    .filter((token) => Expo.isExpoPushToken(token) && (!options?.includeTokens || options.includeTokens.includes(token)));
 
   if (!expoTokens.length) {
     return { ok: false, reason: 'no_tokens' as const };

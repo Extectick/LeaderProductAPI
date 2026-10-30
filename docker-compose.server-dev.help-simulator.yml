@@ -1,0 +1,46 @@
+# SERVER DEV ONLY: merge with docker-compose.server-dev.yml.
+# HELP_SIMULATOR_IMAGE must be a reviewed image built from the same APP/API contract.
+# No source mounts, no automatic migration, no public worker ports.
+services:
+  api:
+    image: ${HELP_SIMULATOR_IMAGE:?HELP_SIMULATOR_IMAGE must name the reviewed dev image}
+    pull_policy: never
+    environment:
+      NODE_ENV: development
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: simulator
+      HELP_AI_SIMULATOR_DURATION_MS: ${HELP_AI_SIMULATOR_DURATION_MS:-300000}
+      DB_INIT_MODE: verify
+      DB_ACCEPT_DATA_LOSS: "0"
+      DB_AUTO_SEED: "0"
+    command: ["sh", "-c", "node scripts/verify-help-assistant-schema.cjs && node dist/index.js"]
+
+  help-assistant-worker:
+    profiles: ["help-simulator"]
+    image: ${HELP_SIMULATOR_IMAGE:?HELP_SIMULATOR_IMAGE must name the reviewed dev image}
+    pull_policy: never
+    container_name: leader_help_assistant_dev
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: simulator
+      HELP_AI_SIMULATOR_DURATION_MS: ${HELP_AI_SIMULATOR_DURATION_MS:-300000}
+      DB_INIT_MODE: verify
+      DB_ACCEPT_DATA_LOSS: "0"
+      DB_AUTO_SEED: "0"
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?DB_PASSWORD is required}@postgres-dev:5432/${DB_NAME:-LeaderAPI_dev}?schema=public
+      REDIS_URL: redis://redis-dev:6379
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-lp-dev:}
+    networks:
+      - default
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    command: ["sh", "-c", "node scripts/verify-help-assistant-schema.cjs && node dist/workers/helpAssistantWorker.js"]
+    stop_grace_period: 75s
+    healthcheck:
+      disable: true

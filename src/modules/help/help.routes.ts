@@ -12,6 +12,8 @@ export { helpBucket } from './help.storage';
 import { detectHelpFile, HELP_MAX_ATTACHMENTS, HELP_MAX_FILE_BYTES } from './help.policy';
 import { helpImageMetadata } from './help.image';
 import * as service from './help.service';
+import {controlHelpAssistant,helpAssistantConfiguration} from './help.assistant';
+import {helpDeliveryDiagnostics} from './help.delivery';
 import { publishHelpUpdates } from './help.socket';
 import { helpDateQuery, helpHistoryQuery, helpSearchQuery, helpSyncQuery } from './help.history';
 
@@ -32,7 +34,17 @@ async function detail(res:Response,id:number,actor:service.HelpActor) {
 }
 router.use(authenticateToken);
 router.use((_req,res,next)=>{res.setHeader('Cache-Control','private, no-store');next();});
-router.get('/config',route(async(_req,res,actor)=>res.json({aiEnabled:false,canManage:actor.canManage,maxAttachments:HELP_MAX_ATTACHMENTS,maxFileBytes:HELP_MAX_FILE_BYTES})));
+router.get('/diagnostics',route(async(_req,res,actor)=>{if(!actor.canManage)throw new service.HelpError(403,'HELP_FORBIDDEN','Требуется право специалиста IT');res.json(await helpDeliveryDiagnostics());}));
+router.post('/notifications/:id/retry',route(async(req,res,actor)=>{
+  if(!actor.canManage)throw new service.HelpError(403,'HELP_FORBIDDEN','Требуется право специалиста IT');
+  z.object({}).strict().parse(req.body||{});
+  const id=ticketId(req),notification=await prisma.helpNotification.findUnique({where:{id}});
+  if(!notification)throw new service.HelpError(404,'HELP_NOTIFICATION_NOT_FOUND','Уведомление не найдено');
+  await service.requireHelpTicket(prisma,notification.ticketId,actor);
+  const result=await prisma.helpNotification.updateMany({where:{id,deliveredAt:null,attempts:{gte:10}},data:{attempts:0,dueAt:new Date()}});
+  res.json({ok:true,retried:result.count===1});
+}));
+router.get('/config',route(async(_req,res,actor)=>res.json({aiEnabled:helpAssistantConfiguration().enabled,canManage:actor.canManage,maxAttachments:HELP_MAX_ATTACHMENTS,maxFileBytes:HELP_MAX_FILE_BYTES})));
 router.get('/tickets',route(async(req,res,actor)=>{
   const status=z.enum(['OPEN','CLOSED']).default('OPEN').parse(req.query.status);
   const scope=z.enum(['mine','queue']).default('mine').parse(req.query.scope);
@@ -41,6 +53,10 @@ router.get('/tickets',route(async(req,res,actor)=>{
   res.json(await service.listHelpTickets(actor,status,scope==='queue',req.query.cursor?idSchema.parse(req.query.cursor):undefined,q));
 }));
 router.post('/tickets',route(async(req,res,actor)=>detail(res,await service.createHelpTicket(actor,createSchema.parse(req.body)),actor)));
+for(const action of ['stop','retry'] as const) router.post(`/tickets/:id/assistant/${action}`,route(async(req,res,actor)=>{
+  const id=ticketId(req),body=z.object({runId:z.string().uuid()}).strict().parse(req.body);
+  await controlHelpAssistant(id,actor,body.runId,action==='retry');await detail(res,id,actor);
+}));
 router.get('/tickets/:id',route(async(req,res,actor)=>res.json(await service.helpDetail(ticketId(req),actor))));
 router.get('/tickets/:id/messages',route(async(req,res,actor)=>res.json(await service.helpMessages(ticketId(req),actor,helpHistoryQuery.parse(req.query)))));
 router.get('/tickets/:id/search',route(async(req,res,actor)=>res.json(await service.searchHelpMessages(ticketId(req),actor,helpSearchQuery.parse(req.query)))));

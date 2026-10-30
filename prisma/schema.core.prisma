@@ -287,6 +287,9 @@ enum AuthProvider {
 
 model User {
   helpOwnedTickets HelpTicket[]
+  helpAssistantJobs HelpAssistantJob[]
+  helpSessions HelpSession[]
+  helpNotificationAcks HelpNotificationAck[]
   helpMemberships HelpMember[]
   helpMessages HelpMessage[]
   helpAttachments HelpAttachment[]
