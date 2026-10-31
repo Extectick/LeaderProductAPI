@@ -1,0 +1,463 @@
+{
+  "corpusVersion": 1,
+  "suiteVersion": 1,
+  "mode": "legacy-baseline",
+  "createdAt": "2026-10-31T17:45:14.3Z",
+  "syntheticOnly": true,
+  "metrics": {
+    "recallAt3": 1,
+    "mrr": 1,
+    "noAnswerAccuracy": 0.5,
+    "forbiddenLeaks": 0
+  },
+  "thresholds": {
+    "recallAt3": 0.95,
+    "mrr": 0.9,
+    "noAnswerAccuracy": 1,
+    "forbiddenLeaks": 0
+  },
+  "passed": false,
+  "cases": [
+    {
+      "id": "print-code",
+      "tag": "exact",
+      "expected": [
+        "printer-paper"
+      ],
+      "returned": [
+        "printer-paper",
+        "print-1c"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 13.25
+    },
+    {
+      "id": "print-morphology",
+      "tag": "paraphrase",
+      "expected": [
+        "printer-paper"
+      ],
+      "returned": [
+        "printer-paper",
+        "print-1c"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 3.56
+    },
+    {
+      "id": "print-paper",
+      "tag": "paraphrase",
+      "expected": [
+        "printer-paper"
+      ],
+      "returned": [
+        "printer-paper",
+        "print-1c"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 3.34
+    },
+    {
+      "id": "print-brand",
+      "tag": "exact",
+      "expected": [
+        "printer-paper"
+      ],
+      "returned": [
+        "printer-paper",
+        "mail",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 3.68
+    },
+    {
+      "id": "1c-form",
+      "tag": "exact",
+      "expected": [
+        "print-1c"
+      ],
+      "returned": [
+        "print-1c"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 2.85
+    },
+    {
+      "id": "1c-empty",
+      "tag": "paraphrase",
+      "expected": [
+        "print-1c"
+      ],
+      "returned": [
+        "print-1c"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 3.59
+    },
+    {
+      "id": "1c-choice",
+      "tag": "paraphrase",
+      "expected": [
+        "print-1c"
+      ],
+      "returned": [
+        "print-1c",
+        "printer-paper"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 4.67
+    },
+    {
+      "id": "vpn-code",
+      "tag": "exact",
+      "expected": [
+        "vpn-691"
+      ],
+      "returned": [
+        "vpn-691",
+        "mail",
+        "printer-paper"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 61.15
+    },
+    {
+      "id": "vpn-reject",
+      "tag": "paraphrase",
+      "expected": [
+        "vpn-691"
+      ],
+      "returned": [
+        "vpn-691",
+        "mail"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.58
+    },
+    {
+      "id": "vpn-case",
+      "tag": "paraphrase",
+      "expected": [
+        "vpn-691"
+      ],
+      "returned": [
+        "vpn-691",
+        "password"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 4.19
+    },
+    {
+      "id": "password-forgot",
+      "tag": "paraphrase",
+      "expected": [
+        "password"
+      ],
+      "returned": [
+        "password",
+        "mail",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 3.72
+    },
+    {
+      "id": "password-email",
+      "tag": "paraphrase",
+      "expected": [
+        "password"
+      ],
+      "returned": [
+        "password",
+        "mail",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 4.98
+    },
+    {
+      "id": "account-blocked",
+      "tag": "paraphrase",
+      "expected": [
+        "account-blocked"
+      ],
+      "returned": [
+        "account-blocked",
+        "password",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.36
+    },
+    {
+      "id": "account-yo",
+      "tag": "paraphrase",
+      "expected": [
+        "account-blocked"
+      ],
+      "returned": [
+        "account-blocked",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 5.73
+    },
+    {
+      "id": "scanner-barcode",
+      "tag": "exact",
+      "expected": [
+        "scanner"
+      ],
+      "returned": [
+        "scanner"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.32
+    },
+    {
+      "id": "scanner-label",
+      "tag": "paraphrase",
+      "expected": [
+        "scanner"
+      ],
+      "returned": [
+        "scanner"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 5.3
+    },
+    {
+      "id": "excel-busy",
+      "tag": "exact",
+      "expected": [
+        "excel"
+      ],
+      "returned": [
+        "excel"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.22
+    },
+    {
+      "id": "excel-readonly",
+      "tag": "paraphrase",
+      "expected": [
+        "excel"
+      ],
+      "returned": [
+        "excel",
+        "print-1c",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.71
+    },
+    {
+      "id": "mail-code",
+      "tag": "exact",
+      "expected": [
+        "mail"
+      ],
+      "returned": [
+        "mail",
+        "password"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 43.57
+    },
+    {
+      "id": "mail-auth",
+      "tag": "paraphrase",
+      "expected": [
+        "mail"
+      ],
+      "returned": [
+        "mail",
+        "excel",
+        "vpn-691"
+      ],
+      "rank": 1,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 6.13
+    },
+    {
+      "id": "unknown-printer-code",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [
+        "printer-paper",
+        "mail",
+        "vpn-691"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 4.42
+    },
+    {
+      "id": "unknown-vpn-code",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [
+        "vpn-691",
+        "mail",
+        "printer-paper"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 4.08
+    },
+    {
+      "id": "unrelated",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 2.27
+    },
+    {
+      "id": "generic-overlap",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [
+        "vpn-691"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 2.58
+    },
+    {
+      "id": "printer-driver",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [
+        "printer-paper",
+        "print-1c"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 4.6
+    },
+    {
+      "id": "draft-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [
+        "scanner"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 2.84
+    },
+    {
+      "id": "archive-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [
+        "printer-paper",
+        "mail",
+        "vpn-691"
+      ],
+      "rank": 0,
+      "passed": false,
+      "forbiddenLeaks": 0,
+      "ms": 4.33
+    },
+    {
+      "id": "private-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 2.08
+    },
+    {
+      "id": "revoked-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 1.74
+    },
+    {
+      "id": "deleted-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 1.79
+    },
+    {
+      "id": "old-version-hidden",
+      "tag": "access",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 1.67
+    },
+    {
+      "id": "empty-query",
+      "tag": "no-answer",
+      "expected": [],
+      "returned": [],
+      "rank": 0,
+      "passed": true,
+      "forbiddenLeaks": 0,
+      "ms": 0.67
+    }
+  ]
+}

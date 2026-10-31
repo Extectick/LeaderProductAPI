@@ -1,0 +1,20 @@
+# Merge after the current dev API, Help and knowledge overlays. No schema changes.
+services:
+  api:
+    image: ${KNOWLEDGE_HELP_IMAGE:?Set the reviewed knowledge Help image}
+    environment:
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: knowledge
+      KNOWLEDGE_PUBLICATION_MODE: folder
+  knowledge-worker:
+    image: ${KNOWLEDGE_HELP_IMAGE:?Set the reviewed knowledge Help image}
+    environment:
+      KNOWLEDGE_PUBLICATION_MODE: folder
+  help-assistant-worker:
+    image: ${KNOWLEDGE_HELP_IMAGE:?Set the reviewed knowledge Help image}
+    env_file:
+      - ${KNOWLEDGE_ENV_FILE:?Set the private read-only knowledge worker env path}
+    environment:
+      HELP_AI_ENABLED: "true"
+      HELP_AI_PROVIDER: knowledge
+      KNOWLEDGE_PUBLICATION_MODE: folder

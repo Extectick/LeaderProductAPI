@@ -2,13 +2,21 @@ import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import prisma from '../../prisma/client';
 import { HelpError, helpActor, helpTransaction, requireHelpTicket, publishHelpEvent } from './help.service';
+import { knowledgeEnabled } from '../knowledge/knowledge.config';
+import { HelpGroundedAnswer, prepareHelpKnowledgeAnswer, validateHelpKnowledgeSources } from './help.knowledge';
+import { HelpOpenAIError, openAIConfiguration } from './help.openai';
+import { prepareHelpOpenAIAnswer } from './help.openai-answer';
+import { withHelpAssistantLease } from './help.assistant-lease';
+import { onecBases } from '../onec-personal/config';
+import { validateOnecProofs } from '../onec-personal/service';
 
 type Tx = Prisma.TransactionClient;
 const ACTIVE = ['QUEUED','RUNNING'];
 export function helpAssistantConfiguration() {
   const provider = process.env.HELP_AI_PROVIDER || 'disabled';
-  const enabled = process.env.HELP_AI_ENABLED === 'true' && provider === 'simulator' && process.env.NODE_ENV !== 'production';
-  const durationMs = Math.min(900000, Math.max(500, Number(process.env.HELP_AI_SIMULATOR_DURATION_MS) || 5000));
+  const enabled = process.env.HELP_AI_ENABLED === 'true' && (provider === 'simulator' && process.env.NODE_ENV !== 'production' ||
+    knowledgeEnabled() && provider === 'knowledge' || provider === 'openai' && (knowledgeEnabled() || onecBases().length > 0) && openAIConfiguration().enabled);
+  const durationMs = provider === 'knowledge' || provider === 'openai' ? 1000 : Math.min(900000, Math.max(500, Number(process.env.HELP_AI_SIMULATOR_DURATION_MS) || 5000));
   return { enabled, provider, durationMs };
 }
 const state = (job:any, status:string, eventId:number) => ({
@@ -51,11 +59,14 @@ export async function controlHelpAssistant(ticketId:number,actor:{userId:number;
     const job=await db.helpAssistantJob.findFirst({where:{id:runId,ticketId}});
     if(!job)throw new HelpError(404,'HELP_RUN_NOT_FOUND','Ответ ИИ не найден');
     if(!retry){if(ACTIVE.includes(job.status))await cancelHelpAssistant(db,ticketId);return;}
-    if(ACTIVE.includes(job.status)||job.status==='COMPLETED')return;
+    const pendingMessage = await db.helpMessage.findUnique({where:{id:job.messageId},select:{assistantState:true}});
+    const awaitingOnec = (pendingMessage?.assistantState as any)?.action?.type === 'connect_onec';
+    if(ACTIVE.includes(job.status)||job.status==='COMPLETED'&&!awaitingOnec)return;
     if(!helpAssistantConfiguration().enabled||ticket.status!=='OPEN'||ticket.itRequested||ticket.members.some(member=>member.role==='IT'))throw new HelpError(409,'HELP_AI_UNAVAILABLE','ИИ недоступен для этого обращения');
     const newer=await db.helpAssistantJob.findFirst({where:{ticketId,createdAt:{gt:job.createdAt}}});
     if(newer)throw new HelpError(409,'HELP_RUN_SUPERSEDED','Для обращения уже создан более новый ответ');
     const next=await db.helpAssistantJob.update({where:{id:job.id},data:{status:'QUEUED',step:0,attempts:0,errorCode:null,leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+job.durationMs/4)}});
+    if(awaitingOnec)await db.helpMessage.update({where:{id:job.messageId},data:{text:'',kind:'ASSISTANT_PROGRESS'}});
     await updateState(db,next,'thinking');
   });
 }
@@ -67,15 +78,24 @@ export const simulateHelpAnswer:HelpAssistantProvider=async context=>{
   return 'Проверьте подключение к сети и повторите действие. Запишите текст ошибки и приложите снимок экрана. Если проблема сохраняется, уточните, на каком шаге она возникает, чтобы выбрать следующий шаг или подключить специалиста IT.';
 };
 /** One fenced step, exported so integration tests can verify crash/restart semantics. */
-export async function processHelpAssistantJob(jobId:string,leaseToken:string,provider:HelpAssistantProvider=simulateHelpAnswer) {
+export async function processHelpAssistantJob(jobId:string,leaseToken:string,provider:HelpAssistantProvider=simulateHelpAnswer,shutdown?:AbortSignal) {
   const initial=await prisma.helpAssistantJob.findUnique({where:{id:jobId}});
   if(!initial||initial.leaseToken!==leaseToken||!ACTIVE.includes(initial.status))return false;
   let answer:string|undefined;
+  let grounded:HelpGroundedAnswer|undefined;
   try {
     await helpActor(initial.ownerId);
     if(initial.step>=3){
-      if(initial.provider!=='simulator'||process.env.NODE_ENV==='production')throw new HelpError(503,'HELP_AI_PROVIDER_UNAVAILABLE','Провайдер ИИ не настроен');
-      answer=await provider(initial.context,AbortSignal.timeout(60000));
+      if(initial.provider==='openai') {
+        grounded=await withHelpAssistantLease(jobId,leaseToken,signal=>prepareHelpOpenAIAnswer(initial.ticketId,initial.ownerId,initial.context,signal),shutdown);
+        answer=grounded.text;
+      } else if(initial.provider==='knowledge') {
+        grounded=await prepareHelpKnowledgeAnswer(initial.ticketId,initial.ownerId,initial.context);
+        answer=grounded.text;
+      } else {
+        if(initial.provider!=='simulator'||process.env.NODE_ENV==='production')throw new HelpError(503,'HELP_AI_PROVIDER_UNAVAILABLE','Провайдер ИИ не настроен');
+        answer=await provider(initial.context,AbortSignal.timeout(60000));
+      }
       if(!answer.trim()||answer.length>20000)throw new HelpError(502,'HELP_AI_INVALID_ANSWER','Неверный ответ провайдера');
     }
     return await helpTransaction(initial.ticketId,async db=>{
@@ -84,12 +104,18 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
       const ticket=await db.helpTicket.findUniqueOrThrow({where:{id:job.ticketId},include:{members:true}});
       if(ticket.status!=='OPEN'||ticket.itRequested||ticket.members.some(member=>member.role==='IT')){await cancelHelpAssistant(db,ticket.id,'handoff');return false;}
       if(answer!==undefined){
+        if(grounded)await validateHelpKnowledgeSources(db,grounded.validationSources||grounded.sources,job.ownerId);
+        if(grounded?.onecProofs?.length){
+          await db.$executeRaw`SELECT pg_advisory_xact_lock(190154, ${job.ownerId}::int)`;
+          await validateOnecProofs(job.ownerId,grounded.onecProofs,db);
+        }
         const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:'COMPLETED',step:4,leaseToken:null,leaseUntil:null,completedAt:new Date()}});
         if(!claimed.count)return false;
         const next=await db.helpAssistantJob.findUniqueOrThrow({where:{id:job.id}});
         await db.helpMessage.update({where:{id:job.messageId},data:{text:answer,kind:'TEXT'}});
-        await db.helpTicket.update({where:{id:job.ticketId},data:{updatedAt:new Date()}});
-        await updateState(db,next,'completed');
+        await db.helpTicket.update({where:{id:job.ticketId},data:{updatedAt:new Date(),...(grounded?.handoffReason?{itRequested:true}:{})}});
+        await updateState(db,next,'completed',grounded?{answerMode:grounded.mode,sources:grounded.sources,...(grounded.action?{action:grounded.action}:{}),...(grounded.generation?{generation:grounded.generation}:{}),...(grounded.handoffReason?{handoffReason:grounded.handoffReason}:{})}:{});
+        if(grounded?.handoffReason)await publishHelpEvent(db,job.ticketId,job.ownerId,'IT_REQUESTED');
       }else{
         const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:'QUEUED',step:job.step+1,attempts:0,leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+job.durationMs/4)}});
         if(!claimed.count)return false;
@@ -102,8 +128,10 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
     await helpTransaction(initial.ticketId,async db=>{
       const job=await db.helpAssistantJob.findUnique({where:{id:jobId}});if(!job||job.leaseToken!==leaseToken||!ACTIVE.includes(job.status))return;
       const denied=error?.status===403||error?.status===404;
-      const failed=denied||job.attempts>=5||error?.code==='HELP_AI_PROVIDER_UNAVAILABLE';
-      const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:failed?'ERROR':'QUEUED',errorCode:denied?'HELP_FORBIDDEN':error?.code||'HELP_AI_RETRY',leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+Math.min(60000,1000*2**job.attempts))}});
+      const openAIError=error instanceof HelpOpenAIError;
+      const failed=denied||job.attempts>=(initial.provider==='openai'?openAIConfiguration().maxAttempts:5)||error?.code==='HELP_AI_PROVIDER_UNAVAILABLE'||openAIError&&!error.retryable;
+      const delay=Math.max(Math.min(60000,1000*2**job.attempts),openAIError?error.retryAfterMs:0);
+      const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:failed?'ERROR':'QUEUED',errorCode:denied?'HELP_FORBIDDEN':error?.code||'HELP_AI_RETRY',leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+delay)}});
       if(failed&&claimed.count)await updateState(db,await db.helpAssistantJob.findUniqueOrThrow({where:{id:job.id}}),'error');
     });
     return false;
@@ -114,19 +142,20 @@ export async function claimHelpAssistantJob() {
   const jobs=await prisma.$queryRaw<Array<{id:string}>>`UPDATE "HelpAssistantJob" SET "status"='RUNNING',"leaseToken"=${token},"leaseUntil"=NOW()+INTERVAL '90 seconds',"attempts"="attempts"+1,"updatedAt"=NOW() WHERE "id"=(SELECT "id" FROM "HelpAssistantJob" WHERE "status" IN ('QUEUED','RUNNING') AND "nextAt"<=NOW() AND ("leaseUntil" IS NULL OR "leaseUntil"<NOW()) ORDER BY "nextAt","id" FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING "id"`;
   return jobs[0]?{id:jobs[0].id,leaseToken:token}:null;
 }
-export async function tickHelpAssistantWorker(provider?:HelpAssistantProvider) {
+export async function tickHelpAssistantWorker(provider?:HelpAssistantProvider,shutdown?:AbortSignal) {
   if(!helpAssistantConfiguration().enabled)return false;
   const job=await claimHelpAssistantJob();if(!job)return false;
-  return processHelpAssistantJob(job.id,job.leaseToken,provider);
+  return processHelpAssistantJob(job.id,job.leaseToken,provider,shutdown);
 }
 export function startHelpAssistantWorker() {
   if(!helpAssistantConfiguration().enabled)return async()=>{};
   let stopped=false,busy=false,inFlight:Promise<void>=Promise.resolve();
+  const shutdown=new AbortController();
   const tick=()=>{
     if(stopped||busy)return;
     busy=true;
-    inFlight=(async()=>{try{await tickHelpAssistantWorker();}catch(error:any){console.error('[help-ai] worker retry',{code:error?.code||'UNKNOWN'});}finally{busy=false;}})();
+    inFlight=(async()=>{try{await tickHelpAssistantWorker(undefined,shutdown.signal);}catch(error:any){console.error('[help-ai] worker retry',{code:error?.code||'UNKNOWN'});}finally{busy=false;}})();
   };
   const timer=setInterval(tick,250);tick();
-  return async()=>{stopped=true;clearInterval(timer);await inFlight;};
+  return async()=>{stopped=true;clearInterval(timer);shutdown.abort();await inFlight;};
 }

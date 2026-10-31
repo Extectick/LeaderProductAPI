@@ -1,0 +1,107 @@
+name: leader-knowledge
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-env: &app-env
+  POSTGRES_HOST: database
+  POSTGRES_DB: nextcloud
+  POSTGRES_USER: nextcloud
+  POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+  REDIS_HOST: redis
+  REDIS_HOST_PASSWORD_FILE: /run/secrets/redis_password
+  PHP_MEMORY_LIMIT: 256M
+  PHP_UPLOAD_LIMIT: 512M
+
+services:
+  database:
+    image: ${POSTGRES_IMAGE:?Run prepare.py first}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+    secrets: [database_password]
+    volumes: [database:/var/lib/postgresql/data]
+    command: [postgres, -c, shared_buffers=96MB, -c, max_connections=30]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U nextcloud -d nextcloud"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    cpus: 0.5
+    logging: *logging
+
+  redis:
+    image: ${REDIS_IMAGE:?Run prepare.py first}
+    restart: unless-stopped
+    command: [redis-server, /run/secrets/redis_config]
+    secrets: [redis_config, redis_password]
+    healthcheck:
+      test: [CMD-SHELL, 'export REDISCLI_AUTH="$$(cat /run/secrets/redis_password)"; redis-cli ping | grep -q PONG']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *logging
+
+  nextcloud:
+    image: ${NEXTCLOUD_IMAGE:?Run prepare.py first}
+    restart: unless-stopped
+    ports: ["127.0.0.1:${NEXTCLOUD_PORT:-18120}:80"]
+    environment:
+      <<: *app-env
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:?Missing admin username}
+      NEXTCLOUD_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS:?Missing trusted domains}
+      OVERWRITECLIURL: ${NEXTCLOUD_BASE_URL:?Missing base URL}
+      TRUSTED_PROXIES: ${NEXTCLOUD_TRUSTED_PROXIES:-}
+      APACHE_DISABLE_REWRITE_IP: "1"
+    secrets: [database_password, redis_password, admin_password]
+    volumes:
+      - nextcloud:/var/www/html
+      - ./apache-workers.conf:/etc/apache2/conf-enabled/zz-knowledge-workers.conf:ro
+    depends_on:
+      database: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS http://localhost/status.php | php -r '$$s=json_decode(stream_get_contents(STDIN),true); exit(!($$s && ($$s[\"installed\"] ?? false) && !($$s[\"maintenance\"] ?? true) && !($$s[\"needsDbUpgrade\"] ?? true)));'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    mem_limit: 768m
+    cpus: 1.0
+    logging: *logging
+
+  cron:
+    image: ${NEXTCLOUD_IMAGE:?Run prepare.py first}
+    restart: unless-stopped
+    entrypoint: /cron.sh
+    environment: *app-env
+    secrets: [database_password, redis_password]
+    volumes: [nextcloud:/var/www/html]
+    depends_on:
+      nextcloud: {condition: service_healthy}
+    mem_limit: 384m
+    cpus: 0.5
+    logging: *logging
+
+volumes:
+  database:
+  nextcloud:
+
+secrets:
+  database_password:
+    file: ./secrets/database_password
+  redis_password:
+    file: ./secrets/redis_password
+  redis_config:
+    file: ./secrets/redis.conf
+  admin_password:
+    file: ./secrets/admin_password

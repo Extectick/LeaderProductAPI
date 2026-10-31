@@ -1,0 +1,107 @@
+model KnowledgeSource {
+  id                String   @id @default(uuid())
+  key               String   @unique
+  name              String
+  configFingerprint String
+  enabled           Boolean  @default(true)
+  nextScanAt        DateTime @default(now())
+  lastScanAt        DateTime?
+  lastSuccessAt     DateTime?
+  lastErrorCode     String?
+  scanLeaseToken    String?
+  scanLeaseUntil    DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  documents        KnowledgeDocument[]
+}
+
+model KnowledgeDocument {
+  id                  String   @id @default(uuid())
+  sourceId            String
+  remoteId            String
+  path                String
+  title               String
+  section             String
+  etag                String
+  size                BigInt
+  mimeType            String
+  currentRevision     Int      @default(0)
+  publishedRevision   Int?
+  publishedAt         DateTime?
+  publishedById       Int?
+  allEmployees        Boolean  @default(false)
+  allowedUserIds      Int[]    @default([])
+  allowedDepartmentIds Int[]   @default([])
+  seenScanId          String
+  lastSeenAt          DateTime @default(now())
+  deletedAt           DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  source              KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  versions            KnowledgeVersion[]
+
+  @@unique([sourceId, remoteId])
+  @@index([sourceId, seenScanId])
+  @@index([sourceId, section, deletedAt])
+}
+
+model KnowledgeVersion {
+  id            String   @id @default(uuid())
+  documentId    String
+  revision      Int
+  etag          String
+  path          String
+  status        String   @default("QUEUED")
+  sha256        String?
+  text          String?  @db.Text
+  errorCode     String?
+  extractor     String   @default("text-v1")
+  extractedAt   DateTime?
+  createdAt     DateTime @default(now())
+  document      KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunks        KnowledgeChunk[]
+  job           KnowledgeIngestionJob?
+
+  @@unique([documentId, revision])
+}
+
+model KnowledgeChunk {
+  id            String   @id @default(uuid())
+  versionId     String
+  ordinal       Int
+  text          String   @db.Text
+  searchVector  Unsupported("tsvector")? @default(dbgenerated())
+  version       KnowledgeVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, ordinal])
+  @@index([searchVector], type: Gin, map: "KnowledgeChunk_searchVector_idx")
+}
+
+model KnowledgeIngestionJob {
+  id            String   @id @default(uuid())
+  versionId     String   @unique
+  status        String   @default("QUEUED")
+  attempts      Int      @default(0)
+  nextAt        DateTime @default(now())
+  leaseToken    String?
+  leaseUntil    DateTime?
+  errorCode     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  version       KnowledgeVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAt])
+}
+
+model KnowledgeAuditEvent {
+  id          String   @id @default(uuid())
+  sourceId    String
+  documentId  String?
+  versionId   String?
+  actorId     Int?
+  action      String
+  detail      Json
+  createdAt   DateTime @default(now())
+
+  @@index([documentId, createdAt])
+}

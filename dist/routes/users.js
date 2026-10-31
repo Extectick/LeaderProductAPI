@@ -686,8 +686,9 @@ router.post('/profiles/client', auth_1.authenticateToken, checkUserStatus_1.chec
         if (activePriceTypeGuid && !priceTypeRecord)
             return;
         const deliveryAddressRecord = activeDeliveryAddressGuid
-            ? ensureEntityActive(await client_2.default.deliveryAddress.findUnique({
-                where: { guid: activeDeliveryAddressGuid },
+            ? ensureEntityActive(await client_2.default.deliveryAddress.findFirst({
+                where: { guid: activeDeliveryAddressGuid,
+                    counterpartyId: counterpartyRecord?.id ?? agreementRecord?.counterpartyId ?? contractRecord?.counterpartyId ?? undefined },
                 select: { id: true, guid: true, fullAddress: true, isActive: true, counterpartyId: true },
             }), 'Адрес доставки')
             : null;

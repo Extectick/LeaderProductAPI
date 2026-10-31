@@ -1,0 +1,52 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const {randomUUID, randomBytes} = require('node:crypto');
+const prisma = require('../dist/prisma/client').default;
+const service = require('../dist/modules/onec-personal/service');
+const { helpOnecTools, HelpOnecConnectionRequired } = require('../dist/modules/help/help.onec-tools');
+const checks=[];
+async function main() {
+  assert.equal(process.env.NODE_ENV,'test'); assert.match(process.env.DATABASE_URL,/LeaderAPI_onec_personal_test(?:\?|$)/);
+  const base = {key:'qa',label:'QA',rpcUrl:'https://onec.example.org/qa/hs/mcp/rpc',legacyGuidBinding:true,allowVpnHttp:false};
+  fs.writeFileSync('/tmp/onec-bases.json',JSON.stringify([base]));fs.writeFileSync('/tmp/onec-keyring.json',JSON.stringify({active:'qa',keys:{qa:randomBytes(32).toString('base64')}}));
+  Object.assign(process.env,{ONEC_PERSONAL_ENABLED:'true',ONEC_PERSONAL_BASES_FILE:'/tmp/onec-bases.json',ONEC_PERSONAL_KEYRING_FILE:'/tmp/onec-keyring.json'});
+  const role=await prisma.role.create({data:{name:'onec-qa-'+randomUUID()}});
+  const guid=randomUUID();
+  const a=await prisma.user.create({data:{isActive:true,roleId:role.id,profileStatus:'ACTIVE',employeeProfile:{create:{status:'ACTIVE',onecUserGuid:guid}}}});
+  const b=await prisma.user.create({data:{isActive:true,roleId:role.id,profileStatus:'ACTIVE',employeeProfile:{create:{status:'ACTIVE'}}}});
+  await service.importOnecDirectory('qa',[{guid,ibGuid:randomUUID(),login:'mapped.alice',displayName:'Алиса Тестовая'}]);
+  let view=(await service.listOnecConnections(a.id))[0];assert.equal(view.login,'mapped.alice');assert.equal(view.loginLocked,true);assert.equal(view.connected,false);
+  assert.equal(view.displayName,'Алиса Тестовая');
+  await assert.rejects(service.connectOnec(a.id,'qa','someone.else','password'),{code:'ONEC_LOGIN_MISMATCH'});checks.push('authoritative GUID login; cannot change mapped identity');
+  let hold=null, entered=null;const identities=[];
+  global.fetch=async (_url,init)=>{
+    const identity=Buffer.from(init.headers.Authorization.slice(6),'base64').toString();identities.push(identity);
+    const req=JSON.parse(init.body);
+    if(req.method==='initialize') { if(entered){entered();entered=null;} if(hold) await hold; return Response.json({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2025-03-26',serverInfo:{name:'1C'}}}); }
+    if(req.method==='notifications/initialized')return new Response(null,{status:204});
+    return Response.json({jsonrpc:'2.0',id:req.id,result:{content:[{type:'text',text:'allowed data'}]}});
+  };
+  await service.connectOnec(a.id,'qa',undefined,'alice-secret');
+  await service.connectOnec(b.id,'qa','bob','bob-secret');
+  identities.length=0;
+  await service.userMcpCall(a.id,'qa','get_access_rights',{metadata:'Справочник.Товары'});
+  await service.userMcpCall(b.id,'qa','get_access_rights',{metadata:'Справочник.Товары'});
+  assert(identities.slice(0,3).every(x=>x==='mapped.alice:alice-secret'));assert(identities.slice(3).every(x=>x==='bob:bob-secret'));
+  const rows=JSON.stringify(await prisma.onecConnection.findMany());for(const value of ['mapped.alice','Алиса Тестовая','alice-secret','bob-secret'])assert(!rows.includes(value));checks.push('encrypted login/name/password; MCP isolation between two users');
+  const result=await service.userMcpCall(a.id,'qa','get_access_rights',{metadata:'Справочник.Товары'});
+  await service.disconnectOnec(a.id,'qa');await assert.rejects(service.validateOnecProofs(a.id,[result.proof]),{code:'ONEC_AUTH_REQUIRED'});
+  await assert.rejects(helpOnecTools(a.id).call('onec_get_access_rights',{baseKey:'qa',arguments:{metadata:'Справочник.Товары'}},new AbortController().signal),HelpOnecConnectionRequired);
+  checks.push('disconnect invalidates saved results and produces secure-form action');
+  let release;hold=new Promise(r=>release=r);let start;const started=new Promise(r=>start=r);entered=start;
+  const pending=service.connectOnec(a.id,'qa',undefined,'race-secret');await started;await service.disconnectOnec(a.id,'qa');release();hold=null;
+  await assert.rejects(pending,{code:'ONEC_CHANGED'});assert.equal((await service.listOnecConnections(a.id))[0].connected,false);checks.push('disconnect wins against in-flight save');
+  await service.connectOnec(a.id,'qa',undefined,'new-secret');
+  await prisma.employeeProfile.update({where:{userId:a.id},data:{onecUserGuid:randomUUID()}});
+  await assert.rejects(service.userMcpCall(a.id,'qa','get_access_rights',{metadata:'Справочник.Товары'}),{code:'ONEC_AUTH_REQUIRED'});checks.push('changed GUID revokes stale credentials');
+  global.fetch=async()=>new Response('do-not-log-password',{status:401});
+  for(let n=0;n<4;n++)await assert.rejects(service.connectOnec(b.id,'qa','bob','wrong'),{code:'ONEC_AUTH_REQUIRED'});
+  await assert.rejects(service.connectOnec(b.id,'qa','bob','wrong'),{code:'ONEC_RATE_LIMIT'});checks.push('durable per-user/base attempt limit');
+  await prisma.user.update({where:{id:b.id},data:{profileStatus:'BLOCKED'}});await assert.rejects(service.listOnecConnections(b.id),{code:'ONEC_FORBIDDEN'});checks.push('blocked account denied');
+  console.log(JSON.stringify({ok:true,checks}));
+}
+main().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>prisma.$disconnect());

@@ -18,6 +18,14 @@ schemas after this additive migration. Existing Help
 messages remain valid; system authors/events now use nullable user IDs. DTOs
 expose AI author ID 0 with role SYSTEM, and a persisted `assistantRun`.
 
+## Knowledge retrieval pilot
+
+The `knowledge` provider connects the durable Help job to the company document index. It returns actual excerpts with source revisions and hands the ticket to IT if nothing is found, the source is unavailable, or the user says the instructions did not help. Existing correction fencing, events and notification outbox are retained. No external model is called.
+
+Enable `HELP_AI_ENABLED=true`, `HELP_AI_PROVIDER=knowledge` and `KNOWLEDGE_ENABLED=true` in both API and worker; pass the same private read-only Nextcloud source configuration. `KNOWLEDGE_PUBLICATION_MODE=folder` publishes current READY company documents after indexing while preserving explicit ACLs and revocations. See [pilot instructions](help-knowledge-pilot.md).
+
+OpenAI Responses is implemented as an explicitly gated provider; its key/model and live activation are still pending. A key alone never activates it. It reuses the same event/outbox transaction, checks document revisions before disclosure and final save, renews the lease and aborts on correction/shutdown. See [adapter configuration and isolated checks](help-openai-adapter.md).
+
 ## Explicit server simulator
 
 Development/test only:

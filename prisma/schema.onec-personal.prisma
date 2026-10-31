@@ -1,0 +1,28 @@
+// Secrets are authenticated ciphertext. Never include this relation in user/profile DTOs.
+model OnecConnection {
+  userId          Int
+  baseKey         String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  boundGuid       String?
+  loginCipher     String?
+  displayNameCipher String?
+  passwordCipher  String?
+  loginSource     String    @default("manual")
+  verifiedAt      DateTime?
+  revision        Int       @default(0)
+  attempts        Int       @default(0)
+  attemptWindow   DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  @@id([userId, baseKey])
+}
+
+// Authoritative login hints, imported administratively from the matching 1C base.
+model OnecDirectoryEntry {
+  baseKey      String
+  guid         String
+  ibGuid       String
+  loginCipher  String
+  displayNameCipher String?
+  updatedAt    DateTime @updatedAt
+  @@id([baseKey, guid])
+}

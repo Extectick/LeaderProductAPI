@@ -98,6 +98,7 @@ export const PERMISSION_GROUP_CATALOG: PermissionGroupCatalogEntry[] = [
 ];
 
 export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
+  { name: 'manage_knowledge', displayName: 'Управление базой знаний', description: 'Проверка, публикация и отзыв версий документов.', groupKey: 'admin' },
   { name: 'view_profile', displayName: 'Просмотр профиля', description: 'Разрешает просматривать профиль пользователя.', groupKey: 'core' },
   { name: 'update_profile', displayName: 'Редактирование профиля', description: 'Разрешает изменять данные собственного профиля.', groupKey: 'core' },
   { name: 'logout', displayName: 'Выход из системы', description: 'Разрешает завершать текущую сессию пользователя.', groupKey: 'core' },

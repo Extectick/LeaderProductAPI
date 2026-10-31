@@ -20,3 +20,4 @@ tests
 restores
 coverage
 api-schema.txt
+deploy/knowledge/

@@ -15,6 +15,7 @@ import { startClientOrderSubmissionWorker, stopClientOrderSubmissionWorker } fro
 // Routers
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
+import onecPersonalRouter from './modules/onec-personal/routes';
 import clientContactsRouter from './modules/orderShare/clientContacts.routes';
 import { orderShareManagerRouter, publicOrderRouter } from './modules/orderShare/orderShare.routes';
 import qrRouter from './routes/qr';
@@ -24,6 +25,7 @@ import helpRouter from './modules/help/help.routes';
 import { registerHelpSocket, startHelpDelivery, isHelpRoom } from './modules/help/help.socket';
 import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
+import knowledgeRouter from './modules/knowledge/knowledge.routes';
 import trackingV2Router from './routes/trackingV2';
 import updatesRouter from './routes/updates';
 import otaRouter from './routes/ota';
@@ -110,6 +112,7 @@ const SENSITIVE_QUERY_KEYS = new Set([
 ]);
 
 function redactSensitiveUrl(originalUrl: string): string {
+  if (/^\/users\/me\/onec-connections(?:[/?]|$)/i.test(originalUrl)) return originalUrl.split('?')[0];
   try {
     const url = new URL(originalUrl, 'http://leaderproduct.local');
     let changed = false;
@@ -168,6 +171,8 @@ morgan.token('safe-url', (req) => redactSensitiveUrl((req as any).originalUrl ||
 app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]'));
 // Must precede JSON parsing and debug/Kafka logging: signature covers original bytes.
 app.use('/integrations/sentry/events', sentryWebhookRouter);
+// This router has its own bounded JSON parser and sanitized errors: no credentials in global logs.
+app.use('/users/me/onec-connections', onecPersonalRouter);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
@@ -205,6 +210,7 @@ app.use('/update-files', filesRouter);
 app.use('/files', filesRouter);
 app.use('/notifications', notificationsRouter);
 app.use('/help', helpRouter);
+app.use('/knowledge', knowledgeRouter);
 app.use('/api/1c/lp-app', onecLpAppRouter);
 app.use('/api/1c', onecRouter);
 app.use('/api/marketplace', marketplaceRouter);

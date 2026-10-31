@@ -1,0 +1,27 @@
+# TEMPLATE ONLY: enable after DNS and a valid certificate exist.
+# Configure Nextcloud trusted domains/proxies at the same time.
+server {
+    listen 80;
+    server_name cloud.leader-product.ru;
+    location ^~ /.well-known/acme-challenge/ { root /var/www/leader-knowledge-acme; }
+    location / { return 301 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name cloud.leader-product.ru;
+    ssl_certificate /etc/letsencrypt/live/cloud.leader-product.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cloud.leader-product.ru/privkey.pem;
+    client_max_body_size 512m;
+    location = /.well-known/carddav { return 301 /remote.php/dav/; }
+    location = /.well-known/caldav { return 301 /remote.php/dav/; }
+    location / {
+        proxy_pass http://127.0.0.1:18120;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}

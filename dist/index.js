@@ -17,14 +17,22 @@ const socket_io_1 = require("socket.io");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const client_1 = __importDefault(require("./prisma/client"));
 exports.prisma = client_1.default;
+const clientOrderSubmissionWorker_1 = require("./services/clientOrderSubmissionWorker");
 // Routers
 const auth_1 = __importDefault(require("./routes/auth"));
 const users_1 = __importDefault(require("./routes/users"));
+const routes_1 = __importDefault(require("./modules/onec-personal/routes"));
+const clientContacts_routes_1 = __importDefault(require("./modules/orderShare/clientContacts.routes"));
+const orderShare_routes_1 = require("./modules/orderShare/orderShare.routes");
 const qr_1 = __importDefault(require("./routes/qr"));
 const passwordReset_1 = __importDefault(require("./routes/passwordReset"));
 const appeals_1 = __importDefault(require("./routes/appeals"));
+const help_routes_1 = __importDefault(require("./modules/help/help.routes"));
+const help_socket_1 = require("./modules/help/help.socket");
 const departments_1 = __importDefault(require("./routes/departments"));
 const tracking_1 = __importDefault(require("./routes/tracking"));
+const knowledge_routes_1 = __importDefault(require("./modules/knowledge/knowledge.routes"));
+const trackingV2_1 = __importDefault(require("./routes/trackingV2"));
 const updates_1 = __importDefault(require("./routes/updates"));
 const ota_1 = __importDefault(require("./routes/ota"));
 const files_1 = __importDefault(require("./routes/files"));
@@ -36,7 +44,13 @@ const onec_routes_1 = __importDefault(require("./modules/onec/onec.routes"));
 const onec_lpApp_routes_1 = __importDefault(require("./modules/onec/onec.lpApp.routes"));
 const marketplace_routes_1 = __importDefault(require("./modules/marketplace/marketplace.routes"));
 const clientOrders_routes_1 = __importDefault(require("./modules/clientOrders/clientOrders.routes"));
+const counterparties_routes_1 = __importDefault(require("./modules/counterparties/counterparties.routes"));
+const catalog_routes_1 = __importDefault(require("./modules/catalog/catalog.routes"));
+const monitoring_routes_1 = require("./modules/monitoring/monitoring.routes");
+const crashRetention_1 = require("./modules/monitoring/crashRetention");
 const scheduledJobsService_1 = require("./services/scheduledJobsService");
+const trackingMaintenanceService_1 = require("./services/trackingMaintenanceService");
+const onecSyncMaintenanceService_1 = require("./services/onecSyncMaintenanceService");
 const clientOrdersExportWorker_1 = require("./services/clientOrdersExportWorker");
 const clientOrderInvoiceWorker_1 = require("./services/clientOrderInvoiceWorker");
 const redis_1 = require("./lib/redis");
@@ -85,6 +99,8 @@ const SENSITIVE_QUERY_KEYS = new Set([
     'password',
 ]);
 function redactSensitiveUrl(originalUrl) {
+    if (/^\/users\/me\/onec-connections(?:[/?]|$)/i.test(originalUrl))
+        return originalUrl.split('?')[0];
     try {
         const url = new URL(originalUrl, 'http://leaderproduct.local');
         let changed = false;
@@ -129,9 +145,17 @@ app.use((0, cors_1.default)({
 // ---- Common middlewares ----
 morgan_1.default.token('safe-url', (req) => redactSensitiveUrl(req.originalUrl || req.url || ''));
 app.use((0, morgan_1.default)(':method :safe-url :status :response-time ms - :res[content-length]'));
+// Must precede JSON parsing and debug/Kafka logging: signature covers original bytes.
+app.use('/integrations/sentry/events', monitoring_routes_1.sentryWebhookRouter);
+// This router has its own bounded JSON parser and sanitized errors: no credentials in global logs.
+app.use('/users/me/onec-connections', routes_1.default);
 app.use(express_1.default.json({ limit: '1mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express_1.default.static(path_1.default.resolve(process.cwd(), 'uploads')));
+// Customer links and contact details must not enter body/debug request logs.
+app.use('/public/order', orderShare_routes_1.publicOrderRouter);
+app.use('/api/order-sharing', orderShare_routes_1.orderShareManagerRouter);
+app.use('/users', clientContacts_routes_1.default);
 app.use(kafkaRequestLogger_1.kafkaRequestLogger);
 const allowDebugInProd = process.env.ALLOW_DEBUG_IN_PROD === '1';
 if (process.env.DEBUG_REQUESTS === '1' && (process.env.NODE_ENV !== 'production' || allowDebugInProd)) {
@@ -148,6 +172,7 @@ app.use('/users', users_1.default);
 app.use('/departments', departments_1.default);
 app.use('/qr', qr_1.default);
 app.use('/password-reset', passwordReset_1.default);
+app.use('/tracking', trackingV2_1.default);
 app.use('/tracking', tracking_1.default);
 app.use('/services', services_1.default);
 app.use('/stock-balances', stockBalances_1.default);
@@ -157,10 +182,15 @@ app.use('/ota', ota_1.default);
 app.use('/update-files', files_1.default);
 app.use('/files', files_1.default);
 app.use('/notifications', notifications_1.default);
+app.use('/help', help_routes_1.default);
+app.use('/knowledge', knowledge_routes_1.default);
 app.use('/api/1c/lp-app', onec_lpApp_routes_1.default);
 app.use('/api/1c', onec_routes_1.default);
 app.use('/api/marketplace', marketplace_routes_1.default);
 app.use('/api/client-orders', clientOrders_routes_1.default);
+app.use('/api/counterparties', counterparties_routes_1.default);
+app.use('/api/catalog', catalog_routes_1.default);
+app.use('/admin/crash-events', monitoring_routes_1.crashEventsRouter);
 app.use('/appeals', (0, cache_1.cacheByUrl)(15, {
     include: /^\/appeals(\/\d+)?(\?.*)?$/i, // кэшируем список и детали
     exclude: /\/appeals\/\d+\/(messages|assign|status|watchers|claim|department)/i, // исключаем мутации
@@ -372,7 +402,8 @@ io.on('connection', (socket) => {
         const nextFocusedCount = incrementMapValue(userFocusedSocketCounts, userId);
         syncFocusedPresence(userId, prevFocusedCount, nextFocusedCount);
     }
-    socket.on('join', (room) => { if (room)
+    (0, help_socket_1.registerHelpSocket)(io, socket);
+    socket.on('join', (room) => { if (typeof room === 'string' && room && !(0, help_socket_1.isHelpRoom)(room))
         socket.join(room); });
     socket.on('leave', (room) => { if (room)
         socket.leave(room); });
@@ -407,6 +438,7 @@ io.on('connection', (socket) => {
 });
 // ---- Start ----
 if (ENV !== 'test') {
+    void (0, help_socket_1.startHelpDelivery)(io).catch(error => console.error('[help] delivery startup failed', { code: error?.code }));
     (async () => {
         // 1) Подключаемся к Redis один раз, терпеливо ждём до 15с, но не падаем, если недоступен
         try {
@@ -424,7 +456,11 @@ if (ENV !== 'test') {
         });
         // 4) Запускаем фоновые задачи приложения
         (0, scheduledJobsService_1.startScheduledJobs)();
+        (0, trackingMaintenanceService_1.startTrackingMaintenance)();
+        (0, onecSyncMaintenanceService_1.startOnecSyncMaintenance)();
+        (0, crashRetention_1.startCrashRetention)();
         (0, clientOrdersExportWorker_1.startClientOrdersExportWorker)();
+        (0, clientOrderSubmissionWorker_1.startClientOrderSubmissionWorker)();
         (0, clientOrderInvoiceWorker_1.startClientOrderInvoiceWorker)();
         // 5) Настраиваем получение Telegram updates (webhook/polling) уже после старта HTTP
         if ((0, telegramBotService_1.isTelegramBotConfigured)()) {
@@ -480,7 +516,11 @@ if (ENV !== 'test') {
 process.on('SIGINT', async () => {
     console.log('SIGINT received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
+    (0, trackingMaintenanceService_1.stopTrackingMaintenance)();
+    (0, onecSyncMaintenanceService_1.stopOnecSyncMaintenance)();
+    (0, crashRetention_1.stopCrashRetention)();
     (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
+    (0, clientOrderSubmissionWorker_1.stopClientOrderSubmissionWorker)();
     (0, clientOrderInvoiceWorker_1.stopClientOrderInvoiceWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });
@@ -492,7 +532,11 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
     console.log('SIGTERM received, shutting down...');
     (0, scheduledJobsService_1.stopScheduledJobs)();
+    (0, trackingMaintenanceService_1.stopTrackingMaintenance)();
+    (0, onecSyncMaintenanceService_1.stopOnecSyncMaintenance)();
+    (0, crashRetention_1.stopCrashRetention)();
     (0, clientOrdersExportWorker_1.stopClientOrdersExportWorker)();
+    (0, clientOrderSubmissionWorker_1.stopClientOrderSubmissionWorker)();
     (0, clientOrderInvoiceWorker_1.stopClientOrderInvoiceWorker)();
     await (0, telegramBotService_1.stopTelegramUpdates)().catch(() => { });
     await (0, maxBotService_1.stopMaxUpdates)().catch(() => { });

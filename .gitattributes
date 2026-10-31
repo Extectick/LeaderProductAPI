@@ -1,0 +1,3 @@
+# Document fixtures contain byte offsets; never convert their line endings.
+*.pdf binary
+*.docx binary

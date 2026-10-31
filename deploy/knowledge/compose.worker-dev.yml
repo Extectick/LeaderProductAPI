@@ -1,0 +1,34 @@
+# Merge after the current DEV API and Help simulator overlays. Keep existing Help image/env.
+# The private worker env has only DATABASE_URL + read-only Nextcloud credentials, no bot/S3 keys.
+services:
+  api:
+    image: ${KNOWLEDGE_IMAGE:?Set the reviewed dev knowledge image}
+    env_file:
+      - ${KNOWLEDGE_ENV_FILE:?Set the private knowledge worker env path}
+  knowledge-worker:
+    image: ${KNOWLEDGE_IMAGE:?Set the reviewed dev knowledge image}
+    container_name: leader_knowledge_worker_dev
+    restart: unless-stopped
+    init: true
+    command: ["node", "dist/workers/knowledgeWorker.js"]
+    env_file:
+      - ${KNOWLEDGE_ENV_FILE:?Set the private knowledge worker env path}
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=192
+    networks: [default]
+    mem_limit: 512m
+    cpus: 0.50
+    pids_limit: 64
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 90s
+    healthcheck:
+      test: ["CMD", "node", "scripts/knowledge-worker-health.cjs"]
+      start_period: 120s
+      interval: 30s
+      timeout: 5s
+      retries: 3

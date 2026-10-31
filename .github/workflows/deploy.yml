@@ -220,64 +220,29 @@ jobs:
       contents: read
       packages: read
     environment: development
-
+    concurrency:
+      group: leader-api-development-release
+      cancel-in-progress: false
     steps:
-      - name: Deploy development API
+      - name: Deploy development API and active workers without configuration loss
         uses: appleboy/ssh-action@v1
         env:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USER: ${{ github.actor }}
-          IMAGE_TAG: ${{ github.sha }}
-          GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
+          RELEASE_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
+          envs: GHCR_TOKEN,GHCR_USER,RELEASE_SHA
+          command_timeout: 20m
           script: |
             set -euo pipefail
             cd /opt/leader-api-dev
-
-            git fetch origin "$IMAGE_TAG"
-            # Preserve the server checkout and its local Compose settings unchanged.
-            # A three-way merge in an isolated release checkout fails safely on conflict.
-            mkdir -p releases
-            release_dir=$(mktemp -d "/opt/leader-api-dev/releases/help-${IMAGE_TAG:0:12}-XXXXXX")
-            git worktree add --detach "$release_dir" "$IMAGE_TAG"
-            git diff HEAD -- docker-compose.server-dev.yml > "$release_dir/local-server-config.patch"
-            if [ -s "$release_dir/local-server-config.patch" ]; then
-              git -C "$release_dir" apply --3way "$release_dir/local-server-config.patch"
-            fi
-            ln -s /opt/leader-api-dev/.env "$release_dir/.env"
-            cd "$release_dir"
-
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
-            export IMAGE_TAG
-            docker compose -f docker-compose.server-dev.yml config --format json | python3 -c 'import json,sys; a=json.load(sys.stdin)["services"]["api"]; e=a.get("environment",{}); assert e.get("NODE_ENV")=="development", "Wrong environment"; assert str(e.get("DB_ACCEPT_DATA_LOSS"))=="0" and e.get("DB_INIT_MODE")=="verify", "Unsafe database initialization"; assert all(v.get("type")!="bind" for v in a.get("volumes",[])), "Unreviewed server bind mount"; assert all(p.get("host_ip")=="127.0.0.1" for p in a.get("ports",[])), "Unexpected public port"; print("Development release configuration verified")'
-            docker compose -f docker-compose.server-dev.yml pull api
-            docker compose -f docker-compose.server-dev.yml up -d postgres-dev redis-dev
-            # Back up only the isolated development database before the additive Help migration.
-            # Keep the running API untouched if backup or migration validation fails.
+            git fetch origin "$RELEASE_SHA"
             umask 077
-            mkdir -p /opt/leader-api-dev/backups
-            backup="/opt/leader-api-dev/backups/help-${IMAGE_TAG}-$(date -u +%Y%m%dT%H%M%SZ).dump"
-            docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
-            test -s "$backup"
-            docker compose -f docker-compose.server-dev.yml exec -T postgres-dev pg_restore --list < "$backup" > /dev/null
-            printf 'Development backup verified: %s\n' "$backup"
-            dev_db=$(docker compose -f docker-compose.server-dev.yml exec -T postgres-dev sh -c 'printf %s "$POSTGRES_DB"')
-            docker compose -f docker-compose.server-dev.yml run --rm --no-deps -e HELP_MIGRATION_TARGET=dev -e HELP_MIGRATION_DATABASE_CONFIRM="$dev_db" --entrypoint node api scripts/apply-help-migration.js --attachment-previews
-            docker compose -f docker-compose.server-dev.yml run --rm --no-deps --entrypoint node api scripts/init-db.js
-            docker compose -f docker-compose.server-dev.yml up -d --no-deps api
-
-            for attempt in $(seq 1 30); do
-              if curl --fail --silent --show-error http://127.0.0.1:3001/health >/dev/null; then
-                docker compose -f docker-compose.server-dev.yml ps
-                docker compose -f docker-compose.server-dev.yml exec -T -e HELP_SMOKE_TARGET=dev -e HELP_SMOKE_DATABASE_CONFIRM="$dev_db" api node scripts/help-dev-smoke.cjs
-                exit 0
-              fi
-              sleep 2
-            done
-
-            docker compose -f docker-compose.server-dev.yml logs --tail=100 api
-            exit 1
+            script=$(mktemp /opt/leader-api-dev/.deploy-dev.XXXXXX.py)
+            trap 'rm -f "$script"' EXIT
+            git show "$RELEASE_SHA:scripts/deploy-dev-preserving-config.py" > "$script"
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+            python3 "$script" --sha "$RELEASE_SHA"

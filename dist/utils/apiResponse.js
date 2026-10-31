@@ -18,6 +18,10 @@ var ErrorCodes;
     ErrorCodes["DEVICE_SESSION_REVOKED"] = "DEVICE_SESSION_REVOKED";
     ErrorCodes["SERVICE_ACCESS_DENIED"] = "SERVICE_ACCESS_DENIED";
     ErrorCodes["TRACKING_SESSION_NOT_FOUND"] = "TRACKING_SESSION_NOT_FOUND";
+    ErrorCodes["PRICE_REVIEW_REQUIRED"] = "PRICE_REVIEW_REQUIRED";
+    ErrorCodes["STOCK_SHORTAGE"] = "STOCK_SHORTAGE";
+    ErrorCodes["REFERENCE_STALE"] = "REFERENCE_STALE";
+    ErrorCodes["ONEC_UNAVAILABLE"] = "ONEC_UNAVAILABLE";
 })(ErrorCodes || (exports.ErrorCodes = ErrorCodes = {}));
 function successResponse(data, message = 'Success', meta) {
     return { ok: true, message, data, meta };
