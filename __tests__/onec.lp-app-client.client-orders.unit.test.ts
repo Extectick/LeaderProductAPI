@@ -9,6 +9,7 @@ import {
   getOnecLpAppCounterpartyCard,
   getOnecLpAppDeliveryAddresses,
   getOnecLpAppNomenclature,
+  getOnecLpAppNomenclatureImageContent,
   getOnecLpAppNomenclatureItem,
   getOnecLpAppOrganizations,
   getOnecLpAppPriceTypes,
@@ -19,6 +20,7 @@ import {
   putOnecLpAppClientOrder,
   postOnecLpAppClientOrder,
 } from '../src/modules/onec/onec.lpApp.client';
+import { getLiveProducts } from '../src/modules/clientOrders/clientOrders.onecLive';
 
 const fetchMock = jest.fn();
 
@@ -65,7 +67,7 @@ describe('onec.lpApp.client client-orders live routes', () => {
     await loader({
       limit: 10,
       offset: 5,
-      search: 'молоко',
+      search: 'Том Ям',
       organizationGuid: 'org-guid',
       counterpartyGuid: 'counterparty-guid',
       agreementGuid: 'agreement-guid',
@@ -82,7 +84,10 @@ describe('onec.lpApp.client client-orders live routes', () => {
     expect(url.searchParams.get('apiKey')).toBe('lp-app-key');
     expect(url.searchParams.get('limit')).toBe('10');
     expect(url.searchParams.get('offset')).toBe('5');
-    expect(url.searchParams.get('search')).toBe('молоко');
+    expect(url.searchParams.get('search')).toBe('Том Ям');
+    // 1C's HTTP query parser decodes %20 but keeps a form-encoded '+' literal.
+    expect(url.search).toContain(`search=${encodeURIComponent('Том Ям')}`);
+    expect(url.search).not.toContain('+');
     expect(url.searchParams.get('organizationGuid')).toBe('org-guid');
     expect(url.searchParams.get('counterpartyGuid')).toBe('counterparty-guid');
     expect(url.searchParams.get('agreementGuid')).toBe('agreement-guid');
@@ -94,6 +99,51 @@ describe('onec.lpApp.client client-orders live routes', () => {
     expect(url.searchParams.get('status')).toBe('SHIPPING_IN_PROGRESS');
     expect(init.method).toBe('GET');
     expect((init.headers as Record<string, string>)['X-API-Key']).toBe('lp-app-key');
+  });
+
+  it('keeps multi-word purchase-history search and upstream pagination intact', async () => {
+    const query = { search: 'том ям', purchasedOnly: true, organizationGuid: 'org-guid',
+      counterpartyGuid: 'client-guid', warehouseGuid: 'warehouse-guid', inStockOnly: true,
+      limit: 2, offset: 2, includeInactive: false };
+    fetchMock.mockImplementationOnce(async (url: URL) => {
+      // Reproduce the real 1C parser, not URLSearchParams' form decoding.
+      const search = decodeURIComponent(url.search.match(/[?&]search=([^&]*)/)?.[1] ?? '');
+      return jsonResponse({
+        items: search === 'том ям' ? [{ guid: 'tom-yam', name: 'Паста Том Ям AROY-D 1кг*12 шт/кор' }] : [],
+        limit: 2, offset: 2, hasMore: true, purchaseHistoryVersion: 'customer-purchases-v1',
+      });
+    });
+
+    const result = await getLiveProducts(query);
+
+    expect(result.items.map(item => item.guid)).toEqual(['tom-yam']);
+    expect(result).toMatchObject({ limit: 2, offset: 2 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    for (const [key, value] of Object.entries(query)) {
+      expect(url.searchParams.get(key)).toBe(String(value));
+    }
+  });
+
+  it.each(['Том  Ям', 'Том\tЯм', 'Том\u00a0Ям', 'A+B & 50% #1/?', 'Том%20Ям'])
+  ('encodes query values once without changing literal characters: %s', async search => {
+    process.env.ONEC_LP_APP_API_KEY = 'key+with space&percent%';
+    await getOnecLpAppNomenclature({ search, inStockOnly: false });
+
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    const raw = url.search.match(/[?&]search=([^&]*)/)?.[1];
+    expect(decodeURIComponent(raw ?? '')).toBe(search);
+    expect(url.searchParams.get('apiKey')).toBe('key+with space&percent%');
+    expect(url.searchParams.get('inStockOnly')).toBe('false');
+    expect(url.search).not.toContain('+');
+  });
+
+  it('uses the same space-safe query encoding for binary requests', async () => {
+    await getOnecLpAppNomenclatureImageContent('file-guid', { search: 'Том Ям + AROY-D' });
+
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    expect(decodeURIComponent(url.search.match(/[?&]search=([^&]*)/)?.[1] ?? ''))
+      .toBe('Том Ям + AROY-D');
   });
 
   it('encodes item guid for nomenclature details', async () => {

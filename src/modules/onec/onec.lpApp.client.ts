@@ -133,6 +133,11 @@ function buildUrl(path: string, query?: OnecLpAppQuery) {
 
   url.searchParams.set('apiKey', getApiKey());
 
+  // URLSearchParams uses form encoding, but 1C keeps '+' literal in query values.
+  // Send spaces as %20; actual plus signs are already escaped as %2B.
+  // Keep this shared by JSON and binary requests.
+  url.search = url.search.replace(/\+/g, '%20');
+
   return url;
 }
 
