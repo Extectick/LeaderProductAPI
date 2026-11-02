@@ -88,9 +88,18 @@ def main():
         labels = api['Config']['Labels']
         if labels['com.docker.compose.project'] != 'leader-api-' + args.target:
             raise RuntimeError('Unexpected Compose project')
-        files = list(dict.fromkeys(labels['com.docker.compose.project.config_files'].split(',')))
-        if any(not Path(f).resolve().is_relative_to(root) for f in files):
+        live_files = list(dict.fromkeys(labels['com.docker.compose.project.config_files'].split(',')))
+        if any(not Path(f).resolve().is_relative_to(root) for f in live_files):
             raise RuntimeError('Compose files outside target workspace')
+        # Keep api.env authoritative. A resolved secret snapshot is only a backup,
+        # not the next deployment's source of truth.
+        files = [str(root / 'compose.yml')]
+        if args.target == 'prod':
+            files.append(str(root / 'compose.s3.yml'))
+        overlay = root / 'release-image.json'
+        previous_overlay = overlay.read_bytes() if overlay.exists() else None
+        if previous_overlay is not None:
+            files.append(str(overlay))
         command = ['docker', 'compose', '--profile', '*', '--project-name', 'leader-api-' + args.target,
                    '--project-directory', str(root)]
         for file in files:
@@ -126,8 +135,12 @@ def main():
         updated['services']['api']['pull_policy'] = 'never'
         updated['services']['api']['environment']['DB_INIT_MODE'] = 'verify'
         private_json(state / 'compose.private.json', updated)
+        private_json(overlay, {'services': {'api': {'image': image,
+            'pull_policy': 'never', 'environment': {'DB_INIT_MODE': 'verify'}}}})
         release_command = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
-            '--project-directory', str(root), '-f', str(state / 'compose.private.json')]
+            '--project-directory', str(root)]
+        for file in list(dict.fromkeys(files + [str(overlay)])):
+            release_command += ['-f', file]
         try:
             run(release_command + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'api'], timeout=300)
             healthy(container)
@@ -136,7 +149,15 @@ def main():
             if any(inspect(name)['Id'] != identity for name, identity in protected.items()):
                 raise RuntimeError('Unrelated container changed during release')
         except Exception:
-            rollback = release_command[:-1] + [str(state / 'previous-compose.private.json')]
+            if previous_overlay is None:
+                overlay.unlink(missing_ok=True)
+            else:
+                temp = overlay.with_suffix('.tmp')
+                temp.write_bytes(previous_overlay)
+                temp.chmod(0o600)
+                temp.replace(overlay)
+            rollback = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
+                '--project-directory', str(root), '-f', str(state / 'previous-compose.private.json')]
             run(rollback + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'api'], timeout=300)
             healthy(container)
             raise
