@@ -91,7 +91,7 @@ def main():
         files = list(dict.fromkeys(labels['com.docker.compose.project.config_files'].split(',')))
         if any(not Path(f).resolve().is_relative_to(root) for f in files):
             raise RuntimeError('Compose files outside target workspace')
-        command = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
+        command = ['docker', 'compose', '--profile', '*', '--project-name', 'leader-api-' + args.target,
                    '--project-directory', str(root)]
         for file in files:
             command += ['-f', file]
