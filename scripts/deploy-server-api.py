@@ -108,6 +108,12 @@ def main():
         service = original['services']['api']
         if any(str(value) != env.get(key) for key, value in service['environment'].items()):
             raise RuntimeError('Environment changed since API startup')
+        # The first release after migration may still run from an older private
+        # Compose snapshot. Roll back to the actual running image, never to the
+        # bootstrap image pinned in the base file.
+        service['image'] = api['Config']['Image']
+        if env.get('DB_INIT_MODE'):
+            service['environment']['DB_INIT_MODE'] = env['DB_INIT_MODE']
         protected = {x['Name']: x['Id'] for x in json.loads(run(['docker', 'inspect'] +
             run(['docker', 'ps', '-q']).splitlines())) if x['Name'] != '/' + container}
         image = 'ghcr.io/extectick/leaderproductapi:' + args.sha
