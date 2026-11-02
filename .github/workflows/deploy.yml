@@ -14,7 +14,7 @@ on:
       git_ref:
         description: 'Git branch/tag/commit to checkout on the production server'
         required: false
-        default: main
+        default: ''
       deploy:
         description: 'Deploy to production after image push'
         required: false
@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 scripts/test_deploy_server_api.py
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -92,16 +93,23 @@ jobs:
             publish_latest=true
             deploy_target=production
           elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            image_tag="${{ inputs.image_tag }}"
-            git_ref="${{ inputs.git_ref }}"
+            git_ref="${GITHUB_REF_NAME}"
+            requested_ref="${{ inputs.git_ref }}"
+            if [ -n "$requested_ref" ] && [ "$requested_ref" != "$git_ref" ]; then
+              echo "Select the workflow branch matching git_ref" >&2
+              exit 1
+            fi
             deploy="${{ inputs.deploy }}"
-            [ -n "$image_tag" ] || image_tag=latest
-            [ -n "$git_ref" ] || git_ref=main
-            [ "$image_tag" = "latest" ] && publish_latest=true
-            if [ "$git_ref" = "dev" ] || [ "$image_tag" = "dev" ]; then
+            if [ "$git_ref" = "dev" ]; then
+              image_tag=dev
               deploy_target=development
-            else
+            elif [ "$git_ref" = "main" ] || [ "$git_ref" = "production" ]; then
+              image_tag=latest
               deploy_target=production
+              publish_latest=true
+            else
+              echo "Deployment allowed only from dev, main or production" >&2
+              exit 1
             fi
           elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "production" ]; then
             image_tag=latest
@@ -147,87 +155,57 @@ jobs:
   deploy-production:
     needs: build-and-push
     if: needs.build-and-push.outputs.deploy == 'true' && needs.build-and-push.outputs.deploy_target == 'production'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, leader-release]
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: read
     environment: production
-
+    concurrency:
+      group: leader-api-production-release
+      cancel-in-progress: false
     steps:
-      - name: Deploy production API
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Deploy immutable image with backup and rollback
         env:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USER: ${{ github.actor }}
-          IMAGE_TAG: ${{ github.sha }}
-          GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
-          script: |
-            set -euo pipefail
-            cd /opt/leader-api
-
-            git fetch origin "$GIT_REF"
-            git checkout -B "$GIT_REF" "origin/$GIT_REF"
-
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
-            export IMAGE_TAG
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps api
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps api
-            for attempt in $(seq 1 45); do
-              if curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null; then
-                exit 0
-              fi
-              sleep 2
-            done
-            exit 1
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          python3 scripts/deploy-server-api.py --target prod --sha "$RELEASE_SHA"
 
   deploy-development:
     needs: build-and-push
     if: needs.build-and-push.outputs.deploy == 'true' && needs.build-and-push.outputs.deploy_target == 'development'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, leader-release]
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: read
     environment: development
-
+    concurrency:
+      group: leader-api-development-release
+      cancel-in-progress: false
     steps:
-      - name: Deploy development API
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Deploy immutable image with backup and rollback
         env:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USER: ${{ github.actor }}
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
-          GIT_REF: ${{ needs.build-and-push.outputs.git_ref }}
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,GIT_REF
-          script: |
-            set -euo pipefail
-            cd /opt/leader-api-dev
-
-            git fetch origin "$GIT_REF"
-            git checkout -B "$GIT_REF" "origin/$GIT_REF"
-
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
-            export IMAGE_TAG
-            docker compose -f docker-compose.server-dev.yml pull api
-            docker compose -f docker-compose.server-dev.yml up -d postgres-dev redis-dev
-            docker compose -f docker-compose.server-dev.yml up -d --no-deps api
-
-            for attempt in $(seq 1 30); do
-              if curl --fail --silent --show-error http://127.0.0.1:3001/health >/dev/null; then
-                docker compose -f docker-compose.server-dev.yml ps
-                exit 0
-              fi
-              sleep 2
-            done
-
-            docker compose -f docker-compose.server-dev.yml logs --tail=100 api
-            exit 1
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          python3 scripts/deploy-server-api.py --target dev --sha "$RELEASE_SHA"
