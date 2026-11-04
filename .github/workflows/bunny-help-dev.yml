@@ -1,0 +1,23 @@
+name: Bind Bunny Help AI (dev only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bind:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: [self-hosted, linux, x64, leader-release]
+    timeout-minutes: 10
+    environment: development
+    concurrency:
+      group: leader-api-development-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Activate reviewed dev provider and verify real inference
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          BUNNY_CHAT_API_KEY: ${{ secrets.BUNNY_CHAT_API_KEY }}
+        run: python3 scripts/configure-help-bunny-dev.py

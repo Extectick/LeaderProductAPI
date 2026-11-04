@@ -65,6 +65,10 @@ def healthy(container):
     raise RuntimeError('API health check failed')
 
 
+def release_services(target, bunny_bound):
+    return ['api', 'help-assistant-worker'] if target == 'dev' and bunny_bound else ['api']
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', choices=['dev', 'prod'], required=True)
@@ -96,6 +100,9 @@ def main():
         files = [str(root / 'compose.yml')]
         if args.target == 'prod':
             files.append(str(root / 'compose.s3.yml'))
+        binding = root / 'help-bunny.private.json'
+        if args.target == 'dev' and binding.exists():
+            files.append(str(binding))
         overlay = root / 'release-image.json'
         previous_overlay = overlay.read_bytes() if overlay.exists() else None
         if previous_overlay is not None:
@@ -114,11 +121,13 @@ def main():
         service['image'] = api['Config']['Image']
         if env.get('DB_INIT_MODE'):
             service['environment']['DB_INIT_MODE'] = env['DB_INIT_MODE']
+        services = release_services(args.target, binding.exists())
+        excluded = ['/' + container] + (['/leader_help_assistant_dev'] if len(services) > 1 else [])
         protected = {x['Name']: x['Id'] for x in json.loads(run(['docker', 'inspect'] +
-            run(['docker', 'ps', '-q']).splitlines())) if x['Name'] != '/' + container}
+            run(['docker', 'ps', '-q']).splitlines())) if x['Name'] not in excluded}
         image = 'ghcr.io/extectick/leaderproductapi:' + args.sha
         print(json.dumps({'plan': True, 'target': args.target, 'database': database,
-                          'image': image, 'services': ['api'], 'preserveConfiguration': True}), flush=True)
+                          'image': image, 'services': services, 'preserveConfiguration': True}), flush=True)
         if args.plan:
             return
         run(['docker', 'pull', image], timeout=600)
@@ -136,20 +145,28 @@ def main():
             subprocess.run(['docker', 'exec', '-i', pg_name, 'pg_restore', '--list'],
                            stdin=stream, stdout=subprocess.DEVNULL, check=True)
         updated = copy.deepcopy(original)
-        updated['services']['api']['image'] = image
+        for name in services:
+            updated['services'][name]['image'] = image
+            updated['services'][name].pop('build', None)
+            updated['services'][name]['pull_policy'] = 'never'
         updated['services']['api'].pop('build', None)
         updated['services']['api']['pull_policy'] = 'never'
         updated['services']['api']['environment']['DB_INIT_MODE'] = 'verify'
         private_json(state / 'compose.private.json', updated)
-        private_json(overlay, {'services': {'api': {'image': image,
-            'pull_policy': 'never', 'environment': {'DB_INIT_MODE': 'verify'}}}})
+        image_services = {name: {'image': image, 'pull_policy': 'never'} for name in services}
+        image_services['api']['environment'] = {'DB_INIT_MODE': 'verify'}
+        private_json(overlay, {'services': image_services})
         release_command = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
             '--project-directory', str(root)]
         for file in list(dict.fromkeys(files + [str(overlay)])):
             release_command += ['-f', file]
         try:
-            run(release_command + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'api'], timeout=300)
+            run(release_command + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never'] + services, timeout=300)
             healthy(container)
+            if 'help-assistant-worker' in services:
+                worker = inspect('leader_help_assistant_dev')
+                if worker['Config']['Image'] != image or not worker['State']['Running']:
+                    raise RuntimeError('Dev assistant worker did not start')
             if inspect(container)['Config']['Image'] != image:
                 raise RuntimeError('Unexpected running image')
             if any(inspect(name)['Id'] != identity for name, identity in protected.items()):
@@ -164,7 +181,7 @@ def main():
                 temp.replace(overlay)
             rollback = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
                 '--project-directory', str(root), '-f', str(state / 'previous-compose.private.json')]
-            run(rollback + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'api'], timeout=300)
+            run(rollback + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never'] + services, timeout=300)
             healthy(container)
             raise
         (root / 'current-deployment.txt').write_text(str(state) + '\n')

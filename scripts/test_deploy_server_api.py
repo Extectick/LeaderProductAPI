@@ -20,6 +20,11 @@ class TargetGuardTests(unittest.TestCase):
     def test_data_loss_rejected(self):
         env = self.env('dev'); env['DB_ACCEPT_DATA_LOSS'] = '1'
         with self.assertRaises(RuntimeError): release.validate_target('dev', env)
+    def test_bunny_worker_only_deploys_with_dev_binding(self):
+        self.assertEqual(release.release_services('dev', True), ['api', 'help-assistant-worker'])
+        self.assertEqual(release.release_services('dev', False), ['api'])
+        self.assertEqual(release.release_services('prod', True), ['api'])
+
     def test_wrong_mode_rejected(self):
         env = self.env('dev'); env['NODE_ENV'] = 'production'
         with self.assertRaises(RuntimeError): release.validate_target('dev', env)

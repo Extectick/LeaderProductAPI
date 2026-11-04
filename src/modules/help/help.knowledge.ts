@@ -4,7 +4,7 @@ import { KnowledgeError, knowledgeConfig, knowledgeEnabled, SOURCE_FRESH_MS } fr
 import { knowledgeActor, knowledgeSourceWhere, searchKnowledge, KnowledgeActor } from '../knowledge/knowledge.service';
 
 export type HelpKnowledgeSource = { documentId: string; versionId: string; revision: number; title: string; path: string; sourceUrl: string };
-export type HelpGroundedAnswer = { text: string; sources: HelpKnowledgeSource[]; mode: 'knowledge-excerpts' | 'openai';
+export type HelpGroundedAnswer = { text: string; sources: HelpKnowledgeSource[]; mode: 'knowledge-excerpts' | 'openai' | 'bunny';
   action?: { type: 'connect_onec'; baseKey?: string };
   onecProofs?: import('../onec-personal/service').OnecProof[];
   handoffReason?: 'no_knowledge' | 'source_unavailable' | 'user_requested' | 'model_handoff';

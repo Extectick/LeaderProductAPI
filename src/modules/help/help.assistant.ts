@@ -1,3 +1,4 @@
+import { bunnyConfiguration, HelpBunnyError, prepareHelpBunnyAnswer } from './help.bunny';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import prisma from '../../prisma/client';
@@ -15,8 +16,8 @@ const ACTIVE = ['QUEUED','RUNNING'];
 export function helpAssistantConfiguration() {
   const provider = process.env.HELP_AI_PROVIDER || 'disabled';
   const enabled = process.env.HELP_AI_ENABLED === 'true' && (provider === 'simulator' && process.env.NODE_ENV !== 'production' ||
-    knowledgeEnabled() && provider === 'knowledge' || provider === 'openai' && (knowledgeEnabled() || onecBases().length > 0) && openAIConfiguration().enabled);
-  const durationMs = provider === 'knowledge' || provider === 'openai' ? 1000 : Math.min(900000, Math.max(500, Number(process.env.HELP_AI_SIMULATOR_DURATION_MS) || 5000));
+    provider === 'bunny' && bunnyConfiguration().enabled || knowledgeEnabled() && provider === 'knowledge' || provider === 'openai' && (knowledgeEnabled() || onecBases().length > 0) && openAIConfiguration().enabled);
+  const durationMs = provider === 'bunny' || provider === 'knowledge' || provider === 'openai' ? 1000 : Math.min(900000, Math.max(500, Number(process.env.HELP_AI_SIMULATOR_DURATION_MS) || 5000));
   return { enabled, provider, durationMs };
 }
 const state = (job:any, status:string, eventId:number) => ({
@@ -86,7 +87,10 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
   try {
     await helpActor(initial.ownerId);
     if(initial.step>=3){
-      if(initial.provider==='openai') {
+      if(initial.provider==='bunny') {
+        grounded=await withHelpAssistantLease(jobId,leaseToken,signal=>prepareHelpBunnyAnswer(initial.ticketId,initial.ownerId,initial.context,signal),shutdown);
+        answer=grounded.text;
+      } else if(initial.provider==='openai') {
         grounded=await withHelpAssistantLease(jobId,leaseToken,signal=>prepareHelpOpenAIAnswer(initial.ticketId,initial.ownerId,initial.context,signal),shutdown);
         answer=grounded.text;
       } else if(initial.provider==='knowledge') {
@@ -128,8 +132,8 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
     await helpTransaction(initial.ticketId,async db=>{
       const job=await db.helpAssistantJob.findUnique({where:{id:jobId}});if(!job||job.leaseToken!==leaseToken||!ACTIVE.includes(job.status))return;
       const denied=error?.status===403||error?.status===404;
-      const openAIError=error instanceof HelpOpenAIError;
-      const failed=denied||job.attempts>=(initial.provider==='openai'?openAIConfiguration().maxAttempts:5)||error?.code==='HELP_AI_PROVIDER_UNAVAILABLE'||openAIError&&!error.retryable;
+      const openAIError=error instanceof HelpOpenAIError || error instanceof HelpBunnyError;
+      const failed=denied||job.attempts>=(initial.provider==='bunny'?bunnyConfiguration().maxAttempts:initial.provider==='openai'?openAIConfiguration().maxAttempts:5)||error?.code==='HELP_AI_PROVIDER_UNAVAILABLE'||openAIError&&!error.retryable;
       const delay=Math.max(Math.min(60000,1000*2**job.attempts),openAIError?error.retryAfterMs:0);
       const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:failed?'ERROR':'QUEUED',errorCode:denied?'HELP_FORBIDDEN':error?.code||'HELP_AI_RETRY',leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+delay)}});
       if(failed&&claimed.count)await updateState(db,await db.helpAssistantJob.findUniqueOrThrow({where:{id:job.id}}),'error');
