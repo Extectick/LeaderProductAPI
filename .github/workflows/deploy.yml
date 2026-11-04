@@ -7,6 +7,11 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      bunny_release_sha:
+        description: 'Optional already deployed dev image SHA for activation-only changes'
+        required: false
+        type: string
+        default: ''
       bunny_help_bind:
         description: 'Bind Bunny test AI to the already deployed dev API and worker'
         required: false
@@ -45,6 +50,8 @@ jobs:
   bunny-help:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && inputs.bunny_help_bind == true
     uses: ./.github/workflows/bunny-help-dev.yml
+    with:
+      release_sha: ${{ inputs.bunny_release_sha || github.sha }}
     secrets: inherit
 
   help-assistant:
