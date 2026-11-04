@@ -55,6 +55,8 @@ def main():
         phase('inspect-dev')
         api = r.inspect('leader_api_dev')
         r.validate_target('dev', r.environment(api))
+        print(probe('network-diagnostics:leader_api_dev',
+            'const dns=require("node:dns/promises");(async()=>{const addresses=await dns.lookup("ai.bunny.ge",{all:true}).catch(()=>[]);let network;try{const r=await fetch("https://ai.bunny.ge/api/v1/health",{signal:AbortSignal.timeout(10000),redirect:"error"});await r.body?.cancel();network={httpStatus:r.status}}catch(e){const c=e.cause||e;network={code:c.code||e.name,address:c.address,port:c.port,errors:c.errors?.map(x=>({code:x.code,address:x.address,port:x.port}))}}console.log(JSON.stringify({addresses,network,proxyConfigured:Boolean(process.env.HTTPS_PROXY||process.env.HTTP_PROXY),envProxyEnabled:process.env.NODE_USE_ENV_PROXY==="1"}))})()', timeout=15), flush=True)
         image = 'ghcr.io/extectick/leaderproductapi:' + sha
         if api['Config']['Image'] != image:
             raise RuntimeError('Deploy this exact SHA to dev first')
