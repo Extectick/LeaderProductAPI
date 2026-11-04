@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Scoped dev-only installation: minimal PostgreSQL reader views and forced SSH command."""
-import datetime,fcntl,json,os,subprocess,secrets,pwd
+import argparse,datetime,fcntl,json,os,subprocess,secrets,pwd
 from pathlib import Path
 from urllib.parse import urlsplit,urlunsplit,quote
 os.umask(0o077)
-root=Path('/opt/leader-help-learning-dev');workspace=Path('/opt/leader-metro-dev/workspace')
+root=Path('/opt/leader-help-learning-dev')
+parser=argparse.ArgumentParser();parser.add_argument('--input-root',default='/opt/leader-metro-dev/workspace');args=parser.parse_args()
+workspace=Path(args.input_root).resolve()
 reader='leader_help_learning_ro';marker='leader-help-learning-source-v1'
 def run(args,data=None,timeout=60):
  p=subprocess.run(args,input=data,capture_output=True,timeout=timeout)
@@ -47,20 +49,7 @@ def main():
   imageId=json.loads(run(['docker','image','inspect',image]))[0]['Id']
   private(root/'runtime.private.json',json.dumps({'image':imageId,'environmentFile':str(root/'source.private.env')}).encode())
   helper=Path('/usr/local/libexec/leader-help-learning-source');helper.parent.mkdir(parents=True,exist_ok=True)
-  helper.write_text('''#!/usr/bin/python3
-import json,subprocess,sys
-from pathlib import Path
-try:
- payload=sys.stdin.buffer.read(8193)
- if not payload or len(payload)>8192:raise ValueError()
- config=json.loads(Path('/opt/leader-help-learning-dev/runtime.private.json').read_text())
- args=['docker','run','--rm','-i','--read-only','--log-driver','none','--network','leader-api-dev_default','--memory','256m','--cpus','0.25','--pids-limit','64','--cap-drop','ALL','--security-opt','no-new-privileges:true','--env-file',config['environmentFile'],'--entrypoint','node',config['image'],'/app/scripts/help-learning/source.cjs']
- result=subprocess.run(args,input=payload,capture_output=True,timeout=75)
- if result.returncode or len(result.stdout)>2097152:raise RuntimeError()
- sys.stdout.buffer.write(result.stdout)
-except Exception:
- sys.stderr.write('{"ok":false,"code":"HELP_LEARNING_SOURCE_UNAVAILABLE"}\\n');sys.exit(1)
-''');helper.chmod(0o755)
+  helper.write_bytes((workspace/'.dev-runtime/help-learning-source-image/source-launcher.py').read_bytes());helper.chmod(0o755)
   gateway=Path('/usr/local/bin/leader-help-learning-source-gateway')
   gateway.write_text('''#!/usr/bin/python3
 import os,sys

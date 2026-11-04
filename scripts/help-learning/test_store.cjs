@@ -2,6 +2,7 @@
 const test = require('node:test'); const assert = require('node:assert/strict');
 const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { DatabaseSync } = require('node:sqlite');
 const { createStore } = require('./store.cjs');
 function snapshot(id = 1, version = 'a') { return { ticketId: id, sourceVersion: version.repeat(64), status: 'CLOSED', closedAt: '2026-11-05T00:00:00Z',
   itRequested: false, updatedAt: '2026-11-05T00:00:00Z', lastEventId: id * 2, truncated: false, jobs: [],
@@ -127,4 +128,32 @@ test('sanitization occurs before any transcript is committed to SQLite or its jo
   assert.equal(batch.snapshots[0].truncated, true); complete(store, batch);
   assert.equal(store.listCandidates().length, 0); assert.equal(store.listReviews()[0].review.resolution.confirmed, false);
   for (const filename of fs.readdirSync(dir)) assert.equal(fs.readFileSync(path.join(dir, filename)).includes(Buffer.from('FictionPass_73')), false);
+});
+test('additive backfill imports 26 observations from 22 historical reviews exactly once and preserves cursor/lease', t => {
+  const directory = temporary(t), initial = open(t, directory);
+  for (let page = 0; page < 2; page++) {
+    const sources = Array.from({ length: page ? 2 : 20 }, (_, index) => snapshot(page * 20 + index + 1));
+    const cursor = initial.getCursor(), batch = initial.claimBatch(scan(sources, cursor, cursor + 10), { now: 100 + page * 10 });
+    const reviews = sources.map(source => ({ ...review(source), issues: source.ticketId <= 13 ? ['SOURCE_LOOKUP', 'ANSWER_SCOPE'].map(code => ({
+      code, evidenceMessageIds: [source.messages[0].id], description: 'Нужна отдельная проверка поведения.' })) : [] }));
+    initial.completeBatch(batch.batchId, batch.leaseToken, reviews, sources, { now: 101 + page * 10 });
+  }
+  const active = initial.claimBatch(scan([snapshot(23)], 20, 21), { now: 200, leaseMs: 1000 });
+  assert.equal(initial.listIssues().length, 26); initial.close();
+  // Synthetic pre-triage database: only the additive tables are absent.
+  const db = new DatabaseSync(path.join(directory, 'help-learning.sqlite'));
+  db.exec('PRAGMA foreign_keys=OFF; DROP TABLE issue_observations; DROP TABLE issue_sources; DROP TABLE issue_transitions; DROP TABLE issue_ingested_reviews; DROP TABLE issues;'); db.close();
+  const migrated = open(t, directory);
+  assert.equal(migrated.getCursor(), 20); assert.equal(migrated.status().batches.ACTIVE, 1);
+  assert.equal(migrated.listReviews().length, 22); assert.equal(migrated.listIssues().length, 26);
+  assert.equal(migrated.listTransitions().length, 26); assert.equal(migrated.listIssues().every(issue => issue.status === 'NEW'), true);
+  migrated.close(); const reopened = open(t, directory);
+  assert.equal(reopened.listIssues().length, 26); assert.equal(reopened.listTransitions().length, 26);
+  reopened.failBatch(active.batchId, active.leaseToken, 'SYNTHETIC_STOP', { now: 201 });
+  assert.equal(reopened.getCursor(), 20);
+});
+
+test('serialized metadata and escaped text cannot starve a large valid pending snapshot',t=>{
+ const store=open(t,temporary(t)),large=snapshot(1);large.messages=Array.from({length:40},(_,i)=>({...large.messages[0],id:i+1,sequence:i+1,text:'"'.repeat(4000),metadataIncluded:true,attachments:[],activities:[]}));
+ const batch=store.claimBatch(scan([large]),{now:1});assert.ok(batch);assert.equal(batch.snapshots.length,1);assert.ok(JSON.stringify(batch.snapshots).length<200000);complete(store,batch,2);assert.equal(store.status().tickets.PENDING,undefined);
 });

@@ -3,10 +3,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
-const { sanitizeSnapshot, isPlainObject } = require('./privacy.cjs');
+const { sanitizeSnapshot, isPlainObject, containsSensitiveText } = require('./privacy.cjs');
 const { validateReviews } = require('./contract.cjs');
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 const hash = value => createHash('sha256').update(value).digest('hex');
+const ISSUE_STATUSES = ['NEW', 'CONFIRMED', 'FIXED', 'VERIFIED', 'DISMISSED'];
+const REASONS = ['confirmed_bug', 'fixed', 'verified', 'historical', 'already_fixed', 'insufficient_snapshot', 'regression'];
+function strictKeys(value, required, optional = []) {
+  if (!isPlainObject(value) || required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) fail('HELP_LEARNING_INVALID_TRIAGE');
+}
+function issueId(value) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) fail('HELP_LEARNING_INVALID_ISSUE_ID'); return value; }
+function safeText(value, maximum) { if (typeof value !== 'string' || !value.trim() || value.length > maximum || containsSensitiveText(value)) fail('HELP_LEARNING_INVALID_TRIAGE'); return value.trim(); }
+function issueIdentity(ticketId, code, evidenceMessageIds) {
+  if (!Number.isSafeInteger(ticketId) || ticketId < 1 || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(code) ||
+      !Array.isArray(evidenceMessageIds) || evidenceMessageIds.length > 40 || evidenceMessageIds.some(id => !Number.isSafeInteger(id) || id < 1)) fail('HELP_LEARNING_INVALID_TRIAGE');
+  const ids = [...new Set(evidenceMessageIds)].sort((a, b) => a - b);
+  return { id: hash(JSON.stringify([ticketId, code, ids])), ids };
+}
 const textSize = snapshot => snapshot.messages.reduce((size, message) => size + message.text.length, 0);
 const countLimit = options => {
   const limit = options?.limit ?? 100;
@@ -54,7 +67,28 @@ function createStore(stateDir) {
     CREATE TABLE IF NOT EXISTS candidate_sources(candidate_id TEXT NOT NULL REFERENCES candidates(id),ticket_id INTEGER NOT NULL,source_version TEXT NOT NULL,
       active INTEGER NOT NULL CHECK(active IN(0,1)),PRIMARY KEY(candidate_id,ticket_id,source_version));
     CREATE INDEX IF NOT EXISTS pending_tickets ON tickets(disposition,updated_at,ticket_id);
-    CREATE INDEX IF NOT EXISTS candidate_ticket ON candidate_sources(ticket_id,active); COMMIT;`);
+    CREATE INDEX IF NOT EXISTS candidate_ticket ON candidate_sources(ticket_id,active);
+    CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY,ticket_id INTEGER NOT NULL,code TEXT NOT NULL,evidence_ids_json TEXT NOT NULL,
+      description TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('NEW','CONFIRMED','FIXED','VERIFIED','DISMISSED')),
+      parent_issue_id TEXT REFERENCES issues(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS issue_observations(id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id),review_id TEXT REFERENCES reviews(id),
+      source_version TEXT,description TEXT NOT NULL,classification TEXT NOT NULL CHECK(classification IN ('INITIAL','SEEN','SUSPECTED','HISTORICAL')),
+      review_required INTEGER NOT NULL CHECK(review_required IN(0,1)),parent_transition_id TEXT,created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS issue_sources(issue_id TEXT NOT NULL REFERENCES issues(id),review_id TEXT NOT NULL REFERENCES reviews(id),
+      ticket_id INTEGER NOT NULL,source_version TEXT NOT NULL,source_state TEXT NOT NULL CHECK(source_state IN ('CURRENT','STALE','REVOKED')),
+      PRIMARY KEY(issue_id,review_id));
+    CREATE TABLE IF NOT EXISTS issue_transitions(id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id),from_status TEXT,to_status TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('INGEST','OPERATOR')),operator TEXT NOT NULL,rationale TEXT NOT NULL,evidence_json TEXT NOT NULL,
+      resolution_reason TEXT,created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS issue_ingested_reviews(review_id TEXT PRIMARY KEY REFERENCES reviews(id));
+    CREATE INDEX IF NOT EXISTS issue_ticket_code ON issues(ticket_id,code,updated_at);
+    CREATE INDEX IF NOT EXISTS issue_transition_order ON issue_transitions(issue_id,created_at,id);
+    CREATE INDEX IF NOT EXISTS issue_source_ticket ON issue_sources(ticket_id,source_state);
+    CREATE TRIGGER IF NOT EXISTS immutable_issue_transition_update BEFORE UPDATE ON issue_transitions BEGIN SELECT RAISE(ABORT,'HELP_LEARNING_APPEND_ONLY'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_issue_transition_delete BEFORE DELETE ON issue_transitions BEGIN SELECT RAISE(ABORT,'HELP_LEARNING_APPEND_ONLY'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_issue_observation_update BEFORE UPDATE ON issue_observations BEGIN SELECT RAISE(ABORT,'HELP_LEARNING_APPEND_ONLY'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_issue_observation_delete BEFORE DELETE ON issue_observations BEGIN SELECT RAISE(ABORT,'HELP_LEARNING_APPEND_ONLY'); END;
+    COMMIT;`);
   let closed = false;
   const permissions = () => { for (const filename of [dbPath, dbPath + '-wal', dbPath + '-shm']) { if (fs.existsSync(filename)) fs.chmodSync(filename, 0o600); } };
   permissions();
@@ -73,6 +107,7 @@ function createStore(stateDir) {
   function invalidate(ticketId, now, removed = false) {
     db.prepare('UPDATE candidate_sources SET active=0 WHERE ticket_id=?').run(ticketId);
     db.prepare("UPDATE reviews SET status=? WHERE ticket_id=? AND status='CURRENT'").run(removed ? 'REJECTED' : 'STALE', ticketId);
+    db.prepare("UPDATE issue_sources SET source_state=? WHERE ticket_id=? AND (source_state='CURRENT' OR ?=1)").run(removed ? 'REVOKED' : 'STALE', ticketId, removed ? 1 : 0);
     if (removed) db.prepare("UPDATE tickets SET disposition='REMOVED',snapshot_json=NULL,updated_at=? WHERE ticket_id=?").run(now, ticketId);
   }
   function merge(snapshot, now) {
@@ -100,10 +135,10 @@ function createStore(stateDir) {
       db.prepare("UPDATE batches SET status='EXPIRED',error_code='LEASE_EXPIRED' WHERE status='ACTIVE'").run();
       snapshots.forEach(snapshot => merge(snapshot, now)); refreshCandidates(now);
       const pending = db.prepare("SELECT snapshot_json FROM tickets WHERE disposition='PENDING' ORDER BY updated_at,ticket_id").iterate();
-      const selected = []; let budget = 160000;
+      const selected = []; let budget = 200000;
       for (const row of pending) {
         if (selected.length === 20) break;
-        const snapshot = JSON.parse(row.snapshot_json), size = textSize(snapshot);
+        const snapshot = JSON.parse(row.snapshot_json), size = JSON.stringify(snapshot).length;
         if (selected.length < 20 && size <= budget) { selected.push(snapshot); budget -= size; }
       }
       if (!selected.length) { advanceCursor(scan.nextEventId); return null; }
@@ -139,6 +174,7 @@ function createStore(stateDir) {
         const reviewId = hash(`${review.ticketId}:${review.sourceVersion}`);
         db.prepare(`INSERT OR IGNORE INTO reviews VALUES(?,?,?,?,?,'IT_REVIEW_ONLY',?,?,?,?,?)`).run(reviewId, review.ticketId, review.sourceVersion,
           JSON.stringify(review), current ? 'CURRENT' : snapshot ? 'STALE' : 'REJECTED', now, model, reasoning, promptVersion, 1);
+        ingestIssues(db.prepare('SELECT * FROM reviews WHERE id=?').get(reviewId), snapshot);
         if (current && review.instruction) {
           const instruction = review.instruction;
           const normalize = text => text.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
@@ -198,11 +234,123 @@ function createStore(stateDir) {
         .map(source => ({ ticketId: source.ticket_id, sourceVersion: source.source_version, active: Boolean(source.active) })),
     }));
   }
+  function ingestIssues(row, snapshot) {
+    if (db.prepare('SELECT 1 FROM issue_ingested_reviews WHERE review_id=?').get(row.id)) return;
+    const review = JSON.parse(row.review_json);
+    if (!Array.isArray(review.issues) || review.issues.length > 12) fail('HELP_LEARNING_INVALID_TRIAGE');
+    for (const item of review.issues) {
+      strictKeys(item, ['code', 'evidenceMessageIds', 'description']);
+      const identity = issueIdentity(row.ticket_id, item.code, item.evidenceMessageIds);
+      const description = safeText(item.description, 1600);
+      let issue = db.prepare('SELECT * FROM issues WHERE id=?').get(identity.id);
+      const previous = db.prepare("SELECT * FROM issues WHERE ticket_id=? AND code=? AND status IN ('FIXED','VERIFIED','DISMISSED') AND id!=? ORDER BY updated_at DESC,rowid DESC LIMIT 1")
+        .get(row.ticket_id, item.code, identity.id);
+      if (!issue) {
+        db.prepare("INSERT INTO issues VALUES(?,?,?,?,?,'NEW',?,?,?)").run(identity.id, row.ticket_id, item.code, JSON.stringify(identity.ids), description, previous?.id ?? null, row.created_at, row.created_at);
+        db.prepare("INSERT INTO issue_transitions VALUES(?,?,NULL,'NEW','INGEST','review-import',?,?,NULL,?)").run(
+          hash(`initial:${identity.id}`), identity.id, 'Imported review observation; operator confirmation required.',
+          JSON.stringify([{ kind: 'review', ref: row.id, sourceVersion: row.source_version, trusted: false }]), row.created_at);
+        issue = db.prepare('SELECT * FROM issues WHERE id=?').get(identity.id);
+      }
+      const terminal = ['FIXED', 'VERIFIED', 'DISMISSED'].includes(issue.status) ? issue : previous;
+      const terminalTransition = terminal && db.prepare("SELECT id,created_at FROM issue_transitions WHERE issue_id=? AND kind='OPERATOR' ORDER BY rowid DESC LIMIT 1").get(terminal.id);
+      const evidenceTimes = snapshot ? snapshot.messages.filter(message => identity.ids.includes(message.id)).map(message => Date.parse(message.createdAt)) : [];
+      // A different review/version or an old quoted failure alone is not a new
+      // regression. Only genuinely newer dialogue evidence may be suspected.
+      const newerObservation = terminal && terminalTransition && evidenceTimes.some(time => time > terminalTransition.created_at);
+      const classification = terminal ? newerObservation ? 'SUSPECTED' : 'HISTORICAL'
+        : db.prepare('SELECT 1 FROM issue_observations WHERE issue_id=?').get(identity.id) ? 'SEEN' : 'INITIAL';
+      db.prepare('INSERT OR IGNORE INTO issue_observations VALUES(?,?,?,?,?,?,?,?,?)').run(hash(`${identity.id}:${row.id}`), identity.id, row.id,
+        row.source_version, description, classification, terminal ? Number(Boolean(newerObservation)) : 1, terminalTransition?.id ?? null, row.created_at);
+      db.prepare('INSERT OR IGNORE INTO issue_sources VALUES(?,?,?,?,?)').run(identity.id, row.id, row.ticket_id, row.source_version,
+        row.status === 'CURRENT' ? 'CURRENT' : row.status === 'STALE' ? 'STALE' : 'REVOKED');
+    }
+    db.prepare('INSERT INTO issue_ingested_reviews VALUES(?)').run(row.id);
+  }
+  function listIssues(options = {}) {
+    strictKeys(options, [], ['limit', 'status']);
+    if (options.status !== undefined && !ISSUE_STATUSES.includes(options.status)) fail('HELP_LEARNING_INVALID_TRIAGE');
+    const rows = options.status ? db.prepare('SELECT * FROM issues WHERE status=? ORDER BY updated_at DESC,id LIMIT ?').all(options.status, countLimit(options))
+      : db.prepare('SELECT * FROM issues ORDER BY updated_at DESC,id LIMIT ?').all(countLimit(options));
+    return rows.map(row => {
+      const sources = db.prepare(`SELECT s.*,r.model,r.reasoning_effort,r.prompt_version,r.contract_version FROM issue_sources s
+        JOIN reviews r ON r.id=s.review_id WHERE s.issue_id=? ORDER BY s.rowid`).all(row.id).map(source => ({
+        reviewId: source.review_id, ticketId: source.ticket_id, sourceVersion: source.source_version, sourceState: source.source_state,
+        model: source.model, reasoningEffort: source.reasoning_effort, promptVersion: source.prompt_version, contractVersion: source.contract_version,
+      }));
+      const observations = db.prepare('SELECT * FROM issue_observations WHERE issue_id=? ORDER BY rowid').all(row.id).map(observation => ({
+        id: observation.id, reviewId: observation.review_id, sourceVersion: observation.source_version, description: observation.description,
+        classification: observation.classification, reviewRequired: Boolean(observation.review_required), parentTransitionId: observation.parent_transition_id,
+        trusted: observation.review_id === null, createdAt: observation.created_at,
+      }));
+      return { id: row.id, ticketId: row.ticket_id, code: row.code, evidenceMessageIds: JSON.parse(row.evidence_ids_json), description: row.description,
+        status: row.status, sourceState: sources.some(source => source.sourceState === 'CURRENT') ? 'CURRENT'
+          : sources.some(source => source.sourceState === 'REVOKED') ? 'REVOKED' : 'STALE',
+        parentIssueId: row.parent_issue_id, audience: 'IT_REVIEW_ONLY', createdAt: row.created_at, updatedAt: row.updated_at, sources, observations };
+    });
+  }
+  function listTransitions(input = {}, options = {}) {
+    const query = typeof input === 'string' ? { ...options, issueId: input } : input;
+    strictKeys(query, [], ['limit', 'issueId']);
+    if (query.issueId !== undefined) issueId(query.issueId);
+    const rows = query.issueId ? db.prepare('SELECT * FROM issue_transitions WHERE issue_id=? ORDER BY rowid LIMIT ?').all(query.issueId, countLimit(query))
+      : db.prepare('SELECT * FROM issue_transitions ORDER BY rowid LIMIT ?').all(countLimit(query));
+    return rows.map(row => ({ id: row.id, issueId: row.issue_id, fromStatus: row.from_status, toStatus: row.to_status, kind: row.kind,
+      trusted: row.kind === 'OPERATOR', operator: row.operator, rationale: row.rationale, evidence: JSON.parse(row.evidence_json),
+      resolutionReason: row.resolution_reason, createdAt: row.created_at }));
+  }
+  function transitionIssue(id, request, options = {}) {
+    issueId(id); strictKeys(request, ['toStatus', 'expectedStatus', 'operator', 'rationale', 'evidence'], ['resolutionReason']);
+    if (!ISSUE_STATUSES.includes(request.toStatus) || !ISSUE_STATUSES.includes(request.expectedStatus) ||
+        typeof request.operator !== 'string' || !/^[a-z][a-z0-9_-]{2,63}$/.test(request.operator) || ['model', 'assistant', 'system', 'scheduler', 'codex', 't3'].includes(request.operator) ||
+        request.resolutionReason !== undefined && !REASONS.includes(request.resolutionReason)) fail('HELP_LEARNING_INVALID_TRIAGE');
+    const now = clock(options), rationale = safeText(request.rationale, 1600);
+    if (!Array.isArray(request.evidence) || request.evidence.length < 1 || request.evidence.length > 16) fail('HELP_LEARNING_INVALID_PROOF');
+    const evidence = request.evidence.map(proof => {
+      strictKeys(proof, ['kind', 'ref', 'sha256', 'outcome', 'observedAt']);
+      if (!['inspection', 'test', 'deployment'].includes(proof.kind) || !['PASS', 'FAIL', 'CONFIRMED'].includes(proof.outcome) ||
+          typeof proof.ref !== 'string' || !/^(?!.*(?:\.\.|\/\/))[A-Za-z0-9][A-Za-z0-9._:#/-]{0,199}$/.test(proof.ref) || containsSensitiveText(proof.ref) ||
+          typeof proof.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(proof.sha256) || !Number.isSafeInteger(proof.observedAt) || proof.observedAt < 0 || proof.observedAt > now) fail('HELP_LEARNING_INVALID_PROOF');
+      return { ...proof };
+    });
+    if (new Set(evidence.map(proof => `${proof.kind}:${proof.ref}:${proof.sha256}`)).size !== evidence.length) fail('HELP_LEARNING_INVALID_PROOF');
+    return transaction(() => {
+      const issue = db.prepare('SELECT * FROM issues WHERE id=?').get(id);
+      if (!issue) fail('HELP_LEARNING_ISSUE_NOT_FOUND');
+      if (now < issue.updated_at) fail('HELP_LEARNING_INVALID_TIME');
+      if (issue.status !== request.expectedStatus) fail('HELP_LEARNING_ISSUE_CONFLICT');
+      const transitions = { NEW: ['CONFIRMED', 'DISMISSED'], CONFIRMED: ['FIXED', 'DISMISSED'], FIXED: ['VERIFIED', 'CONFIRMED', 'DISMISSED'],
+        VERIFIED: ['CONFIRMED', 'DISMISSED'], DISMISSED: ['CONFIRMED'] };
+      if (!transitions[issue.status].includes(request.toStatus)) fail('HELP_LEARNING_INVALID_TRANSITION');
+      const tests = evidence.filter(proof => proof.kind === 'test' && proof.outcome === 'PASS');
+      const deployments = evidence.filter(proof => proof.kind === 'deployment' && proof.outcome === 'PASS');
+      if (['FIXED', 'VERIFIED'].includes(request.toStatus) && (!tests.length || !deployments.length)) fail('HELP_LEARNING_PROOF_REQUIRED');
+      if (request.toStatus === 'VERIFIED' && !tests.some(proof => proof.observedAt > issue.updated_at && deployments.some(deployment => proof.observedAt >= deployment.observedAt))) fail('HELP_LEARNING_PROOF_REQUIRED');
+      if (request.toStatus === 'DISMISSED' && (!['historical', 'already_fixed', 'insufficient_snapshot'].includes(request.resolutionReason) ||
+          !evidence.some(proof => proof.kind === 'inspection' && ['PASS', 'CONFIRMED'].includes(proof.outcome)))) fail('HELP_LEARNING_PROOF_REQUIRED');
+      const reopening = request.toStatus === 'CONFIRMED' && ['FIXED', 'VERIFIED', 'DISMISSED'].includes(issue.status);
+      if (request.toStatus === 'CONFIRMED' && !evidence.some(proof => ['inspection', 'test'].includes(proof.kind) && ['FAIL', 'CONFIRMED'].includes(proof.outcome))) fail('HELP_LEARNING_PROOF_REQUIRED');
+      if (reopening && !evidence.some(proof => ['inspection', 'test'].includes(proof.kind) && proof.outcome === 'FAIL' && proof.observedAt > issue.updated_at)) fail('HELP_LEARNING_PROOF_REQUIRED');
+      const transitionId = hash(randomUUID());
+      const previous = db.prepare("SELECT id FROM issue_transitions WHERE issue_id=? AND kind='OPERATOR' ORDER BY rowid DESC LIMIT 1").get(id);
+      db.prepare("INSERT INTO issue_transitions VALUES(?,?,?,?,'OPERATOR',?,?,?,?,?)").run(transitionId, id, issue.status, request.toStatus,
+        request.operator, rationale, JSON.stringify(evidence), request.resolutionReason ?? null, now);
+      if (reopening) db.prepare('INSERT INTO issue_observations VALUES(?,?,NULL,NULL,?,?,1,?,?)').run(hash(`regression:${transitionId}`), id,
+        rationale, 'SUSPECTED', previous?.id ?? null, now);
+      db.prepare('UPDATE issues SET status=?,updated_at=? WHERE id=?').run(request.toStatus, now, id);
+      return { issueId: id, status: request.toStatus, transitionId };
+    });
+  }
   function status() {
     const counts = table => Object.fromEntries(db.prepare(`SELECT ${table === 'tickets' ? 'disposition' : 'status'} AS state,count(*) AS count FROM ${table} GROUP BY state`).all().map(row => [row.state, row.count]));
-    return { cursor: getCursor(), tickets: counts('tickets'), batches: counts('batches'), reviews: counts('reviews'), candidates: counts('candidates') };
+    return { cursor: getCursor(), tickets: counts('tickets'), batches: counts('batches'), reviews: counts('reviews'), candidates: counts('candidates'), issues: counts('issues') };
   }
   function close() { if (!closed) { permissions(); db.close(); closed = true; } }
-  return { getCursor, claimBatch, completeBatch, failBatch, status, getSourceTicketIds, reconcileSnapshots, listReviews, listCandidates, close };
+  // Additive/idempotent backfill; never reset cursor, leases, reviews or queues.
+  transaction(() => {
+    for (const row of db.prepare('SELECT * FROM reviews WHERE id NOT IN (SELECT review_id FROM issue_ingested_reviews) ORDER BY created_at,rowid').iterate()) ingestIssues(row, null);
+  });
+  return { getCursor, claimBatch, completeBatch, failBatch, status, getSourceTicketIds, reconcileSnapshots, listReviews, listCandidates,
+    listIssues, listTransitions, transitionIssue, close };
 }
 module.exports = { createStore };

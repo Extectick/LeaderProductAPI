@@ -55,7 +55,39 @@ SELECT m."ticketId" AS ticket_id,m.id,m.sequence,
     WHEN m."authorRole"='IT' AND EXISTS (SELECT 1 FROM public."HelpMember" h WHERE h."ticketId"=t.id AND h."userId"=m."authorId" AND h.role='IT') THEN 'IT'
     WHEN m."authorId" IS NULL AND m."authorRole"='ASSISTANT' THEN 'ASSISTANT' ELSE 'OTHER' END AS author_role,
   m.kind,left(m.text,4000) AS text,md5(m.text) AS text_digest,char_length(m.text)>4000 AS text_truncated,
-  m.rating,m."createdAt" AS created_at,m."editedAt" AS edited_at
+  m.rating,m."createdAt" AS created_at,m."editedAt" AS edited_at,
+  -- BEGIN optional metadata: append columns only; existing view dependencies survive.
+  true AS metadata_included,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+    'kind',CASE WHEN a.kind IN ('FILE','IMAGE','AUDIO') THEN a.kind ELSE 'OTHER' END,
+    'extension',CASE WHEN lower(substring(a.name from '[.][a-zA-Z0-9]{1,10}$')) IN
+      ('.txt','.md','.csv','.json','.png','.jpg','.jpeg','.gif','.webp','.avif','.heic','.heif','.bmp','.tif','.tiff')
+      THEN lower(substring(a.name from '[.][a-zA-Z0-9]{1,10}$')) ELSE NULL END,
+    'size',a.size,
+    'mimeType',CASE WHEN a."mimeType" IN ('text/plain','text/markdown','text/csv','application/json','application/pdf','application/zip','application/octet-stream',
+      'image/png','image/jpeg','image/gif','image/webp','image/avif','image/heic','image/heif','image/bmp','image/tiff','audio/mp4','audio/mpeg','audio/wav','audio/ogg','audio/webm')
+      THEN a."mimeType" ELSE NULL END) ORDER BY a.position,a."createdAt",a.id)
+    FROM (SELECT a.kind,a.name,a.size,a."mimeType",a.position,a."createdAt",a.id FROM public."HelpAttachment" a
+      WHERE a."messageId"=m.id ORDER BY a.position,a."createdAt",a.id LIMIT 4) a),'[]'::jsonb) AS attachments,
+  EXISTS (SELECT 1 FROM public."HelpAttachment" a WHERE a."messageId"=m.id OFFSET 4 LIMIT 1) AS attachments_truncated,
+  (m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array') IS TRUE AS activity_metadata_included,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+    'toolName',CASE WHEN a.value->>'toolName' IN ('onec_list_metadata_objects','onec_get_metadata_structure','onec_get_access_rights','onec_get_object','onec_execute_query',
+      'onec_inspect_metadata','onec_find_latest_purchase','onec_find_latest_receipt','onec_find_latest_order') THEN a.value->>'toolName' ELSE NULL END,
+    'status',CASE WHEN a.value->>'status' IN ('running','completed','failed','stopped') THEN a.value->>'status' ELSE 'unknown' END,
+    'errorCode',CASE WHEN a.value->>'errorCode' IN ('ONEC_TOOL_ARGUMENTS','ONEC_QUERY_FORBIDDEN','ONEC_TOOL_FAILED','ONEC_RPC_ERROR','ONEC_REPEATED_REJECTED_REQUEST',
+      'ONEC_UNAVAILABLE','ONEC_TIMEOUT','ONEC_RESPONSE_TOO_LARGE','ONEC_FORBIDDEN','ONEC_VAULT_UNAVAILABLE','ONEC_NOT_CONFIGURED','ONEC_UNKNOWN') THEN a.value->>'errorCode' ELSE NULL END) ORDER BY a.ordinality)
+    FROM (SELECT value,ordinality FROM jsonb_array_elements(CASE WHEN m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array'
+      THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) WITH ORDINALITY a(value,ordinality)
+      WHERE value->>'kind'='tool' ORDER BY ordinality DESC LIMIT 8) a),'[]'::jsonb) AS activities,
+  EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array'
+    THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) a(value) WHERE value->>'kind'='tool' OFFSET 8 LIMIT 1) AS activities_truncated,
+  CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array'
+    THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) a(value) WHERE value->>'id'='images' AND value->>'status'='completed') THEN true
+    WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array'
+    THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) a(value) WHERE value->>'id'='images' AND value->>'status' IN ('failed','stopped')) THEN false
+    ELSE NULL END AS images_prepared
+  -- END optional metadata
 FROM public."HelpMessage" m JOIN public."HelpTicket" t ON t.id=m."ticketId"
 JOIN help_learning.tickets_v1 allowed ON allowed.ticket_id=t.id
 WHERE m.kind<>'ASSISTANT_PROGRESS';

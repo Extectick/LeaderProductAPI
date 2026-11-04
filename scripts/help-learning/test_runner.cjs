@@ -61,3 +61,8 @@ test('only the expected pre-inference disabled-host diagnostic is tolerated',()=
  assert.doesNotThrow(()=>validateModelEvents(diagnostic+'\n'+events));
  assert.throws(()=>validateModelEvents('{"type":"turn.started"}\n'+diagnostic+'\n'+events),/MODEL_TOOL_OR_ERROR/);
 });
+
+test('analysis carries closed issue context and distinguishes current capabilities from historical evidence',()=>{
+ const prompt=analysisPrompt([{ticketId:7,sourceVersion:'v1'}],{issues:[{ticketId:7,code:'OLD_CASE',status:'VERIFIED',evidenceMessageIds:[9],updatedAt:123},{ticketId:8,code:'UNRELATED',status:'DISMISSED'}],runtimeCapabilities:{known:true,fileFormats:['txt']}});
+ assert.ok(prompt.includes('OLD_CASE'));assert.ok(!prompt.includes('UNRELATED'));assert.ok(prompt.includes('"fileFormats":["txt"]'));assert.ok(prompt.includes('metadataIncluded=false'));assert.ok(prompt.includes('Модель не меняет эти статусы'));
+});

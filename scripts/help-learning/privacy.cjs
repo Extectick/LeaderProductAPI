@@ -7,7 +7,14 @@ const CONTACT = /(?:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|\b(?:\d{1,3}\.){3}\d{1
 const CREDENTIAL_REQUEST = /(?:(?:пришлите|укажите|введите|напишите|отправьте|сообщите|назовите|нужен|нужны|send|enter|provide|need).{0,100}(?:парол|логин|уч[её]т|credentials|password|login)|(?:логин|login).{0,40}(?:парол|password)|(?:пароль|password|логин|login)\s*\?)/iu;
 const CREDENTIAL_PAIR = /^[A-Za-z0-9_.@\\/-]{1,128}\s+\S{4,128}$/u;
 const PERSONAL = /(?:\b[78](?:[ ()-]*\d){10}\b|[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,})?)/u;
-const FLAGS = new Set(['credentials_suppressed', 'contact_redacted', 'text_truncated', 'messages_truncated', 'jobs_truncated']);
+const FLAGS = new Set(['credentials_suppressed', 'contact_redacted', 'text_truncated', 'messages_truncated', 'jobs_truncated', 'attachments_truncated', 'activities_truncated']);
+const EXTENSIONS = new Set(['.txt','.md','.csv','.json','.png','.jpg','.jpeg','.gif','.webp','.avif','.heic','.heif','.bmp','.tif','.tiff']);
+const MIME_TYPES = new Set(['text/plain','text/markdown','text/csv','application/json','application/pdf','application/zip','application/octet-stream',
+  'image/png','image/jpeg','image/gif','image/webp','image/avif','image/heic','image/heif','image/bmp','image/tiff','audio/mp4','audio/mpeg','audio/wav','audio/ogg','audio/webm']);
+const TOOL_NAMES = new Set(['onec_list_metadata_objects','onec_get_metadata_structure','onec_get_access_rights','onec_get_object','onec_execute_query',
+  'onec_inspect_metadata','onec_find_latest_purchase','onec_find_latest_receipt','onec_find_latest_order']);
+const ACTIVITY_ERRORS = new Set(['ONEC_TOOL_ARGUMENTS','ONEC_QUERY_FORBIDDEN','ONEC_TOOL_FAILED','ONEC_RPC_ERROR','ONEC_REPEATED_REJECTED_REQUEST',
+  'ONEC_UNAVAILABLE','ONEC_TIMEOUT','ONEC_RESPONSE_TOO_LARGE','ONEC_FORBIDDEN','ONEC_VAULT_UNAVAILABLE','ONEC_NOT_CONFIGURED','ONEC_UNKNOWN']);
 const clean = text => text.normalize('NFKC').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '');
 const isPlainObject = value => value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 function failure() { const error = new Error('HELP_LEARNING_INVALID_SNAPSHOT'); error.code = error.message; throw error; }
@@ -19,6 +26,29 @@ function timestamp(value, nullable = false) {
 }
 function containsSensitiveText(text) {
   return typeof text !== 'string' || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text) || SECRET.test(clean(text)) || CONTACT.test(clean(text)) || PERSONAL.test(clean(text));
+}
+function messageMetadata(message) {
+  // Legacy snapshots deliberately remain unknown. An empty array proves no
+  // bound files only when metadataIncluded=true and attachmentsTruncated=false.
+  const metadataIncluded = message.metadataIncluded === true && Array.isArray(message.attachments);
+  const activityMetadataIncluded = message.activityMetadataIncluded === true && Array.isArray(message.activities);
+  const attachmentsTruncated = metadataIncluded && (message.attachmentsTruncated === true || message.attachments.length > 4);
+  const activitiesTruncated = activityMetadataIncluded && (message.activitiesTruncated === true || message.activities.length > 8);
+  const attachments = metadataIncluded ? message.attachments.slice(0,4).map(raw => {
+    const item = isPlainObject(raw) ? raw : {};
+    return { kind: ['FILE','IMAGE','AUDIO'].includes(item.kind) ? item.kind : 'OTHER',
+      extension: EXTENSIONS.has(item.extension) ? item.extension : null,
+      size: Number.isSafeInteger(item.size) && item.size >= 0 && item.size <= 2147483647 ? item.size : null,
+      mimeType: MIME_TYPES.has(item.mimeType) ? item.mimeType : null };
+  }) : [];
+  const activities = activityMetadataIncluded ? message.activities.slice(-8).map(raw => {
+    const item = isPlainObject(raw) ? raw : {};
+    return { toolName: TOOL_NAMES.has(item.toolName) ? item.toolName : null,
+      status: ['running','completed','failed','stopped'].includes(item.status) ? item.status : 'unknown',
+      errorCode: ACTIVITY_ERRORS.has(item.errorCode) ? item.errorCode : null };
+  }) : [];
+  return { metadataIncluded,attachments,attachmentsTruncated,activityMetadataIncluded,activities,activitiesTruncated,
+    imagesPrepared: activityMetadataIncluded && typeof message.imagesPrepared === 'boolean' ? message.imagesPrepared : null };
 }
 function sanitizeSnapshot(snapshot) {
   if (!isPlainObject(snapshot) || !/^[a-f0-9]{64}$/i.test(snapshot.sourceVersion || '') || !['OPEN', 'CLOSED'].includes(snapshot.status) ||
@@ -46,7 +76,10 @@ function sanitizeSnapshot(snapshot) {
     const limit = Math.min(4000, remaining);
     if (text.length > limit) { text = text.slice(0, limit); flags.add('text_truncated'); truncated = true; }
     remaining -= text.length;
-    return { id, sequence, authorRole: message.authorRole, kind: message.kind, text, rating: message.rating, createdAt: timestamp(message.createdAt) };
+    const metadata = messageMetadata(message);
+    if (metadata.attachmentsTruncated) { flags.add('attachments_truncated'); truncated = true; }
+    if (metadata.activitiesTruncated) { flags.add('activities_truncated'); truncated = true; }
+    return { id, sequence, authorRole: message.authorRole, kind: message.kind, text, rating: message.rating, createdAt: timestamp(message.createdAt), ...metadata };
   }).sort((a, b) => a.sequence - b.sequence);
   if (snapshot.jobs.length > 8) { flags.add('jobs_truncated'); truncated = true; }
   const jobs = snapshot.jobs.slice(0, 8).map(job => {
@@ -54,8 +87,22 @@ function sanitizeSnapshot(snapshot) {
         job.errorCode !== null && !/^[A-Z0-9_]{1,100}$/.test(job.errorCode || '')) failure();
     return { status: job.status, errorCode: job.errorCode, provider: job.provider, completedAt: timestamp(job.completedAt, true) };
   });
-  return { ticketId: positive(snapshot.ticketId), sourceVersion: snapshot.sourceVersion.toLowerCase(), status: snapshot.status,
+  let metadataBudget=24000;
+  for(const message of [...messages].reverse())for(const [field,flag,privacyFlag] of [['attachments','attachmentsTruncated','attachments_truncated'],['activities','activitiesTruncated','activities_truncated']]){
+    while(message[field].length&&JSON.stringify(message[field]).length>metadataBudget){message[field].pop();message[flag]=true;flags.add(privacyFlag);truncated=true;}
+    metadataBudget-=Math.min(metadataBudget,JSON.stringify(message[field]).length);
+  }
+  const result = { ticketId: positive(snapshot.ticketId), sourceVersion: snapshot.sourceVersion.toLowerCase(), status: snapshot.status,
     closedAt: timestamp(snapshot.closedAt, true), itRequested: snapshot.itRequested, updatedAt: timestamp(snapshot.updatedAt),
     lastEventId: snapshot.lastEventId, truncated, messages, jobs, privacyFlags: [...flags].sort() };
+  // JSON quoting/escaping and metadata count toward the model envelope too.
+  let excess=JSON.stringify(result).length-180000;
+  for(const message of result.messages){
+    if(excess<=0)break;
+    message.text=message.text.slice(Math.min(message.text.length,excess));
+    result.truncated=true;if(!result.privacyFlags.includes('text_truncated'))result.privacyFlags.push('text_truncated');
+    excess=JSON.stringify(result).length-180000;
+  }
+  result.privacyFlags.sort();return result;
 }
 module.exports = { sanitizeSnapshot, containsSensitiveText, isPlainObject };
