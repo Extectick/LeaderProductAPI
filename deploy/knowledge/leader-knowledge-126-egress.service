@@ -1,0 +1,8 @@
+[Unit]
+Description=Allow dev API access to the dedicated knowledge HTTPS proxy
+After=docker.service leader-dev-egress.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/leader-knowledge-126/allow-dev-egress-local-126.py
