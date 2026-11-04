@@ -50,8 +50,8 @@ async function userMap(ids: (number|null)[], db: Tx | typeof prisma = prisma) {
   const users = await db.user.findMany({ where: { id: { in: [...new Set(ids.filter((id):id is number=>id!==null))] } }, select: miniUserSelect });
   return new Map(users.map(u => [u.id, { id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') || 'Сотрудник', avatarUrl: u.employeeProfile?.avatarUrl || u.avatarUrl }]));
 }
-async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma = prisma) {
-  const users = await userMap(rows.flatMap(m => [m.authorId, ...(m.replyTo ? [m.replyTo.authorId] : [])]), db);
+async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma = prisma, knownUsers?: Awaited<ReturnType<typeof userMap>>) {
+  const users = knownUsers ?? await userMap(rows.flatMap(m => [m.authorId, ...(m.replyTo ? [m.replyTo.authorId] : [])]), db);
   // Status is an immutable event of this message, not the ticket's current state.
   // Read the existing journal so older closures/reopens also survive pagination.
   const statusEvents = rows.length ? await db.helpEvent.findMany({
@@ -69,19 +69,57 @@ async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma
       attachments: m.attachments.map(attachmentDto), reactions: [...reactions].map(([emoji,userIds]) => ({ emoji, count:userIds.length, mine:userIds.includes(actor.userId), userIds })) };
   });
 }
-async function ticketDto(ticket: any, actor: HelpActor, db: Tx | typeof prisma = prisma) {
+type MessageDto = Awaited<ReturnType<typeof mapMessages>>[number];
+function assembleTicketDto(ticket: any, actor: HelpActor, users: Awaited<ReturnType<typeof userMap>>, lastMessage: MessageDto | null, unreadCount: number, source: {id:number;title:string} | null) {
+  const member = ticket.members.find((m: any) => m.userId === actor.userId);
+  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => ({userId:m.userId,role:m.role,user:users.get(m.userId),lastReadSequence:m.lastReadSequence})), unreadCount, lastReadSequence:member?.lastReadSequence || 0, lastSequence:ticket.messageSequence, lastMessage, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:helpAssistantConfiguration().enabled&&!ticket.itRequested&&!ticket.members.some((m:any)=>m.role==='IT') };
+}
+async function ticketDto(ticket: any, actor: HelpActor, db: Tx | typeof prisma = prisma, knownLastMessage?: MessageDto | null) {
   const users = await userMap(ticket.members.map((m: any) => m.userId), db);
-  const lastMessage = await db.helpMessage.findFirst({ where: { ticketId: ticket.id }, orderBy: { sequence: 'desc' }, include: messageInclude });
+  const lastMessage = knownLastMessage === undefined ? await db.helpMessage.findFirst({ where: { ticketId: ticket.id }, orderBy: { sequence: 'desc' }, include: messageInclude }) : null;
   const member = ticket.members.find((m: any) => m.userId === actor.userId);
   const unreadCount = await db.helpMessage.count({ where: { ticketId: ticket.id, OR:[{authorId:{not:actor.userId}},{authorId:null}], kind:{not:'ASSISTANT_PROGRESS'}, sequence: { gt: member?.lastReadSequence || 0 } } });
   const source = ticket.sourceTicketId ? await db.helpTicket.findFirst({ where: { id: ticket.sourceTicketId, ...visibleHelpWhere(actor, actor.canManage) }, select: { id:true,title:true } }) : null;
-  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => ({userId:m.userId,role:m.role,user:users.get(m.userId),lastReadSequence:m.lastReadSequence})), unreadCount, lastReadSequence:member?.lastReadSequence || 0, lastSequence:ticket.messageSequence, lastMessage:lastMessage ? (await mapMessages([lastMessage],actor,db))[0] : null, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:helpAssistantConfiguration().enabled&&!ticket.itRequested&&!ticket.members.some((m:any)=>m.role==='IT') };
+  return assembleTicketDto(ticket,actor,users,knownLastMessage !== undefined ? knownLastMessage : lastMessage ? (await mapMessages([lastMessage],actor,db))[0] : null,unreadCount,source);
 }
 export async function helpDetail(id: number, actor: HelpActor) {
   return prisma.$transaction(async db => {
     const ticket = await requireHelpTicket(db,id,actor);
-    return { ticket:await ticketDto(ticket,actor,db), ...await historyPage(db,ticket,actor,{limit:100}) };
+    const page = await historyPage(db,ticket,actor,{limit:100});
+    return { ticket:await ticketDto(ticket,actor,db,page.messages[page.messages.length-1] ?? null), ...page };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+async function ticketSummaries(db:Tx,page:Awaited<ReturnType<typeof requireHelpTicket>>[],actor:HelpActor) {
+  if(!page.length)return [];
+    // One indexed tail lookup per selected ticket, inside one SQL round trip.
+    // DISTINCT/grouping over all message history would read far more rows.
+    const latestIds=await db.$queryRaw<{id:number}[]>(Prisma.sql`
+      SELECT latest.id FROM (VALUES ${Prisma.join(page.map(ticket=>Prisma.sql`(${ticket.id}::int)`))}) AS selected("ticketId")
+      CROSS JOIN LATERAL (SELECT id FROM "HelpMessage" WHERE "ticketId"=selected."ticketId" ORDER BY sequence DESC LIMIT 1) AS latest`);
+    const latest=latestIds.length ? await db.helpMessage.findMany({where:{id:{in:latestIds.map(row=>row.id)}},include:messageInclude}) : [];
+    const unread=await db.helpMessage.groupBy({by:['ticketId'],where:{AND:[
+      {OR:[{authorId:{not:actor.userId}},{authorId:null}]},
+      {kind:{not:'ASSISTANT_PROGRESS'}},
+      {OR:page.map(ticket=>({ticketId:ticket.id,sequence:{gt:ticket.members.find(member=>member.userId===actor.userId)?.lastReadSequence??0}}))},
+    ]},_count:{_all:true}});
+    const users=await userMap([...page.flatMap(ticket=>ticket.members.map(member=>member.userId)),...latest.flatMap(message=>[message.authorId,...(message.replyTo?[message.replyTo.authorId]:[])])],db);
+    const mapped=await mapMessages(latest,actor,db,users);
+    const lastByTicket=new Map(mapped.map(message=>[message.ticketId,message]));
+    const unreadByTicket=new Map(unread.map(row=>[row.ticketId,row._count._all]));
+    const sourceIds=[...new Set(page.flatMap(ticket=>ticket.sourceTicketId?[ticket.sourceTicketId]:[]))];
+    const sources=sourceIds.length?await db.helpTicket.findMany({where:{id:{in:sourceIds},...visibleHelpWhere(actor,actor.canManage)},select:{id:true,title:true}}):[];
+    const sourcesById=new Map(sources.map(source=>[source.id,source]));
+    return page.map(ticket=>assembleTicketDto(ticket,actor,users,lastByTicket.get(ticket.id)??null,unreadByTicket.get(ticket.id)??0,sourcesById.get(ticket.sourceTicketId??0)??null));
+}
+export async function helpTicketSummaries(actor:HelpActor,requestedIds:number[]) {
+  if(requestedIds.length>200||requestedIds.some(id=>!Number.isSafeInteger(id)||id<=0||id>2147483647))throw new HelpError(400,'VALIDATION_ERROR','Укажите не более 200 корректных номеров обращений');
+  const ids=[...new Set(requestedIds)];
+  if(!ids.length)return {tickets:[]};
+  return prisma.$transaction(async db=>{
+    // Missing and inaccessible IDs are both omitted; never reveal existence.
+    const rows=await db.helpTicket.findMany({where:{id:{in:ids},...visibleHelpWhere(actor,actor.canManage)},include:{members:true}});
+    return {tickets:await ticketSummaries(db,rows,actor)};
+  },{isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead});
 }
 export async function listHelpTickets(actor: HelpActor, status: string, queue: boolean, cursor?: number, q?: string) {
   const query=(q||'').trim();
@@ -93,8 +131,12 @@ export async function listHelpTickets(actor: HelpActor, status: string, queue: b
     {messages:{some:{text:{contains:query,mode:'insensitive'}}}},
     ...(Number.isSafeInteger(number)&&number>0&&number<=2147483647?[{id:number}]:[]),
   ]}:{};
-  const rows = await prisma.helpTicket.findMany({ where:{AND:[visibleHelpWhere(actor,queue),{status},search]},include:{members:true},orderBy:[{updatedAt:'desc'},{id:'desc'}],take:51,...(cursor ? {cursor:{id:cursor},skip:1}:{}) });
-  return { tickets:await Promise.all(rows.slice(0,50).map(t=>ticketDto(t,actor))), nextCursor:rows.length>50 ? rows[49].id:null };
+  return prisma.$transaction(async db => {
+    const rows = await db.helpTicket.findMany({ where:{AND:[visibleHelpWhere(actor,queue),{status},search]},include:{members:true},orderBy:[{updatedAt:'desc'},{id:'desc'}],take:51,...(cursor ? {cursor:{id:cursor},skip:1}:{}) });
+    const page=rows.slice(0,50);
+    if(!page.length)return {tickets:[],nextCursor:null};
+    return {tickets:await ticketSummaries(db,page,actor),nextCursor:rows.length>50?rows[49].id:null};
+  }, {isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead});
 }
 async function historyMetadata(db: Tx, ticket: Awaited<ReturnType<typeof requireHelpTicket>>, actor: HelpActor) {
   const lastReadSequence = ticket.members.find(member => member.userId === actor.userId)?.lastReadSequence || 0;
@@ -127,8 +169,9 @@ async function historyPage(db: Tx, ticket: Awaited<ReturnType<typeof requireHelp
   const first = page[0]?.sequence, last = page[page.length - 1]?.sequence;
   // An interactive transaction owns one connection; do not enqueue concurrent
   // node-postgres queries on that connection.
-  const older = first === undefined ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { lt: first } }, select: { id: true } });
-  const newer = last === undefined ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { gt: last } }, select: { id: true } });
+  const tailPage=around===undefined&&query.before===undefined&&query.after===undefined;
+  const older = first === undefined || tailPage&&page.length<limit ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { lt: first } }, select: { id: true } });
+  const newer = last === undefined || tailPage ? null : await db.helpMessage.findFirst({ where: { ticketId: id, sequence: { gt: last } }, select: { id: true } });
   const metadata = await historyMetadata(db,ticket,actor);
   const olderCursor = older ? first! : null, newerCursor = newer ? last! : null;
   return { messages:await mapMessages(page,actor,db), nextCursor:olderCursor, olderCursor, newerCursor, hasOlder:!!older, hasNewer:!!newer, ...metadata };
@@ -178,8 +221,12 @@ export async function syncHelpTicket(id: number, actor: HelpActor, input: Partia
     const retainedIds = new Set(changed.map(m => m.id));
     const metadata = await historyMetadata(db,ticket,actor);
     const nextCursor = events[events.length - 1]?.id ?? query.after;
+    const messages=await mapMessages(changed,actor,db);
+    // A delta containing the current tail already has its full DTO. Reuse it;
+    // edits to older messages/deleted tails still need the normal tail lookup.
+    const knownLastMessage=messages.find(message=>message.sequence===ticket.messageSequence);
     return {
-      ticket: await ticketDto(ticket,actor,db), events, messages: await mapMessages(changed,actor,db),
+      ticket: await ticketDto(ticket,actor,db,knownLastMessage), events, messages,
       deletedMessageIds: messageIds.filter(messageId => !retainedIds.has(messageId)),
       ...metadata, nextCursor, eventCursor: nextCursor, hasMore: rows.length > query.limit,
     };

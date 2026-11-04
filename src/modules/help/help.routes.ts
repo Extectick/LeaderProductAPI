@@ -53,6 +53,10 @@ router.get('/tickets',route(async(req,res,actor)=>{
   res.json(await service.listHelpTickets(actor,status,scope==='queue',req.query.cursor?idSchema.parse(req.query.cursor):undefined,q));
 }));
 router.post('/tickets',route(async(req,res,actor)=>detail(res,await service.createHelpTicket(actor,createSchema.parse(req.body)),actor)));
+router.post('/tickets/summaries',route(async(req,res,actor)=>{
+  const body=z.object({ids:z.array(z.number().int().positive().max(2147483647)).max(200)}).strict().parse(req.body);
+  res.json(await service.helpTicketSummaries(actor,body.ids));
+}));
 for(const action of ['stop','retry'] as const) router.post(`/tickets/:id/assistant/${action}`,route(async(req,res,actor)=>{
   const id=ticketId(req),body=z.object({runId:z.string().uuid()}).strict().parse(req.body);
   await controlHelpAssistant(id,actor,body.runId,action==='retry');await detail(res,id,actor);
@@ -69,7 +73,7 @@ router.post('/tickets/:id/read',route(async(req,res,actor)=>{
   const id=ticketId(req);
   const body=z.object({sequence:z.number().int().nonnegative().optional()}).strict().parse(req.body||{});
   if(await service.readHelpTicket(id,actor,body.sequence)) void publishHelpUpdates(id).catch(error=>console.warn('[help] live delivery deferred',{code:error?.code}));
-  res.json(await service.helpDetail(id,actor));
+  res.json({ok:true});
 }));
 router.post('/read-all',route(async(_req,res,actor)=>{
   const changed=await service.readAllHelp(actor);
