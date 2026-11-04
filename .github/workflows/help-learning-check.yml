@@ -34,4 +34,4 @@ jobs:
         run: node --test scripts/help-learning/test_*.cjs
       - run: python3 -m py_compile deploy/help-learning/*.py
       - run: python3 -m unittest discover -s deploy/help-learning -p 'test_*.py'
-      - run: npx jest __tests__/help.answer-policy.unit.test.ts --runInBand
+      - run: npx jest --config jest.unit.config.ts __tests__/help.answer-policy.unit.test.ts --runInBand
