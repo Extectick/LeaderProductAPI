@@ -56,9 +56,13 @@ def main():
             legacy_cmd = ['docker', 'compose', '--profile', '*', '-p', 'leader-api-dev', '--project-directory', str(root)]
             for f in paths:
                 legacy_cmd += ['-f', f]
-            legacy_config = json.loads(r.run(legacy_cmd + ['config', '--format', 'json']))
+            legacy_env = r.environment(legacy)
+            legacy_config = json.loads(r.run(legacy_cmd + ['config', '--format', 'json'], env={**os.environ,
+                'HELP_SIMULATOR_IMAGE': legacy['Config']['Image'],
+                'HELP_AI_SIMULATOR_DURATION_MS': legacy_env.get('HELP_AI_SIMULATOR_DURATION_MS', '300000')}))
             old['services']['help-assistant-worker'] = legacy_config['services']['help-assistant-worker']
             old['services']['help-assistant-worker']['image'] = legacy['Config']['Image']
+            old['services']['help-assistant-worker']['environment'] = legacy_env
             for kind in ['networks', 'volumes', 'secrets', 'configs']:
                 for name, value in legacy_config.get(kind, {}).items():
                     old.setdefault(kind, {}).setdefault(name, value)
