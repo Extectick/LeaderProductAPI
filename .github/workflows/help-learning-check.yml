@@ -1,0 +1,35 @@
+name: Help learning checks
+on:
+  push:
+    branches: [feat/help-learning-scheduler]
+    paths: ['scripts/help-learning/**', 'deploy/help-learning/**', '.github/workflows/help-learning-check.yml']
+  pull_request:
+    paths: ['scripts/help-learning/**', 'deploy/help-learning/**', '.github/workflows/help-learning-check.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: LeaderAPI_dev
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d LeaderAPI_dev"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Test contracts, privacy, queue and isolated PostgreSQL reader
+        env:
+          HELP_LEARNING_SYNTHETIC: '1'
+        run: node --test scripts/help-learning/test_*.cjs
+      - run: python3 -m py_compile deploy/help-learning/*.py
