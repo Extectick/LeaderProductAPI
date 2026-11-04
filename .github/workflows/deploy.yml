@@ -7,6 +7,11 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      bunny_help_bind:
+        description: 'Bind Bunny test AI to the already deployed dev API and worker'
+        required: false
+        type: boolean
+        default: false
       help_assistant_mode:
         description: 'Development Help assistant only: inspect or deploy reviewed simulator'
         required: false
@@ -37,6 +42,11 @@ env:
   IMAGE_NAME: extectick/leaderproductapi
 
 jobs:
+  bunny-help:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && inputs.bunny_help_bind == true
+    uses: ./.github/workflows/bunny-help-dev.yml
+    secrets: inherit
+
   help-assistant:
     permissions:
       contents: read
@@ -53,7 +63,7 @@ jobs:
     secrets: inherit
 
   order-integrity-check:
-    if: inputs.help_diagnostics != true && (inputs.help_assistant_mode == '' || inputs.help_assistant_mode == 'disabled')
+    if: inputs.bunny_help_bind != true && inputs.help_diagnostics != true && (inputs.help_assistant_mode == '' || inputs.help_assistant_mode == 'disabled')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

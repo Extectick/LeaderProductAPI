@@ -12,7 +12,7 @@ Inference happens in the worker, outside the message acceptance transaction. Exi
 
 1. Run TypeScript, Bunny/Help unit tests and `python3 scripts/test_deploy_server_api.py`.
 2. Push reviewed dev commit; await successful `Build & Deploy API` for that exact SHA.
-3. Run `Bind Bunny Help AI (dev only)` from dev at the same SHA. It uses the development environment and the existing release runner/lock; refuses other hosts, databases, runtime modes or mismatched API images. It verifies the Help schema without migrations, configures API and dedicated worker, probes real inference and checks unrelated containers remain unchanged.
+3. Dispatch the existing `Build & Deploy API` workflow from dev with `bunny_help_bind=true` (and `deploy=false`) at the same SHA. This invokes `Bind Bunny Help AI (dev only)` without rebuilding; the wrapper is needed when the new workflow is not registered on the default branch. It uses the development environment and the existing release runner/lock; refuses other hosts, databases, runtime modes or mismatched API images. It verifies the Help schema without migrations, configures API and dedicated worker, probes real inference and checks unrelated containers remain unchanged.
 4. Private binding is persisted as `/opt/leader-api-dev/help-bunny.private.json` with mode 0600, outside the repository. Subsequent dev API releases retain the binding and update API/worker together; prod releases ignore it. A failed activation restores prior Compose and stops/removes a newly created worker; image releases retain their existing backup/rollback flow.
 5. Validate an actual reply, Stop and IT handoff in an authorized dev QA ticket. A successful health or direct inference probe alone does not prove the chat flow.
 
