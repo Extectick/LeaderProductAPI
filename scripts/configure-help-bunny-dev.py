@@ -123,6 +123,8 @@ def main():
             for name in ['leader_api_dev', 'leader_help_assistant_dev']:
                 probe('config:' + name, 'try{const c=require("./dist/modules/help/help.assistant").helpAssistantConfiguration();if(!c.enabled||c.provider!=="bunny")throw {code:"BUNNY_NOT_ENABLED"};console.log("Bunny dev configured")}catch(e){console.log(JSON.stringify({errorCode:e.code||"MODULE_CONFIG_FAILED"}));process.exitCode=1}')
             # Real inference through the deployed adapter, with no user data.
+            probe('egress:leader_help_assistant_dev',
+                'fetch("https://ai.bunny.ge/api/v1/health",{redirect:"error",signal:AbortSignal.timeout(20000),headers:{Authorization:"Bearer "+process.env.BUNNY_CHAT_API_KEY}}).then(async r=>{await r.body?.cancel();if(!r.ok)throw {code:"HEALTH_HTTP_"+r.status};console.log("AI health HTTP reachable")}).catch(e=>{console.log(JSON.stringify({errorCode:e.cause?.code||e.code||"FETCH_FAILED"}));process.exitCode=1})', timeout=25)
             result = probe('inference:leader_help_assistant_dev',
                 'require("./dist/modules/help/help.bunny").requestBunnyAnswer([{role:"user",text:"Представься одним коротким предложением."}],new AbortController().signal).then(x=>{if(!x.text)throw {code:"EMPTY_ANSWER"};console.log(JSON.stringify({model:x.model,answerReceived:true}))}).catch(e=>{console.log(JSON.stringify({errorCode:e.code||"INFERENCE_FAILED"}));process.exitCode=1})', timeout=130)
             if any(r.inspect(name)['Id'] != identity for name, identity in protected.items()):
