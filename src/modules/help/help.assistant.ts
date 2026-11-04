@@ -97,7 +97,7 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
         grounded=await prepareHelpKnowledgeAnswer(initial.ticketId,initial.ownerId,initial.context);
         answer=grounded.text;
       } else {
-        if(initial.provider!=='simulator'||process.env.NODE_ENV==='production')throw new HelpError(503,'HELP_AI_PROVIDER_UNAVAILABLE','Провайдер ИИ не настроен');
+        if(initial.provider!=='simulator'||process.env.NODE_ENV==='production'||process.env.HELP_AI_PROVIDER==='bunny')throw new HelpError(503,'HELP_AI_PROVIDER_UNAVAILABLE','Провайдер ИИ не настроен');
         answer=await provider(initial.context,AbortSignal.timeout(60000));
       }
       if(!answer.trim()||answer.length>20000)throw new HelpError(502,'HELP_AI_INVALID_ANSWER','Неверный ответ провайдера');

@@ -114,5 +114,5 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # No resolved Compose or upstream response bodies.
-        print('Bunny dev activation failed: ' + type(error).__name__)
+        print('Bunny dev activation failed: ' + type(error).__name__ + ': ' + str(error))
         raise SystemExit(1)

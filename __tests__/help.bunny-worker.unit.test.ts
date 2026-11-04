@@ -1,5 +1,5 @@
 jest.mock('../src/prisma/client', () => ({__esModule: true, default: {helpAssistantJob: {findUnique: jest.fn()}}}));
-jest.mock('../src/modules/help/help.service', () => ({HelpError: class extends Error {}, helpActor: jest.fn(), helpTransaction: jest.fn(), publishHelpEvent: jest.fn()}));
+jest.mock('../src/modules/help/help.service', () => ({HelpError: class extends Error {constructor(public status: number, public code: string, message: string) {super(message);}}, helpActor: jest.fn(), helpTransaction: jest.fn(), publishHelpEvent: jest.fn()}));
 jest.mock('../src/modules/help/help.bunny', () => ({bunnyConfiguration: () => ({enabled: true, maxAttempts: 3}), HelpBunnyError: class extends Error {}, prepareHelpBunnyAnswer: jest.fn()}));
 jest.mock('../src/modules/help/help.assistant-lease', () => ({withHelpAssistantLease: jest.fn((_id, _token, work) => work(new AbortController().signal))}));
 import prisma from '../src/prisma/client';
@@ -35,4 +35,15 @@ test('IT handoff prevents a late model response from replacing the chat', async 
   db.helpAssistantJob.findMany = jest.fn().mockResolvedValue([]);
   await expect(processHelpAssistantJob('job', 'lease')).resolves.toBe(false);
   expect(db.helpMessage.update).not.toHaveBeenCalled();
+});
+
+test('switching to Bunny cannot finish older simulator jobs with a stub', async () => {
+  const originalProvider = process.env.HELP_AI_PROVIDER; process.env.HELP_AI_PROVIDER = 'bunny';
+  (prisma.helpAssistantJob.findUnique as jest.Mock).mockResolvedValue({...job, provider: 'simulator'});
+  try {
+    await expect(processHelpAssistantJob('job', 'lease')).resolves.toBe(false);
+    expect(prepareHelpBunnyAnswer).not.toHaveBeenCalled();
+    expect(db.helpAssistantJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({status: 'ERROR', errorCode: 'HELP_AI_PROVIDER_UNAVAILABLE'})}));
+    expect(db.helpMessage.update).not.toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({kind: 'TEXT'})}));
+  } finally { if (originalProvider === undefined) delete process.env.HELP_AI_PROVIDER; else process.env.HELP_AI_PROVIDER = originalProvider; }
 });
