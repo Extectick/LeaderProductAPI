@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+from pathlib import Path
 import subprocess
 
 from local_126 import ROOT, COMPOSE, env_file, occ, run
@@ -65,13 +66,18 @@ def main():
                          '--entrypoint', 'tar', image, '-czf', '-', '-C', '/data', '.'], target / 's3-data.tar.gz')
             archive(['tar', '-czf', '-', '--exclude=./backups', '--exclude=./runtime',
                      '-C', str(ROOT), '.'], target / 'deployment-private.tar.gz')
+            api_root = Path('/opt/leader-api-dev')
+            api_files = [name for name in ['compose.yml', 'api.env', 'release-image.json',
+                         'help-bunny.private.json', 'knowledge-source.env', 'knowledge-indexer.env']
+                         if (api_root / name).is_file()]
+            archive(['tar', '-czf', '-', '-C', str(api_root), *api_files], target / 'api-config-private.tar.gz')
             pg = json.loads(run(['docker', 'inspect', 'leader_postgres_dev']))[0]
             pg_env = dict(item.split('=', 1) for item in pg['Config']['Env'])
             archive(['docker', 'exec', 'leader_postgres_dev', 'pg_dump', '-U', pg_env['POSTGRES_USER'],
                      '-d', 'LeaderAPI_dev', '-Fc'], target / 'LeaderAPI_dev.dump')
             readable_dump(COMPOSE + ['exec', '-T', 'database', 'pg_restore', '--list'], target / 'nextcloud.dump')
             readable_dump(['docker', 'exec', '-i', 'leader_postgres_dev', 'pg_restore', '--list'], target / 'LeaderAPI_dev.dump')
-            for filename in ['nextcloud-files.tar.gz', 'documents.tar.gz', 'deployment-private.tar.gz',
+            for filename in ['nextcloud-files.tar.gz', 'documents.tar.gz', 'deployment-private.tar.gz', 'api-config-private.tar.gz',
                              *(['s3-data.tar.gz'] if stopped_s3 else [])]:
                 run(['tar', '-tzf', str(target / filename)])
             hashes = {}
