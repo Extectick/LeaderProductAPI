@@ -58,6 +58,14 @@ function validateReviews(value, snapshots) {
     const messages = new Map(snapshot.messages.map(message => [message.id, message]));
     const cited = [...raw.resolution.evidenceMessageIds, ...raw.issues.flatMap(issue => issue.evidenceMessageIds), ...raw.regressionTests.flatMap(test => test.evidenceMessageIds)];
     if (cited.some(id => !messages.has(id))) fail('HELP_LEARNING_INVALID_EVIDENCE');
+    for(const issue of raw.issues)if(issue.code==='EMPTY_RESPONSE'){
+      const proven=issue.evidenceMessageIds.some(id=>{
+        const m=messages.get(id);return m.authorRole==='ASSISTANT'&&m.kind==='TEXT'&&m.assistantStatus==='completed'&&m.textComplete===true&&m.text.length===0
+          &&m.metadataIncluded&&!m.attachmentsTruncated&&m.attachments.length===0
+          &&m.questionsMetadataIncluded&&!m.questionsTruncated&&m.questions.length===0;
+      });
+      if(!proven)fail('HELP_LEARNING_INCOMPLETE_EVIDENCE');
+    }
     const human = message => ['OWNER', 'IT'].includes(message.authorRole);
     const evidence = raw.resolution.evidenceMessageIds.map(id => messages.get(id)).filter(message => human(message) && POSITIVE.test(message.text) && !NEGATIVE.test(message.text) && !UNCERTAIN.test(message.text));
     const lastPositive = Math.max(-1, ...evidence.map(message => message.sequence));

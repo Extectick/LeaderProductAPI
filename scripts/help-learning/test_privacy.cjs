@@ -105,3 +105,12 @@ test('serialized escaped text and dense metadata fit the model envelope and rema
   attachments:Array.from({length:4},()=>({kind:'FILE',extension:'.json',size:123,mimeType:'application/json'})),activities:Array.from({length:8},()=>({toolName:'onec_get_metadata_structure',status:'completed',errorCode:null}))}));
  const safe=sanitizeSnapshot(input);assert.ok(JSON.stringify(safe).length<=180000);assert.equal(safe.truncated,true);assert.ok(safe.privacyFlags.includes('text_truncated'));assert.equal(safe.messages.length,80);assert.deepEqual(sanitizeSnapshot(safe),safe);
 });
+
+test('office metadata and question shape are whitelisted without text, labels or arguments',()=>{
+ const input=snapshot();input.messages[0]={...input.messages[0],authorRole:'ASSISTANT',textComplete:true,assistantStatus:'completed',metadataIncluded:true,
+  attachments:[{kind:'FILE',extension:'.xlsx',size:2048,mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',name:'PRIVATE_NAME'}],questionsMetadataIncluded:true,
+  questions:[{multiSelect:true,optionCount:3,question:'PRIVATE_QUESTION',options:[{label:'PRIVATE_LABEL'}]}]};
+ const safe=sanitizeSnapshot(input);assert.equal(safe.messages[0].attachments[0].extension,'.xlsx');assert.deepEqual(safe.messages[0].questions,[{multiSelect:true,optionCount:3}]);
+ assert.equal(safe.messages[0].textComplete,true);assert.ok(!JSON.stringify(safe).includes('PRIVATE_'));assert.deepEqual(sanitizeSnapshot(safe),safe);
+ const legacy=sanitizeSnapshot(snapshot());assert.equal(legacy.messages[0].textComplete,null);assert.equal(legacy.messages[0].questionsMetadataIncluded,false);
+});

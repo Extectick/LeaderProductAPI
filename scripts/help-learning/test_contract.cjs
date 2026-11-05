@@ -45,3 +45,10 @@ test('unverified update/rewrite targets are downgraded; no_change cannot smuggle
   assert.equal(validate(review({ decision: 'rewrite', instruction: { ...review().instruction, targetDocumentId: 'document-1', baseRevision: 2 } })).decision, 'needs_review');
   assert.throws(() => validate(review({ decision: 'no_change' })), { code: 'HELP_LEARNING_INVALID_REVIEW' });
 });
+
+test('empty-response claims require complete final assistant text and known absence of files/questions',()=>{
+ const message={...snapshot().messages[0],authorRole:'ASSISTANT',kind:'TEXT',text:'',textComplete:true,assistantStatus:'completed',metadataIncluded:true,attachments:[],questionsMetadataIncluded:true,questions:[]};
+ const item=review({decision:'needs_review',instruction:null,resolution:{confirmed:false,evidenceMessageIds:[]},issues:[{code:'EMPTY_RESPONSE',description:'Ответ пустой.',evidenceMessageIds:[1]}]});
+ assert.equal(validate(item,snapshot({messages:[message]})).issues.length,1);
+ for(const patch of [{text:'Actual reply'},{textComplete:false},{textComplete:undefined},{questionsMetadataIncluded:false},{questions:[{multiSelect:false,optionCount:0}]},{attachments:[{kind:'FILE',extension:'.txt',size:2,mimeType:'text/plain'}]},{assistantStatus:'stopped'},{authorRole:'OTHER'}])assert.throws(()=>validate(item,snapshot({messages:[{...message,...patch}]})),{code:'HELP_LEARNING_INCOMPLETE_EVIDENCE'});
+});

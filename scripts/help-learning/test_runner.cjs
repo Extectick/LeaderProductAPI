@@ -66,3 +66,8 @@ test('analysis carries closed issue context and distinguishes current capabiliti
  const prompt=analysisPrompt([{ticketId:7,sourceVersion:'v1'}],{issues:[{ticketId:7,code:'OLD_CASE',status:'VERIFIED',evidenceMessageIds:[9],updatedAt:123},{ticketId:7,code:'KNOWN_OPEN',status:'NEW',evidenceMessageIds:[8]},{ticketId:8,code:'UNRELATED',status:'DISMISSED'}],runtimeCapabilities:{known:true,fileFormats:['txt']}});
  assert.ok(prompt.includes('OLD_CASE'));assert.ok(prompt.includes('KNOWN_OPEN'));assert.ok(prompt.includes('не создавай переименованный дубль'));assert.ok(!prompt.includes('UNRELATED'));assert.ok(prompt.includes('"fileFormats":["txt"]'));assert.ok(prompt.includes('metadataIncluded=false'));assert.ok(prompt.includes('Модель не меняет эти статусы'));
 });
+
+test('v3 prompt requires per-message completeness and distinguishes questions/office rollout from missing answers',()=>{
+ const {PROMPT_VERSION}=require('./runner.cjs');assert.equal(PROMPT_VERSION,'help-learning-v3');const prompt=analysisPrompt([]);
+ for(const text of ['textComplete','EMPTY_RESPONSE','XLSX','DOCX','multiSelect','OTHER'])assert.ok(prompt.includes(text));
+});

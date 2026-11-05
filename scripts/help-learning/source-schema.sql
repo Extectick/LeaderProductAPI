@@ -53,7 +53,7 @@ CREATE OR REPLACE VIEW help_learning.messages_v1 WITH (security_barrier=true) AS
 SELECT m."ticketId" AS ticket_id,m.id,m.sequence,
   CASE WHEN m."authorId"=t."ownerId" THEN 'OWNER'
     WHEN m."authorRole"='IT' AND EXISTS (SELECT 1 FROM public."HelpMember" h WHERE h."ticketId"=t.id AND h."userId"=m."authorId" AND h.role='IT') THEN 'IT'
-    WHEN m."authorId" IS NULL AND m."authorRole"='ASSISTANT' THEN 'ASSISTANT' ELSE 'OTHER' END AS author_role,
+    WHEN m."authorId" IS NULL AND trusted_ai.id IS NOT NULL THEN 'ASSISTANT' ELSE 'OTHER' END AS author_role,
   m.kind,left(m.text,4000) AS text,md5(m.text) AS text_digest,char_length(m.text)>4000 AS text_truncated,
   m.rating,m."createdAt" AS created_at,m."editedAt" AS edited_at,
   -- BEGIN optional metadata: append columns only; existing view dependencies survive.
@@ -61,10 +61,10 @@ SELECT m."ticketId" AS ticket_id,m.id,m.sequence,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
     'kind',CASE WHEN a.kind IN ('FILE','IMAGE','AUDIO') THEN a.kind ELSE 'OTHER' END,
     'extension',CASE WHEN lower(substring(a.name from '[.][a-zA-Z0-9]{1,10}$')) IN
-      ('.txt','.md','.csv','.json','.png','.jpg','.jpeg','.gif','.webp','.avif','.heic','.heif','.bmp','.tif','.tiff')
+      ('.txt','.md','.csv','.json','.xlsx','.docx','.png','.jpg','.jpeg','.gif','.webp','.avif','.heic','.heif','.bmp','.tif','.tiff')
       THEN lower(substring(a.name from '[.][a-zA-Z0-9]{1,10}$')) ELSE NULL END,
     'size',a.size,
-    'mimeType',CASE WHEN a."mimeType" IN ('text/plain','text/markdown','text/csv','application/json','application/pdf','application/zip','application/octet-stream',
+    'mimeType',CASE WHEN a."mimeType" IN ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','application/vnd.openxmlformats-officedocument.wordprocessingml.document','text/plain','text/markdown','text/csv','application/json','application/pdf','application/zip','application/octet-stream',
       'image/png','image/jpeg','image/gif','image/webp','image/avif','image/heic','image/heif','image/bmp','image/tiff','audio/mp4','audio/mpeg','audio/wav','audio/ogg','audio/webm')
       THEN a."mimeType" ELSE NULL END) ORDER BY a.position,a."createdAt",a.id)
     FROM (SELECT a.kind,a.name,a.size,a."mimeType",a.position,a."createdAt",a.id FROM public."HelpAttachment" a
@@ -73,7 +73,7 @@ SELECT m."ticketId" AS ticket_id,m.id,m.sequence,
   (m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array') IS TRUE AS activity_metadata_included,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
     'toolName',CASE WHEN a.value->>'toolName' IN ('onec_list_metadata_objects','onec_get_metadata_structure','onec_get_access_rights','onec_get_object','onec_execute_query',
-      'onec_inspect_metadata','onec_find_latest_purchase','onec_find_latest_receipt','onec_find_latest_order') THEN a.value->>'toolName' ELSE NULL END,
+      'onec_inspect_metadata','onec_find_latest_purchase','onec_find_latest_receipt','onec_find_latest_order','help_create_spreadsheet','help_create_document','help_search_history','help_read_history','help_read_attachment') THEN a.value->>'toolName' ELSE NULL END,
     'status',CASE WHEN a.value->>'status' IN ('running','completed','failed','stopped') THEN a.value->>'status' ELSE 'unknown' END,
     'errorCode',CASE WHEN a.value->>'errorCode' IN ('ONEC_TOOL_ARGUMENTS','ONEC_QUERY_FORBIDDEN','ONEC_TOOL_FAILED','ONEC_RPC_ERROR','ONEC_REPEATED_REJECTED_REQUEST',
       'ONEC_UNAVAILABLE','ONEC_TIMEOUT','ONEC_RESPONSE_TOO_LARGE','ONEC_FORBIDDEN','ONEC_VAULT_UNAVAILABLE','ONEC_NOT_CONFIGURED','ONEC_UNKNOWN') THEN a.value->>'errorCode' ELSE NULL END) ORDER BY a.ordinality)
@@ -86,10 +86,22 @@ SELECT m."ticketId" AS ticket_id,m.id,m.sequence,
     THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) a(value) WHERE value->>'id'='images' AND value->>'status'='completed') THEN true
     WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN m."assistantState"->>'activityVersion'='1' AND jsonb_typeof(m."assistantState"->'activities')='array'
     THEN m."assistantState"->'activities' ELSE '[]'::jsonb END) a(value) WHERE value->>'id'='images' AND value->>'status' IN ('failed','stopped')) THEN false
-    ELSE NULL END AS images_prepared
+    ELSE NULL END AS images_prepared,
+  (trusted_ai.id IS NOT NULL AND jsonb_typeof(m."assistantState")='object' AND
+    (jsonb_typeof(m."assistantState"->'questions')='array' OR m."assistantState"->>'status' IN ('queued','thinking','streaming','completed','stopped','error'))) IS TRUE AS questions_metadata_included,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+    'multiSelect',(q.value->'multiSelect'='true'::jsonb) IS TRUE,
+    'optionCount',LEAST(12,jsonb_array_length(CASE WHEN jsonb_typeof(q.value->'options')='array' THEN q.value->'options' ELSE '[]'::jsonb END))) ORDER BY q.ordinality)
+    FROM (SELECT value,ordinality FROM jsonb_array_elements(CASE WHEN jsonb_typeof(m."assistantState"->'questions')='array'
+      THEN m."assistantState"->'questions' ELSE '[]'::jsonb END) WITH ORDINALITY a(value,ordinality) LIMIT 3) q),'[]'::jsonb) AS questions,
+  (jsonb_array_length(CASE WHEN jsonb_typeof(m."assistantState"->'questions')='array' THEN m."assistantState"->'questions' ELSE '[]'::jsonb END)>3
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(m."assistantState"->'questions')='array'
+      THEN m."assistantState"->'questions' ELSE '[]'::jsonb END) q(value) WHERE jsonb_array_length(CASE WHEN jsonb_typeof(q.value->'options')='array' THEN q.value->'options' ELSE '[]'::jsonb END)>12)) AS questions_truncated,
+  CASE WHEN trusted_ai.id IS NOT NULL AND m."assistantState"->>'status' IN ('queued','thinking','streaming','completed','stopped','error') THEN m."assistantState"->>'status' ELSE NULL END AS assistant_status
   -- END optional metadata
 FROM public."HelpMessage" m JOIN public."HelpTicket" t ON t.id=m."ticketId"
 JOIN help_learning.tickets_v1 allowed ON allowed.ticket_id=t.id
+LEFT JOIN public."HelpAssistantJob" trusted_ai ON trusted_ai."messageId"=m.id AND trusted_ai."ticketId"=t.id AND trusted_ai."ownerId"=t."ownerId" AND m."authorId" IS NULL
 WHERE m.kind<>'ASSISTANT_PROGRESS';
 
 CREATE OR REPLACE VIEW help_learning.jobs_v1 WITH (security_barrier=true) AS

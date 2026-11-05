@@ -1,6 +1,6 @@
 'use strict';
 const { createHash } = require('node:crypto');
-const MAX_ID=2147483647,MAX_BATCH_CHARS=160000;
+const MAX_ID=2147483647,MAX_BATCH_CHARS=160000,PROJECTION_VERSION=3;
 class SourceError extends Error { constructor(code) { super(code); this.code=code; } }
 const fail=code=>{throw new SourceError(code);};
 const integer=(value,min,max)=>Number.isSafeInteger(value)&&value>=min&&value<=max;
@@ -45,29 +45,31 @@ async function loadSnapshots(client,ids,sanitize) {
     const rawJobs=jobs.filter(row=>row.ticket_id===ticket.ticket_id).slice(-8);
     // Hash unredacted selected content and whole-history/version watermarks.
     // Hashing precedes both privacy sanitation and batch-size truncation.
-    const sourceVersion=createHash('sha256').update(JSON.stringify({ticket,messages:rawMessages,jobs:rawJobs})).digest('hex');
+    const sourceVersion=createHash('sha256').update(JSON.stringify({projectionVersion:PROJECTION_VERSION,ticket,messages:rawMessages,jobs:rawJobs})).digest('hex');
     let truncated=ticket.message_count>80||ticket.job_count>8||rawMessages.some(row=>row.text_truncated||row.attachments_truncated||row.activities_truncated),remaining=perTicketBudget;
     const bounded=[];
     for(const row of [...rawMessages].reverse()) {
       if(!remaining){truncated=true;continue;}
       const text=row.text.slice(0,Math.min(4000,remaining));remaining-=text.length;
       if(text.length<row.text.length)truncated=true;
-      bounded.push({id:row.id,sequence:row.sequence,authorRole:row.author_role,kind:row.kind,text,rating:row.rating,createdAt:iso(row.created_at),
+      bounded.push({id:row.id,sequence:row.sequence,authorRole:row.author_role,kind:row.kind,text,textComplete:row.text_truncated===false&&text.length===row.text.length,rating:row.rating,createdAt:iso(row.created_at),
         metadataIncluded:row.metadata_included===true,attachments:Array.isArray(row.attachments)?row.attachments.slice(0,4):[],attachmentsTruncated:row.attachments_truncated===true,
         activityMetadataIncluded:row.activity_metadata_included===true,activities:Array.isArray(row.activities)?row.activities.slice(-8):[],activitiesTruncated:row.activities_truncated===true,
-        imagesPrepared:typeof row.images_prepared==='boolean'?row.images_prepared:null});
+        imagesPrepared:typeof row.images_prepared==='boolean'?row.images_prepared:null,
+        assistantStatus:row.assistant_status??null,questionsMetadataIncluded:row.questions_metadata_included===true,
+        questions:Array.isArray(row.questions)?row.questions.slice(0,3):[],questionsTruncated:row.questions_truncated===true});
     }
-    const snapshot={ticketId:ticket.ticket_id,sourceVersion,status:ticket.status,closedAt:iso(ticket.closed_at),itRequested:ticket.it_requested,
+    const snapshot={projectionVersion:PROJECTION_VERSION,ticketId:ticket.ticket_id,sourceVersion,status:ticket.status,closedAt:iso(ticket.closed_at),itRequested:ticket.it_requested,
       updatedAt:iso(ticket.updated_at),lastEventId:ticket.last_event_id,truncated,messages:bounded.reverse(),
       jobs:rawJobs.map(row=>({status:row.status,errorCode:row.error_code,provider:row.provider,completedAt:iso(row.completed_at)}))};
     const safe=sanitize(snapshot);
     if(!safe||safe.ticketId!==snapshot.ticketId||safe.sourceVersion!==sourceVersion||!Array.isArray(safe.messages))fail('HELP_LEARNING_SOURCE_PRIVACY');
     // Defensive cap even if a sanitizer replacement expands a redacted string.
     let budget=perTicketBudget,metadataBudget=Math.floor(24000/Math.max(tickets.length,1));
-    for(const message of safe.messages){const text=message.text.slice(0,Math.min(4000,budget));budget-=text.length;if(text!==message.text)safe.truncated=true;message.text=text;}
+    for(const message of [...safe.messages].reverse()){const text=message.text.slice(0,Math.min(4000,budget));budget-=text.length;if(text!==message.text){safe.truncated=true;message.textComplete=false;}message.text=text;}
     // Bound metadata independently without dropping eligible tickets or
     // pretending a truncated attachment list proves there were no files.
-    for(const message of [...safe.messages].reverse())for(const [field,flag] of [['attachments','attachmentsTruncated'],['activities','activitiesTruncated']]){
+    for(const message of [...safe.messages].reverse())for(const [field,flag] of [['attachments','attachmentsTruncated'],['activities','activitiesTruncated'],['questions','questionsTruncated']]){
       if(!Array.isArray(message[field]))continue;
       while(message[field].length&&JSON.stringify(message[field]).length>metadataBudget){message[field].pop();message[flag]=true;safe.truncated=true;}
       metadataBudget-=Math.min(metadataBudget,JSON.stringify(message[field]).length);

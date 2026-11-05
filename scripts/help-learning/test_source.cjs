@@ -107,7 +107,7 @@ test('synthetic PostgreSQL16 views, role isolation, prefix and revocation integr
    CREATE TABLE "HelpMessage" (id int PRIMARY KEY,"ticketId" int,sequence int,"authorId" int,"authorRole" text,kind text,text text,rating int,"createdAt" timestamp,"editedAt" timestamp,"assistantState" jsonb);
    CREATE TABLE "HelpAttachment" (id text PRIMARY KEY,"messageId" int,kind text,name text,size int,"mimeType" text,position int,"createdAt" timestamp,"objectKey" text,sha256 text,"ownerId" int);
    CREATE TABLE "HelpEvent" (id int PRIMARY KEY,"ticketId" int);
-   CREATE TABLE "HelpAssistantJob" (id text PRIMARY KEY,"ticketId" int,status text,"errorCode" text,provider text,"completedAt" timestamp,"createdAt" timestamp,"updatedAt" timestamp,context jsonb,"leaseToken" text);
+   CREATE TABLE "HelpAssistantJob" (id text PRIMARY KEY,"ticketId" int,status text,"errorCode" text,provider text,"completedAt" timestamp,"createdAt" timestamp,"updatedAt" timestamp,context jsonb,"leaseToken" text,"messageId" int,"ownerId" int);
    INSERT INTO "User" VALUES (1,true,NULL,'APPROVED'),(2,true,NULL,'BLOCKED'),(3,true,NULL,'APPROVED');
    INSERT INTO "HelpTicket" SELECT n,1,'CLOSED',timestamp '2026-11-05',true,timestamp '2026-11-05',81 FROM generate_series(1,21) n;
    INSERT INTO "HelpTicket" VALUES (99,2,'CLOSED',timestamp '2026-11-05',true,timestamp '2026-11-05',1);
@@ -116,16 +116,20 @@ test('synthetic PostgreSQL16 views, role isolation, prefix and revocation integr
    INSERT INTO "HelpEvent" VALUES (22,99),(23,1);
    INSERT INTO "HelpMessage" SELECT n,1,n,1,'USER','TEXT','synthetic text '||n,NULL,timestamp '2026-11-05',NULL FROM generate_series(1,81) n;
    INSERT INTO "HelpMessage" VALUES (1000,2,1,3,'USER','TEXT','non-owner text',NULL,timestamp '2026-11-05',NULL);
-   INSERT INTO "HelpAssistantJob" VALUES ('synthetic-job',1,'COMPLETED',NULL,'synthetic',timestamp '2026-11-05',timestamp '2026-11-05',timestamp '2026-11-05','{"private":"not-selected"}','not-selected-token');`);
+   INSERT INTO "HelpAssistantJob" VALUES ('synthetic-job',1,'COMPLETED',NULL,'synthetic',timestamp '2026-11-05',timestamp '2026-11-05',timestamp '2026-11-05','{"private":"not-selected"}','not-selected-token',81,1);`);
   await admin.query(`INSERT INTO "HelpAttachment" VALUES ('file-1',81,'FILE','PRIVATE_NAME.TXT',59,'text/plain',0,timestamp '2026-11-05','PRIVATE_OBJECT_KEY','PRIVATE_SHA256',1),
    ('image-1',80,'IMAGE','PRIVATE_IMAGE.jpeg',200,'image/jpeg',0,timestamp '2026-11-05','PRIVATE_IMAGE_KEY','PRIVATE_IMAGE_HASH',1),
    ('suffix-1',78,'FILE','PRIVATE_NAME.txt?password=PRIVATE_CREDENTIAL',12,'text/plain',0,timestamp '2026-11-05','PRIVATE_OTHER_KEY','PRIVATE_HASH',1);
    INSERT INTO "HelpAttachment" SELECT 'many-'||n,79,'FILE','PRIVATE_MANY.csv',n,'text/csv',n,timestamp '2026-11-05','PRIVATE_MANY_KEY','PRIVATE_HASH',1 FROM generate_series(1,5) n;`);
-  await admin.query('UPDATE "HelpMessage" SET "authorId"=NULL,"authorRole"=\'ASSISTANT\',"assistantState"=$1::jsonb WHERE id=81',[JSON.stringify({activityVersion:1,draftText:'PRIVATE_DRAFT',activities:[
+  await admin.query('UPDATE "HelpMessage" SET "authorId"=NULL,"authorRole"=\'SYSTEM\',"assistantState"=$1::jsonb WHERE id=81',[JSON.stringify({status:'completed',questions:[{question:'PRIVATE_QUESTION',multiSelect:true,options:[{label:'PRIVATE_OPTION'},{label:'PRIVATE_OPTION_2'}]}],activityVersion:1,draftText:'PRIVATE_DRAFT',activities:[
    {id:'images',kind:'status',status:'completed',label:'PRIVATE_IMAGE_LABEL',text:'PRIVATE_IMAGE_TEXT'},
    {id:'tool:0',kind:'tool',toolName:'onec_execute_query',status:'failed',errorCode:'ONEC_TOOL_ARGUMENTS',label:'PRIVATE_TOOL_LABEL',text:'PRIVATE_TOOL_TEXT',args:{password:'PRIVATE_PASSWORD'}},
    {id:'analysis',kind:'analysis',status:'completed',label:'PRIVATE_ANALYSIS_LABEL',text:'PRIVATE_ANALYSIS_TEXT'},
   ]})]);
+  await admin.query(`UPDATE "HelpMessage" SET "authorId"=NULL,"authorRole"='SYSTEM' WHERE id=80;
+   INSERT INTO "HelpAssistantJob" VALUES ('wrong-owner-job',1,'COMPLETED',NULL,'synthetic',timestamp '2026-11-05',timestamp '2026-11-05',timestamp '2026-11-05','{}','unused',80,2);
+   INSERT INTO "HelpAttachment" VALUES ('xlsx-1',77,'FILE','PRIVATE_REPORT.xlsx',5000,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',0,timestamp '2026-11-05','PRIVATE_XLSX_KEY','PRIVATE_HASH',1),
+   ('docx-1',76,'FILE','PRIVATE_REPORT.docx',4000,'application/vnd.openxmlformats-officedocument.wordprocessingml.document',0,timestamp '2026-11-05','PRIVATE_DOCX_KEY','PRIVATE_HASH',1);`);
   const schema=fs.readFileSync(path.join(__dirname,'source-schema.sql'),'utf8');
   // Install the actual old projection first, then append columns in place.
   const legacySchema=schema.replace(/,\n  -- BEGIN optional metadata[\s\S]*?  -- END optional metadata\n/u,'\n');
@@ -137,7 +141,7 @@ test('synthetic PostgreSQL16 views, role isolation, prefix and revocation integr
   await admin.query(schema);await admin.query(schema);
   assert.equal((await admin.query("SELECT 'help_learning.messages_v1'::regclass::oid AS oid")).rows[0].oid,viewOid);
   assert.deepEqual((await columns()).slice(0,legacyColumns.length),legacyColumns);
-  assert.deepEqual((await columns()).slice(legacyColumns.length),['metadata_included','attachments','attachments_truncated','activity_metadata_included','activities','activities_truncated','images_prepared']);
+  assert.deepEqual((await columns()).slice(legacyColumns.length),['metadata_included','attachments','attachments_truncated','activity_metadata_included','activities','activities_truncated','images_prepared','questions_metadata_included','questions','questions_truncated','assistant_status']);
   assert.ok((await admin.query('SELECT id FROM help_learning.synthetic_dependency LIMIT 1')).rowCount===1);
   await admin.query('ALTER ROLE leader_help_learning_ro LOGIN');
   const scan=await runSource({op:'scan',afterEventId:0,maxTickets:20,maxEvents:1000},{env:readerEnv,sanitizeSnapshot:clone});
@@ -145,13 +149,13 @@ test('synthetic PostgreSQL16 views, role isolation, prefix and revocation integr
   const more=await runSource({op:'scan',afterEventId:20,maxTickets:20,maxEvents:1000},{env:readerEnv,sanitizeSnapshot:clone});
   assert.equal(more.nextEventId,23);assert.deepEqual(more.snapshots.map(row=>row.ticketId),[1,21]);
   const first=scan.snapshots.find(row=>row.ticketId===1);assert.equal(first.truncated,true);assert.equal(first.messages.length,80);assert.equal(first.messages[0].sequence,2);assert.equal(first.messages[0].authorRole,'OWNER');
-  const published=first.messages.find(row=>row.id===81);assert.equal(published.metadataIncluded,true);
+  const published=first.messages.find(row=>row.id===81);assert.equal(published.metadataIncluded,true);assert.equal(published.authorRole,'ASSISTANT');assert.equal(published.assistantStatus,'completed');assert.equal(published.questionsMetadataIncluded,true);assert.deepEqual(published.questions,[{multiSelect:true,optionCount:2}]);
   assert.deepEqual(published.attachments,[{kind:'FILE',extension:'.txt',size:59,mimeType:'text/plain'}]);assert.equal(published.imagesPrepared,true);
   assert.deepEqual(published.activities,[{toolName:'onec_execute_query',status:'failed',errorCode:'ONEC_TOOL_ARGUMENTS'}]);
   assert.deepEqual(first.messages.find(row=>row.id===80).attachments,[{kind:'IMAGE',extension:'.jpeg',size:200,mimeType:'image/jpeg'}]);
   assert.equal(first.messages.find(row=>row.id===79).attachments.length,4);assert.equal(first.messages.find(row=>row.id===79).attachmentsTruncated,true);
   assert.equal(first.messages.find(row=>row.id===78).attachments[0].extension,null);
-  assert.equal(first.messages.find(row=>row.id===77).metadataIncluded,true);assert.deepEqual(first.messages.find(row=>row.id===77).attachments,[]);
+  assert.equal(first.messages.find(row=>row.id===77).metadataIncluded,true);assert.equal(first.messages.find(row=>row.id===77).attachments[0].extension,'.xlsx');assert.equal(first.messages.find(row=>row.id===76).attachments[0].extension,'.docx');assert.deepEqual(first.messages.find(row=>row.id===75).attachments,[]);assert.equal(first.messages.find(row=>row.id===80).authorRole,'OTHER');
   assert.equal(first.messages.find(row=>row.id===77).imagesPrepared,null);
   assert.equal(JSON.stringify(scan).includes('PRIVATE_'),false);
   assert.equal(scan.snapshots.find(row=>row.ticketId===2).messages[0].authorRole,'OTHER');
@@ -184,4 +188,21 @@ test('dense metadata stays bounded without omitting eligible tickets or claiming
  const result=await runSource({op:'snapshots',ticketIds:tickets.map(row=>row.ticket_id)},{client,env});
  assert.equal(result.snapshots.length,20);assert.ok(Buffer.byteLength(JSON.stringify(result))<2*1024*1024);
  assert.ok(result.snapshots.every(s=>s.truncated&&s.messages.length===80&&s.messages.some(m=>m.attachmentsTruncated||m.activitiesTruncated)));
+});
+
+test('privacy expansion never erases the newest reply at the per-ticket budget',async()=>{
+ const tickets=Array.from({length:8},(_,i)=>({...ticket(i+1),message_count:i===0?6:0}));
+ const long='x'.repeat(3978)+' https://a.ru';
+ const messages=[...Array.from({length:5},(_,i)=>message(1,i+1,long)),{...message(1,6,'nonempty-result!'),author_role:'ASSISTANT',assistant_status:'completed',questions_metadata_included:true,questions:[]}];
+ const {client}=fixture({tickets,messages});const result=await runSource({op:'snapshots',ticketIds:tickets.map(t=>t.ticket_id)},{client,env});
+ const source=result.snapshots[0],last=source.messages.at(-1);
+ assert.equal(source.projectionVersion,3);assert.equal(last.text,'nonempty-result!');assert.equal(last.textComplete,true);assert.equal(last.assistantStatus,'completed');
+ assert.ok(source.messages.some(m=>m.textComplete===false));assert.equal(source.truncated,true);
+ assert.ok(source.messages.reduce((n,m)=>n+m.text.length,0)<=20000);
+});
+test('text, questions and metadata truncation preserve completeness through a second sanitation',async()=>{
+ const {client}=fixture({messages:[{...message(1,1,''),text_truncated:true,questions_metadata_included:true,questions:[{multiSelect:true,optionCount:3}],assistant_status:'completed',author_role:'ASSISTANT'}]});
+ const source=(await runSource({op:'snapshots',ticketIds:[1]},{client,env})).snapshots[0];
+ const {sanitizeSnapshot}=require('./privacy.cjs');assert.equal(source.messages[0].textComplete,false);
+ assert.deepEqual(sanitizeSnapshot(source),source);assert.equal(source.messages[0].questionsMetadataIncluded,true);assert.deepEqual(source.messages[0].questions,[{multiSelect:true,optionCount:3}]);
 });
