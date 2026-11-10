@@ -1,6 +1,9 @@
 import express from 'express';
 import request from 'supertest';
+import { OnecPersonalError } from '../src/modules/onec-personal/config';
 import { getCustomerPurchaseHistory } from '../src/modules/clientOrders/customerPurchaseHistory';
+import { getLinkedClientOrder } from '../src/modules/clientOrders/clientOrders.entity';
+jest.mock('../src/modules/clientOrders/clientOrders.entity', () => ({ getLinkedClientOrder: jest.fn() }));
 jest.mock('../src/modules/clientOrders/customerPurchaseHistory', () => ({
   ...jest.requireActual('../src/modules/clientOrders/customerPurchaseHistory'), getCustomerPurchaseHistory: jest.fn(),
 }));
@@ -184,6 +187,48 @@ describe('/api/client-orders live reference routes', () => {
       statusCounts: { DRAFT: 1, SENT_TO_1C: 2 },
       liveSource: { status: 'ok' },
     });
+  });
+
+  it('opens a qualified order only from the authenticated personal base', async () => {
+    const guid = 'b8b8cb5c-d9b9-11f1-9d3e-f6ac37589664';
+    jest.mocked(getLinkedClientOrder).mockResolvedValueOnce({guid, sourceBaseKey:'torg2026', readOnly:true, items:[]} as any);
+    const response = await request(app).get(`/api/client-orders/${guid}?baseKey=torg2026&userId=999`);
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({guid,sourceBaseKey:'torg2026',readOnly:true});
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    expect(getLinkedClientOrder).toHaveBeenCalledWith(1, 'torg2026', guid, expect.any(AbortSignal));
+    expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to the application publication for an unknown personal base', async () => {
+    jest.mocked(getLinkedClientOrder).mockRejectedValueOnce(new OnecPersonalError('ONEC_BASE_UNAVAILABLE',404));
+    const response = await request(app).get('/api/client-orders/b8b8cb5c-d9b9-11f1-9d3e-f6ac37589664?baseKey=foreign');
+    expect(response.status).toBe(404);
+    expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
+  });
+
+  it('offers protected personal connection without using shared credentials', async () => {
+    jest.mocked(getLinkedClientOrder).mockRejectedValueOnce(new OnecPersonalError('ONEC_AUTH_REQUIRED'));
+    const response = await request(app).get('/api/client-orders/b8b8cb5c-d9b9-11f1-9d3e-f6ac37589664?baseKey=torg2026');
+    expect(response.status).toBe(422);
+    expect(response.body.action).toEqual({type:'connect_onec',baseKey:'torg2026'});
+    expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
+  });
+
+  it('rejects repeated link bases without selecting the first value', async () => {
+    const response = await request(app).get('/api/client-orders/b8b8cb5c-d9b9-11f1-9d3e-f6ac37589664?baseKey=torg2026&baseKey=foreign');
+    expect(response.status).toBe(400);
+    expect(getLinkedClientOrder).not.toHaveBeenCalled();
+    expect(service.getClientOrderByGuid).not.toHaveBeenCalled();
+  });
+
+  it('ordinary order navigation retains its existing manager-scoped service', async () => {
+    const guid = 'b8b8cb5c-d9b9-11f1-9d3e-f6ac37589664';
+    jest.mocked(service.getClientOrderByGuid).mockResolvedValueOnce({guid} as any);
+    const response = await request(app).get(`/api/client-orders/${guid}`);
+    expect(response.status).toBe(200);
+    expect(getLinkedClientOrder).not.toHaveBeenCalled();
+    expect(service.getClientOrderByGuid).toHaveBeenCalledWith(guid, 1);
   });
 
   it('returns manager daily summary before the dynamic order route', async () => {

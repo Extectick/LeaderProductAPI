@@ -4,11 +4,19 @@ import { KnowledgeError, knowledgeConfig, knowledgeEnabled, SOURCE_FRESH_MS } fr
 import { knowledgeActor, knowledgeSourceWhere, searchKnowledge, KnowledgeActor } from '../knowledge/knowledge.service';
 
 export type HelpKnowledgeSource = { documentId: string; versionId: string; revision: number; title: string; path: string; sourceUrl: string };
-export type HelpGroundedAnswer = { text: string; sources: HelpKnowledgeSource[]; mode: 'knowledge-excerpts' | 'openai' | 'bunny';
-  action?: { type: 'connect_onec'; baseKey?: string };
+export type HelpGroundedAnswer = { text: string; sources: HelpKnowledgeSource[]; mode: 'knowledge-excerpts' | 'openai' | 'bunny' | 't3';
+  validateAppAccess?: (db:Prisma.TransactionClient)=>Promise<void>;
+  contextSummary?: import('./help.context-store').HelpContextSummary;
+  contextRevision?: {throughSequence:number;fingerprint:string};
+  suggestions?: string[];
+  questions?: import('./help.questions').HelpAIQuestion[];
+  files?: import('./help.ai-file-contract').HelpAIFile[];
+  officeFiles?: import('./help.office-contract').HelpOfficeFile[];
+  htmlFiles?: import('./help.html').HelpHtmlFile[];
+  action?: { type: 'connect_onec'; baseKey?: string } | { type: 'request_it' };
   onecProofs?: import('../onec-personal/service').OnecProof[];
   handoffReason?: 'no_knowledge' | 'source_unavailable' | 'user_requested' | 'model_handoff';
-  generation?: { model: string; responseId: string; decision: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number } | null };
+  generation?: { model: string; responseId: string; decision: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number; reasoningTokens?: number } | null };
   validationSources?: HelpKnowledgeSource[];
 };
 export type HelpKnowledgeHit = Awaited<ReturnType<typeof searchKnowledge>>[number];
@@ -65,18 +73,28 @@ export function renderKnowledgeExcerpts(hits: Hit[]): HelpGroundedAnswer {
     return `[${index + 1}] ${source.title} · версия ${source.revision}\n${excerpts}\n\nПапка: ${source.path}`;
   });
   return { mode: 'knowledge-excerpts', sources,
-    text: 'Нашёл материалы компании по вашему вопросу. Ниже выдержки из документов; проверьте, относятся ли они к вашей ситуации.\n\n' + sections.join('\n\n────────\n\n') + '\n\nЕсли инструкция не подходит или не помогла, напишите об этом — обращение будет передано IT.' };
+    text: 'Нашёл материалы компании по вашему вопросу. Ниже выдержки из документов; проверьте, относятся ли они к вашей ситуации.\n\n' + sections.join('\n\n────────\n\n') + '\n\nЕсли инструкция не подходит или не помогла, напишите об этом — я предложу подключить IT-специалиста.' };
 }
 
 export function knowledgeHandoff(reason: NonNullable<HelpGroundedAnswer['handoffReason']>): HelpGroundedAnswer {
-  const text = reason === 'source_unavailable' ? 'Сейчас не удалось проверить актуальные инструкции компании.' : reason === 'user_requested' ? 'Подключаю специалиста IT для дальнейшего решения.' : reason === 'model_handoff' ? 'По найденным материалам недостаточно данных для надёжного решения.' : 'В доступных материалах компании не нашлось инструкции по этому вопросу.';
-  return { mode: 'knowledge-excerpts', sources: [], handoffReason: reason,
-    text: text + (reason === 'user_requested' ? '' : ' Передаю обращение в IT.') + ' Переписка и уже выполненные проверки останутся в этом обращении.' };
+  const text = reason === 'source_unavailable' ? 'Сейчас не удалось проверить актуальные инструкции компании.' : reason === 'user_requested' ? 'Могу предложить помощь IT-специалиста.' : reason === 'model_handoff' ? 'Не удалось найти надёжное решение вашего вопроса.' : 'В доступных материалах компании не нашлось инструкции по этому вопросу.';
+  return { mode: 'knowledge-excerpts', sources: [], handoffReason: reason, action: { type: 'request_it' },
+    text: text + ' Чтобы подключить IT-специалиста, нажмите кнопку под сообщением и подтвердите передачу. Переписка и уже выполненные проверки останутся в этом обращении.' };
 }
 
 export type HelpKnowledgeRetrieval = { answer: HelpGroundedAnswer } | {
   hits: Hit[]; messages: Array<{ role: 'user' | 'assistant'; text: string }>;
 };
+/** Explicit requests offer IT confirmation without a model call; questions and negations do not. */
+export function requestsHelpIT(text: string): boolean {
+  const value = text.toLowerCase().replace(/ё/g, 'е');
+  if (/(?:^|[^а-яa-z])(?:не\s+(?:надо|нужно|хочу|нужен|нужна|подключ|переда|зови)|без\s+(?:it|ит|специалиста))|(?:как|когда|зачем)\s+(?:мне\s+)?(?:подключ|позва|вызва|переда)/u.test(value)) return false;
+  // Generic specialists may be medical, emergency, warehouse or other staff.
+  // Only an explicit IT destination bypasses model interpretation.
+  const target = /(?:^|[^a-zа-я])(?:it|ит)(?:$|[^a-zа-я])|техподдержк|техническ(?:ая|ую|ой)\s+поддержк/u.test(value);
+  const request = /(?:^|[^а-я])(?:подключи(?:те)?|позови(?:те)?|вызови(?:те)?|передай(?:те)?|переда(?:ть|йте)|нужен|нужна|нужно|хочу)(?:$|[^а-я])/u.test(value);
+  return target && request;
+}
 export async function retrieveHelpKnowledge(ticketId: number, ownerId: number, context: unknown): Promise<HelpKnowledgeRetrieval> {
   if (!knowledgeEnabled()) return { answer: knowledgeHandoff('source_unavailable') };
   let actor;
@@ -84,12 +102,11 @@ export async function retrieveHelpKnowledge(ticketId: number, ownerId: number, c
     if (error instanceof KnowledgeError && error.status === 403) return { answer: knowledgeHandoff('no_knowledge') };
     throw error;
   }
-  if (!await prisma.knowledgeSource.findFirst({ where: knowledgeSourceWhere(), select: { id: true } })) return { answer: knowledgeHandoff('source_unavailable') };
   const recent = await prisma.helpMessage.findMany({ where: { ticketId, kind: 'TEXT' }, orderBy: { sequence: 'desc' }, take: 16,
     select: { text: true, authorId: true, sequence: true } });
   const latestOwner = recent.find(message => message.authorId === ownerId);
-  const earlierAnswer = recent.some(message => message.authorId === null && message.sequence < (latestOwner?.sequence || 0));
-  if (/(?:^|\s)(?:подключи(?:те)?|позови(?:те)?)\s+(?:it|ит)(?:$|\s|[.!?,])/iu.test(latestOwner?.text || '') || earlierAnswer && /(?:не помогл[оаи]|не решен[ао]?|не решён[ао]?|всё ещё не|все еще не)/iu.test(latestOwner?.text || '')) return { answer: knowledgeHandoff('user_requested') };
+  if (requestsHelpIT(latestOwner?.text || '')) return { answer: knowledgeHandoff('user_requested') };
+  if (!await prisma.knowledgeSource.findFirst({ where: knowledgeSourceWhere(), select: { id: true } })) return { answer: knowledgeHandoff('source_unavailable') };
   const first = await prisma.helpMessage.findFirst({ where: { ticketId, authorId: ownerId, kind: 'TEXT' }, orderBy: { sequence: 'asc' }, select: { text: true, sequence: true } });
   const inputs = [first, ...recent.filter(message => message.authorId === ownerId).reverse(), ...(Array.isArray(context) ? context : [])].filter(Boolean);
   // Help is visible to IT managers. Restricted documents must not be copied into a more widely visible ticket.

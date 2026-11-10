@@ -97,7 +97,7 @@ export async function searchKnowledge(query: string, actor: KnowledgeActor, limi
   const acl = actor.canManage ? Prisma.sql`TRUE` : Prisma.sql`(d."allEmployees"=true OR ${actor.userId}=ANY(d."allowedUserIds") OR d."allowedDepartmentIds" && ARRAY[${Prisma.join(actor.departmentIds.length ? actor.departmentIds : [-1])}]::int[])`;
   const coverage = relevance?.terms.length ? Prisma.sql`(SELECT count(*) FILTER (WHERE c."searchVector" @@ term)::float / greatest(count(*),1)
     FROM (SELECT DISTINCT plainto_tsquery('russian',word) || plainto_tsquery('simple',word) AS term
-      FROM unnest(ARRAY[${Prisma.join(relevance.terms)}]::text[]) word) terms)` : Prisma.sql`1.0`;
+      FROM unnest(ARRAY[${Prisma.join(relevance.terms)}]::text[]) word) terms)` : Prisma.sql`1.0::float8`;
   const required = relevance?.requiredTerms.length ? Prisma.sql`AND c."searchVector" @@ plainto_tsquery('simple',${relevance.requiredTerms.join(' ')})` : Prisma.empty;
   const rows = await prisma.$queryRaw<Array<{ chunkId: string; documentId: string; versionId: string; revision: number; title: string; path: string; text: string; score: number }>>`
     SELECT c."id" AS "chunkId",d."id" AS "documentId",v."id" AS "versionId",v."revision",d."title",d."path",c."text",ts_rank_cd(c."searchVector",q.term) AS score

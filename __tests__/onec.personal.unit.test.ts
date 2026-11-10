@@ -27,7 +27,7 @@ test('catalog rejects public plaintext endpoints, duplicate keys and multiple le
 });
 test('only bounded reads are accepted; code, writes, extra parameters and query batches are forbidden', () => {
   for (const tool of ['execute_code','save_object','post_document','toString']) expect(() => readArguments(tool, {})).toThrow('ONEC_TOOL_FORBIDDEN');
-  for (const query of ['DELETE FROM x', 'ВЫБРАТЬ ПЕРВЫЕ 101 Ссылка ИЗ Справочник.Товары', 'ВЫБРАТЬ ПЕРВЫЕ 10 Ссылка ИЗ X; ВЫБРАТЬ 1', 'SELECT TOP 10 * FROM x FOR UPDATE']) expect(() => readArguments('execute_query', { query })).toThrow('ONEC_QUERY_FORBIDDEN');
+  for (const query of ['DELETE FROM x', 'ВЫБРАТЬ ПЕРВЫЕ 1001 Ссылка ИЗ Справочник.Товары', 'ВЫБРАТЬ ПЕРВЫЕ 10 Ссылка ИЗ X; ВЫБРАТЬ 1', 'SELECT TOP 10 * FROM x FOR UPDATE']) expect(() => readArguments('execute_query', { query })).toThrow('ONEC_QUERY_FORBIDDEN');
   expect(() => readArguments('execute_query', { query: 'SELECT TOP 1 x FROM t', privilegedMode: true })).toThrow('ONEC_TOOL_ARGUMENTS');
   expect(readArguments('execute_query', { query: 'ВЫБРАТЬ ПЕРВЫЕ 7 Ссылка ИЗ Справочник.Товары' })).toMatchObject({ maxRows: 7, includeColumnTypes: false });
 });
@@ -38,7 +38,7 @@ test('MCP always uses the supplied personal Basic identity, rejects redirects an
     const req = JSON.parse(init.body);
     if (req.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: req.id, result: { protocolVersion: '2025-03-26', serverInfo: { name: '1C' } } });
     if (req.method === 'notifications/initialized') return new Response(null, { status: 204 });
-    expect(req.params.arguments).toMatchObject({ maxItems: 50 });
+    expect(req.params.arguments).toMatchObject({ maxItems: 100 });
     return Response.json({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: 'allowed data' }] } });
   });
   expect(await mcpOperation(base, 'alice', 'personal-password', { tool: 'list_metadata_objects', args: { metaType: 'Catalogs' } }, undefined, transport as any)).toEqual({ text: 'allowed data' });

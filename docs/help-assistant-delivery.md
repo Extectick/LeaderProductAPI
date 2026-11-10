@@ -78,8 +78,14 @@ An optional pushToken is accepted only when registered to the authenticated user
 kind:'chat'|'banner'}`; disposition is accepted as an alias of kind. ACK requires
 an active, unexpired session on that socket; a chat ACK requires the exact ticket.
 
-Presence alone never suppresses a push. Each notification has an ACK grace
-window after live dispatch; a matching ACK suppresses only its device token.
+Presence alone never suppresses a push. Each notification has a 2.5-second ACK
+grace window after live dispatch. A `chat` ACK suppresses that event's pushes to
+all of the user's devices while its session remains active, unexpired and on
+the exact ticket. Web sessions need no push token for this confirmation. A
+`banner` ACK only suppresses its own device token. Sessions are keyed by user
+and session, so an inactive phone does not replace an active browser session.
+Web chat presence requires a visible, focused document; blur, background and
+socket disconnect deactivate it, with the 45-second lease covering lost clients.
 Read messages suppress pending notification delivery globally. Foreground banner
 preferences are separate from OS-push preferences. Push contains ticketId,
 messageId and eventId; no provider/internal progress payload is included.

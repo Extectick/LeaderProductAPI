@@ -4,7 +4,7 @@ type MaxUpdateHandler = (update: unknown) => Promise<void> | void;
 type MaxUpdatesMode = 'auto' | 'webhook' | 'polling';
 
 const MAX_API_BASE = 'https://platform-api.max.ru';
-const DEFAULT_UPDATE_TYPES = ['message_created', 'bot_started'];
+const DEFAULT_UPDATE_TYPES = ['message_created', 'bot_started'] as const;
 const MAX_FILE_UPLOAD_TIMEOUT_MS = 30_000;
 const MAX_ATTACHMENT_READY_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000];
 
@@ -278,7 +278,8 @@ async function startMaxLongPolling(bot: Bot): Promise<{
   }
 
   await bot.start({
-    allowedUpdates: DEFAULT_UPDATE_TYPES as any,
+    mode: 'polling',
+    options: { allowedUpdates: [...DEFAULT_UPDATE_TYPES] },
   });
   pollingLaunched = true;
   return { ok: true, mode: 'polling' };

@@ -1,0 +1,10 @@
+{
+  "minimum_age_days": 7,
+  "keep_per_repository": 3,
+  "cache_max_gb": 4,
+  "deployment_lock": "/opt/leader-api-dev/deployment.lock",
+  "protected_references": [
+    "leaderproductapi:t3-dev-20261104-r2",
+    "leaderproductapi:help-questions-onec-grounded-dev-20261105"
+  ]
+}

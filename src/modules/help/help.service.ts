@@ -5,12 +5,13 @@ import prisma from '../../prisma/client';
 import { explainServiceAccessForUser } from '../../services/serviceAccess';
 import { canEditHelpMessage, canReopenHelpTicket, helpTitle, HELP_MAX_ATTACHMENTS, HELP_REACTIONS, HELP_REOPEN_MS } from './help.policy';
 import { helpDateQuery, helpHistoryQuery, helpSearchQuery, helpSyncQuery, type HelpDateQuery, type HelpHistoryQuery, type HelpSearchQuery, type HelpSyncQuery } from './help.history';
+import type {HelpClientContext} from './help.chat-context';
 
 export class HelpError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 export type HelpActor = { userId: number; canManage: boolean };
-export type HelpMessageInput = { clientMessageId: string; text?: string; attachmentIds?: string[]; replyToId?: number; forwardedFromId?: number; rating?: number };
+export type HelpMessageInput = { clientMessageId: string; text?: string; attachmentIds?: string[]; replyToId?: number; forwardedFromId?: number; rating?: number;clientContext?:HelpClientContext };
 type Tx = Prisma.TransactionClient;
 function requestHash(input:HelpMessageInput & {sourceTicketId?:number},kind='TEXT') {
   return createHash('sha256').update(JSON.stringify({kind,text:(input.text||'').trim(),attachmentIds:input.attachmentIds||[],replyToId:input.replyToId||null,forwardedFromId:input.forwardedFromId||null,rating:kind==='CLOSURE'?(input.rating??0):null,sourceTicketId:input.sourceTicketId||null})).digest('hex');
@@ -48,23 +49,30 @@ export function attachmentDto(file: { id: string; name: string; mimeType: string
 }
 async function userMap(ids: (number|null)[], db: Tx | typeof prisma = prisma) {
   const users = await db.user.findMany({ where: { id: { in: [...new Set(ids.filter((id):id is number=>id!==null))] } }, select: miniUserSelect });
-  return new Map(users.map(u => [u.id, { id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') || 'Сотрудник', avatarUrl: u.employeeProfile?.avatarUrl || u.avatarUrl }]));
+  return new Map(users.map(u => [u.id, { id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') || 'Сотрудник', itName: [u.lastName, u.firstName].filter(Boolean).join(' ') || 'Сотрудник', avatarUrl: u.employeeProfile?.avatarUrl || u.avatarUrl }]));
 }
 async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma = prisma, knownUsers?: Awaited<ReturnType<typeof userMap>>) {
   const users = knownUsers ?? await userMap(rows.flatMap(m => [m.authorId, ...(m.replyTo ? [m.replyTo.authorId] : [])]), db);
   // Status is an immutable event of this message, not the ticket's current state.
   // Read the existing journal so older closures/reopens also survive pagination.
   const statusEvents = rows.length ? await db.helpEvent.findMany({
-    where: { ticketId: { in: [...new Set<number>(rows.map(m => m.ticketId))] }, messageId: { in: rows.map(m => m.id) }, type: { in: ['TICKET_CLOSED', 'TICKET_REOPENED'] } },
+    where: { ticketId: { in: [...new Set<number>(rows.map(m => m.ticketId))] }, messageId: { in: rows.map(m => m.id) }, type: { in: ['TICKET_CLOSED', 'TICKET_REOPENED', 'IT_REQUESTED', 'IT_JOINED', 'IT_LEFT', 'AI_RESUMED'] } },
     select: { messageId: true, type: true },
   }) : [];
-  const statusByMessage = new Map(statusEvents.map(event => [event.messageId, event.type === 'TICKET_CLOSED' ? 'CLOSED' : 'REOPENED']));
-  const author = (id: number|null) => id===null ? {id:0,name:'ИИ',avatarUrl:null} : users.get(id) || { id, name: 'Сотрудник', avatarUrl: null };
+  const statusByMessage = new Map(statusEvents.filter(event=>event.type==='TICKET_CLOSED'||event.type==='TICKET_REOPENED').map(event => [event.messageId, event.type === 'TICKET_CLOSED' ? 'CLOSED' : 'REOPENED']));
+  const itStates = {IT_REQUESTED:'REQUESTED',IT_JOINED:'JOINED',IT_LEFT:'LEFT',AI_RESUMED:'AI_RESUMED'} as const;
+  const itStatusByMessage = new Map(statusEvents.filter(event=>Object.prototype.hasOwnProperty.call(itStates,event.type)).map(event=>[event.messageId,itStates[event.type as keyof typeof itStates]]));
+  const author = (id: number|null) => {
+    if(id===null)return {id:0,name:'ИИ',avatarUrl:null};
+    const user=users.get(id);
+    return user?{id:user.id,name:user.name,avatarUrl:user.avatarUrl}:{id,name:'Сотрудник',avatarUrl:null};
+  };
   return rows.map(m => {
     const reactions = new Map<string, number[]>();
     for (const r of m.reactions || []) reactions.set(r.emoji, [...(reactions.get(r.emoji) || []), r.userId]);
-    return { id: m.id, ticketId: m.ticketId, sequence: m.sequence, clientMessageId: m.clientMessageId, authorId: m.authorId ?? 0, assistantRun:m.assistantState ?? undefined, author: author(m.authorId), authorRole: m.authorRole, kind: m.kind, text: m.text, rating: m.rating, createdAt: m.createdAt, editedAt: m.editedAt, replyToId: m.replyToId, forwardedFromId: m.forwardedFromId,
+    return { id: m.id, ticketId: m.ticketId, sequence: m.sequence, clientMessageId: m.clientMessageId, authorId: m.authorId ?? 0, assistantRun:m.assistantState ?? undefined, author: ['JOINED','LEFT'].includes(itStatusByMessage.get(m.id)??'') ? {...author(m.authorId),name:m.text.replace(/ (?:подключился|отключился)$/, '')} : author(m.authorId), authorRole: m.authorRole, kind: m.kind, text: m.text, rating: m.rating, createdAt: m.createdAt, editedAt: m.editedAt, replyToId: m.replyToId, forwardedFromId: m.forwardedFromId,
       ticketStatusChange: statusByMessage.get(m.id) ?? (m.kind === 'CLOSURE' ? 'CLOSED' : null),
+      itStatusChange: itStatusByMessage.get(m.id) ?? null,
       replyTo: m.replyTo ? { id: m.replyTo.id, text: m.replyTo.text, author: author(m.replyTo.authorId), attachments: m.replyTo.attachments.map(attachmentDto) } : null,
       attachments: m.attachments.map(attachmentDto), reactions: [...reactions].map(([emoji,userIds]) => ({ emoji, count:userIds.length, mine:userIds.includes(actor.userId), userIds })) };
   });
@@ -72,7 +80,7 @@ async function mapMessages(rows: any[], actor: HelpActor, db: Tx | typeof prisma
 type MessageDto = Awaited<ReturnType<typeof mapMessages>>[number];
 function assembleTicketDto(ticket: any, actor: HelpActor, users: Awaited<ReturnType<typeof userMap>>, lastMessage: MessageDto | null, unreadCount: number, source: {id:number;title:string} | null) {
   const member = ticket.members.find((m: any) => m.userId === actor.userId);
-  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => ({userId:m.userId,role:m.role,user:users.get(m.userId),lastReadSequence:m.lastReadSequence})), unreadCount, lastReadSequence:member?.lastReadSequence || 0, lastSequence:ticket.messageSequence, lastMessage, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:helpAssistantConfiguration().enabled&&!ticket.itRequested&&!ticket.members.some((m:any)=>m.role==='IT') };
+  return { id:ticket.id, number:ticket.id, title:ticket.title, status:ticket.status, ownerId:ticket.ownerId, createdAt:ticket.createdAt, updatedAt:ticket.updatedAt, closedAt:ticket.closedAt, sourceTicketId:source?.id || null, sourceTicket:source ? {...source,number:source.id}:null, itRequested:ticket.itRequested, members:ticket.members.map((m: any) => {const user=users.get(m.userId);return {userId:m.userId,role:m.role,...(m.role==='IT'&&user?{itDisplayName:user.itName}:{}),user:user?{id:user.id,name:m.role==='IT'?user.itName:user.name,avatarUrl:user.avatarUrl}:undefined,lastReadSequence:m.lastReadSequence};}), unreadCount, lastReadSequence:member?.lastReadSequence || 0, lastSequence:ticket.messageSequence, lastMessage, canRate:ticket.ownerId===actor.userId&&ticket.status==='CLOSED'&&lastMessage?.kind==='SYSTEM'&&lastMessage?.ticketStatusChange==='CLOSED'&&lastMessage.authorId!==ticket.ownerId, canReopen:canReopenHelpTicket(ticket.status,ticket.closedAt), aiEnabled:helpAssistantConfiguration().enabled&&!ticket.itRequested&&!ticket.members.some((m:any)=>m.role==='IT') };
 }
 async function ticketDto(ticket: any, actor: HelpActor, db: Tx | typeof prisma = prisma, knownLastMessage?: MessageDto | null) {
   const users = await userMap(ticket.members.map((m: any) => m.userId), db);
@@ -124,11 +132,12 @@ export async function helpTicketSummaries(actor:HelpActor,requestedIds:number[])
 export async function listHelpTickets(actor: HelpActor, status: string, queue: boolean, cursor?: number, q?: string) {
   const query=(q||'').trim();
   if(query.length>100) throw new HelpError(400,'VALIDATION_ERROR','Поисковый запрос не должен превышать 100 символов');
+  const literal=escapeHelpSearch(query);
   const numberText=query.replace(/^#/,'');
   const number=/^\d+$/.test(numberText)?Number(numberText):0;
   const search:Prisma.HelpTicketWhereInput=query?{OR:[
-    {title:{contains:query,mode:'insensitive'}},
-    {messages:{some:{text:{contains:query,mode:'insensitive'}}}},
+    {title:{contains:literal,mode:'insensitive'}},
+    {messages:{some:{text:{contains:literal,mode:'insensitive'}}}},
     ...(Number.isSafeInteger(number)&&number>0&&number<=2147483647?[{id:number}]:[]),
   ]}:{};
   return prisma.$transaction(async db => {
@@ -182,11 +191,12 @@ export async function helpMessages(id: number, actor: HelpActor, input: number |
   return prisma.$transaction(async db => historyPage(db,await requireHelpTicket(db,id,actor),actor,query), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
 
+function escapeHelpSearch(query:string) { return query.replace(/[\\%_]/g,character=>`\\${character}`); }
 export async function searchHelpMessages(id: number, actor: HelpActor, input: Partial<HelpSearchQuery>) {
   const query = helpSearchQuery.parse(input);
   return prisma.$transaction(async db => {
     await requireHelpTicket(db,id,actor);
-    const literal = query.q.replace(/[\\%_]/g, character => `\\${character}`);
+    const literal = escapeHelpSearch(query.q);
     const where: Prisma.HelpMessageWhereInput = { ticketId: id, text: { contains: literal, mode: 'insensitive' } };
     const total = await db.helpMessage.count({ where });
     const rows = await db.helpMessage.findMany({ where: { ...where, ...(query.before !== undefined ? { sequence: { lt: query.before } } : {}) }, orderBy: { sequence: 'desc' }, take: query.limit + 1, include: messageInclude });
@@ -237,11 +247,11 @@ export async function publishHelpEvent(db:Tx,ticketId:number,actorId:number|null
   // an earlier ID committed by a slower transaction on another ticket.
   await db.$executeRaw`SELECT pg_advisory_xact_lock(181931, 0)`;
   const e=await db.helpEvent.create({data:{ticketId,actorId,type,messageId}});
-  if (['MESSAGE_CREATED','TICKET_CLOSED','TICKET_REOPENED','IT_REQUESTED','IT_JOINED'].includes(type)) {
+  if (['MESSAGE_CREATED','TICKET_CLOSED','TICKET_REOPENED','IT_REQUESTED','IT_JOINED','IT_LEFT'].includes(type)) {
     const members=await db.helpMember.findMany({where:{ticketId,...(actorId===null?{}:{userId:{not:actorId}})}});
     await db.helpNotification.createMany({data:members.map(m=>({eventId:e.id,ticketId,messageId,userId:m.userId,dueAt:new Date(Date.now()+2500)})),skipDuplicates:true});
   }
-  if(type==='TICKET_CREATED'||type==='IT_REQUESTED') {
+  if(type==='IT_REQUESTED') {
     // Resolve IT permission inheritance, without granting access based on department name.
     const roles=await db.role.findMany({select:{id:true,name:true,parentRoleId:true,permissions:{where:{permission:{name:'manage_help'}},select:{permissionId:true}}}});
     const managerRoles=new Set(roles.filter(r=>r.permissions.length||['admin','administrator'].includes(r.name)).map(r=>r.id));
@@ -251,7 +261,7 @@ export async function publishHelpEvent(db:Tx,ticketId:number,actorId:number|null
   }
   return e;
 }
-async function addMessage(db:Tx,ticketId:number,actor:HelpActor,input:HelpMessageInput,kind='TEXT') {
+async function addMessage(db:Tx,ticketId:number,actor:HelpActor,input:HelpMessageInput,kind='TEXT',eventType?:string) {
   const existing=await db.helpMessage.findUnique({where:{ticketId_authorId_clientMessageId:{ticketId,authorId:actor.userId,clientMessageId:input.clientMessageId}}});
   if (existing) { verifyRetry(existing,requestHash(input,kind)); return existing; }
   const ticket=await requireHelpTicket(db,ticketId,actor,false);
@@ -276,7 +286,7 @@ async function addMessage(db:Tx,ticketId:number,actor:HelpActor,input:HelpMessag
   // Forward metadata references the same immutable private object; each copy has its own ACL.
   for(const [index,f] of (forwarded?.attachments||[]).entries()) await db.helpAttachment.create({data:{ownerId:actor.userId,messageId:message.id,name:f.name,mimeType:f.mimeType,kind:f.kind,size:f.size,objectKey:f.objectKey,sha256:f.sha256,width:f.width,height:f.height,thumbnailDataUri:f.thumbnailDataUri,position:ids.length+index}});
   await db.helpMember.update({where:{ticketId_userId:{ticketId,userId:actor.userId}},data:{lastReadSequence:message.sequence}});
-  await publishHelpEvent(db,ticketId,actor.userId,kind==='CLOSURE'?'TICKET_CLOSED':kind==='REOPEN'?'TICKET_REOPENED':'MESSAGE_CREATED',message.id);
+  await publishHelpEvent(db,ticketId,actor.userId,eventType??(kind==='CLOSURE'?'TICKET_CLOSED':kind==='REOPEN'?'TICKET_REOPENED':'MESSAGE_CREATED'),message.id);
   return message;
 }
 export async function createHelpTicket(actor:HelpActor,input:HelpMessageInput & {clientTicketId:string;sourceTicketId?:number}) {
@@ -290,7 +300,7 @@ export async function createHelpTicket(actor:HelpActor,input:HelpMessageInput & 
     }
     const ticket=await db.helpTicket.create({data:{ownerId:actor.userId,clientTicketId:input.clientTicketId,requestHash:requestHash(input),title:helpTitle(input.text||'',!!input.attachmentIds?.length),itRequested:!helpAssistantConfiguration().enabled,sourceTicketId:input.sourceTicketId,members:{create:{userId:actor.userId,role:'OWNER'}}}});
     const first=await addMessage(db,ticket.id,actor,input);
-    await enqueueHelpAssistant(db,ticket.id,actor.userId,first.sequence);
+    await enqueueHelpAssistant(db,ticket.id,actor.userId,first.sequence,input.clientContext);
     await publishHelpEvent(db,ticket.id,actor.userId,'TICKET_CREATED');
     return ticket.id;
   });
@@ -301,8 +311,9 @@ export async function sendHelpMessage(id:number,actor:HelpActor,input:HelpMessag
     const retry=await db.helpMessage.findUnique({where:{ticketId_authorId_clientMessageId:{ticketId:id,authorId:actor.userId,clientMessageId:input.clientMessageId}}});
     if(retry) {verifyRetry(retry,requestHash(input));return;}
     if(ticket.status!=='OPEN') throw new HelpError(409,'TICKET_CLOSED','Обращение закрыто');
+    if(ticket.ownerId===actor.userId&&ticket.itRequested&&!ticket.members.some(member=>member.role==='IT')) throw new HelpError(409,'HELP_WAITING_FOR_IT','Дождитесь подключения IT-специалиста или продолжите с AI');
     const sent=await addMessage(db,id,actor,input);
-    await enqueueHelpAssistant(db,id,actor.userId,sent.sequence);
+    await enqueueHelpAssistant(db,id,actor.userId,sent.sequence,input.clientContext);
   });
 }
 export async function changeHelpStatus(id:number,actor:HelpActor,input:HelpMessageInput,action:'close'|'reopen') {
@@ -312,6 +323,16 @@ export async function changeHelpStatus(id:number,actor:HelpActor,input:HelpMessa
     const retry=await db.helpMessage.findUnique({where:{ticketId_authorId_clientMessageId:{ticketId:id,authorId:actor.userId,clientMessageId:input.clientMessageId}}});
     if(retry) {verifyRetry(retry,requestHash(input,action==='close'?'CLOSURE':'REOPEN'));return;}
     if(action==='close') {
+      if(ticket.status==='CLOSED') {
+        // IT closes without impersonating an owner's rating. A later owner
+        // feedback uses the same durable close envelope but never moves closedAt.
+        const tail=await db.helpMessage.findFirst({where:{ticketId:id},orderBy:{sequence:'desc'},select:{id:true,kind:true,authorId:true}});
+        const closing=tail?.kind==='SYSTEM'&&tail.authorId!==ticket.ownerId
+          ? await db.helpEvent.findFirst({where:{ticketId:id,messageId:tail.id,type:'TICKET_CLOSED'},select:{id:true}}):null;
+        if(!closing)throw new HelpError(409,'HELP_FEEDBACK_ALREADY_SENT','Оценка уже сохранена');
+        await addMessage(db,id,actor,input,'CLOSURE','MESSAGE_CREATED');
+        return;
+      }
       if(ticket.status!=='OPEN') throw new HelpError(409,'TICKET_CLOSED','Обращение уже закрыто');
       await addMessage(db,id,actor,input,'CLOSURE');
       await db.helpTicket.update({where:{id},data:{status:'CLOSED',closedAt:new Date()}});
@@ -358,15 +379,69 @@ export async function reactHelpMessage(id:number,actor:HelpActor,emoji:string,re
     await publishHelpEvent(db,message.ticketId,actor.userId,'REACTIONS_UPDATED',id);
   }); return message.ticketId;
 }
+/** System rows share the normal sequence and journal, so pagination and reconnects preserve the handoff. */
+async function addItStatus(db:Tx,id:number,actor:HelpActor,type:'IT_REQUESTED'|'IT_JOINED'|'IT_LEFT'|'AI_RESUMED'|'TICKET_CLOSED') {
+  let text=type==='IT_REQUESTED'?'Вызван IT-специалист':'Продолжаем с AI';
+  if(type==='IT_JOINED'||type==='IT_LEFT'||type==='TICKET_CLOSED') {
+    const user=await db.user.findUnique({where:{id:actor.userId},select:{lastName:true,firstName:true}});
+    text=`${[user?.lastName,user?.firstName].filter(Boolean).join(' ')||'IT-специалист'} ${type==='IT_LEFT'?'отключился':type==='TICKET_CLOSED'?'закрыл обращение':'подключился'}`;
+  }
+  const ticket=await db.helpTicket.update({where:{id},data:{messageSequence:{increment:1},updatedAt:new Date()}});
+  const message=await db.helpMessage.create({data:{ticketId:id,authorId:actor.userId,authorRole:'SYSTEM',kind:'SYSTEM',sequence:ticket.messageSequence,
+    clientMessageId:`system:${type}:${ticket.messageSequence}`,requestHash:createHash('sha256').update(`${type}:${actor.userId}:${ticket.messageSequence}`).digest('hex'),text}});
+  await publishHelpEvent(db,id,actor.userId,type,message.id);
+}
 export async function helpItAction(id:number,actor:HelpActor,claim:boolean) {
   await helpTransaction(id,async db=>{
     const t=await requireHelpTicket(db,id,actor,claim);
     if(t.status!=='OPEN') throw new HelpError(409,'TICKET_CLOSED','Обращение закрыто');
+    if(claim&&t.ownerId===actor.userId)throw new HelpError(403,'HELP_FORBIDDEN','Автор обращения не может подключиться как IT-специалист');
     if(claim&&!actor.canManage) throw new HelpError(403,'HELP_FORBIDDEN','Требуется право специалиста IT');
+    if(!claim&&(t.itRequested||t.members.some(member=>member.role==='IT')))return;
+    if(claim&&t.members.some(member=>member.userId===actor.userId&&member.role==='IT'))return;
+    // A specialist may take over an OPEN AI conversation at any time.
+    // The ticket lock and cancelHelpAssistant fence already-running AI chunks.
     if(claim) await db.helpMember.upsert({where:{ticketId_userId:{ticketId:id,userId:actor.userId}},create:{ticketId:id,userId:actor.userId,role:'IT'},update:{}});
     await db.helpTicket.update({where:{id},data:{itRequested:true}});
     await cancelHelpAssistant(db,id,'handoff');
-    await publishHelpEvent(db,id,actor.userId,claim?'IT_JOINED':'IT_REQUESTED');
+    await addItStatus(db,id,actor,claim?'IT_JOINED':'IT_REQUESTED');
+  });
+}
+export async function leaveHelpIt(id:number,actor:HelpActor) {
+  await helpTransaction(id,async db=>{
+    const t=await requireHelpTicket(db,id,actor,true);
+    if(!actor.canManage||t.ownerId===actor.userId)throw new HelpError(403,'HELP_FORBIDDEN','Покинуть чат может подключённый IT-специалист');
+    if(t.status!=='OPEN')throw new HelpError(409,'TICKET_CLOSED','Обращение закрыто');
+    if(!t.members.some(member=>member.userId===actor.userId&&member.role==='IT'))return;
+    await db.helpMember.delete({where:{ticketId_userId:{ticketId:id,userId:actor.userId}}});
+    const hasOtherIt=t.members.some(member=>member.role==='IT'&&member.userId!==actor.userId);
+    if(!hasOtherIt)await db.helpTicket.update({where:{id},data:{itRequested:false}});
+    await addItStatus(db,id,actor,'IT_LEFT');
+    // With no IT members, the next owner message follows normal AI enqueue.
+  });
+}
+export async function closeHelpByIt(id:number,actor:HelpActor) {
+  await helpTransaction(id,async db=>{
+    const t=await requireHelpTicket(db,id,actor,false);
+    if(!actor.canManage||!t.members.some(member=>member.userId===actor.userId&&member.role==='IT'))throw new HelpError(403,'HELP_FORBIDDEN','Закрыть чат может подключённый IT-специалист');
+    if(t.status==='CLOSED')return;
+    await db.helpTicket.update({where:{id},data:{status:'CLOSED',closedAt:new Date()}});
+    await cancelHelpAssistant(db,id,'closed');
+    await addItStatus(db,id,actor,'TICKET_CLOSED');
+  });
+}
+export async function continueHelpWithAi(id:number,actor:HelpActor) {
+  await helpTransaction(id,async db=>{
+    const t=await requireHelpTicket(db,id,actor,false);
+    if(t.ownerId!==actor.userId)throw new HelpError(403,'HELP_FORBIDDEN','Продолжить с AI может только автор обращения');
+    if(t.status!=='OPEN')throw new HelpError(409,'TICKET_CLOSED','Обращение закрыто');
+    if(t.members.some(member=>member.role==='IT'))throw new HelpError(409,'HELP_IT_ALREADY_JOINED','IT-специалист уже подключился');
+    if(!helpAssistantConfiguration().enabled)throw new HelpError(409,'HELP_AI_DISABLED','AI сейчас недоступен');
+    if(!t.itRequested)return;
+    await db.helpTicket.update({where:{id},data:{itRequested:false}});
+    await addItStatus(db,id,actor,'AI_RESUMED');
+    // Do not replay an old prompt or create an unsolicited reply. The next
+    // ordinary owner message follows the existing assistant enqueue path.
   });
 }
 export async function readHelpTicket(id:number,actor:HelpActor,sequence?:number) {
@@ -374,6 +449,7 @@ export async function readHelpTicket(id:number,actor:HelpActor,sequence?:number)
     const t=await requireHelpTicket(db,id,actor,false);
     const member=t.members.find(m=>m.userId===actor.userId)!;
     const requested=Math.min(sequence??t.messageSequence,t.messageSequence);
+    if(requested<=member.lastReadSequence) return false;
     // Progress later becomes an answer at the same sequence: seeing progress must not read the future answer.
     const lastReadable=await db.helpMessage.findFirst({where:{ticketId:id,sequence:{lte:requested},kind:{not:'ASSISTANT_PROGRESS'}},orderBy:{sequence:'desc'},select:{sequence:true}});
     const value=Math.max(member.lastReadSequence,lastReadable?.sequence??0);
@@ -384,9 +460,25 @@ export async function readHelpTicket(id:number,actor:HelpActor,sequence?:number)
   });
 }
 export async function readAllHelp(actor:HelpActor) {
-  const members=await prisma.helpMember.findMany({where:{userId:actor.userId,...(actor.canManage?{}:{role:'OWNER'})},include:{ticket:true}});
   const changed: number[] = [];
-  for(const m of members) if (await readHelpTicket(m.ticketId,actor,m.ticket.messageSequence)) changed.push(m.ticketId);
+  let after=0;
+  // Keep the snapshot bounded by the tickets that existed at request start.
+  // New messages are still checked under each ticket's normal lock below.
+  const upper=(await prisma.helpMember.findFirst({where:{userId:actor.userId,...(actor.canManage?{}:{role:'OWNER'})},orderBy:{ticketId:'desc'},select:{ticketId:true}}))?.ticketId??0;
+  while(after<upper) {
+    const members=await prisma.$queryRaw<Array<{ticketId:number;messageSequence:number}>>(Prisma.sql`
+      SELECT m."ticketId",t."messageSequence" FROM "HelpMember" m
+      JOIN "HelpTicket" t ON t.id=m."ticketId"
+      WHERE m."userId"=${actor.userId} AND m."ticketId">${after} AND m."ticketId"<=${upper}
+        ${actor.canManage?Prisma.empty:Prisma.sql`AND m.role='OWNER'`}
+        AND t."messageSequence">m."lastReadSequence"
+        AND EXISTS (SELECT 1 FROM "HelpMessage" msg WHERE msg."ticketId"=m."ticketId"
+          AND msg.sequence>m."lastReadSequence" AND msg.kind<>'ASSISTANT_PROGRESS')
+      ORDER BY m."ticketId" LIMIT 100`);
+    if(!members.length)break;
+    for(const m of members) if(await readHelpTicket(m.ticketId,actor,m.messageSequence))changed.push(m.ticketId);
+    after=members[members.length-1].ticketId;
+  }
   return changed;
 }
 export async function replayHelp(actor:HelpActor,after:number) {

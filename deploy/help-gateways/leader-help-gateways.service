@@ -1,0 +1,13 @@
+[Unit]
+Description=Leader Help private gateway diagnostics
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/python3 /home/extectick/.local/share/leader-help-gateways/executor.py
+Restart=on-failure
+RestartSec=3
+UMask=0007
+NoNewPrivileges=yes
+MemoryMax=128M
+TasksMax=32
+[Install]
+WantedBy=default.target

@@ -3,6 +3,7 @@ import { Profile } from '../types/userTypes';
 import { getPresenceForUsers } from './presenceService';
 import { resolveObjectUrl } from '../storage/minio';
 import { toApiPhoneString } from '../utils/phone';
+import { profileAvatarAsset } from './avatarService';
 
 export const userServicePrisma = prisma;
 
@@ -49,6 +50,7 @@ export const getProfile = async (userId: number): Promise<Profile> => {
   const isOnline = presence[0]?.isOnline ?? false;
   const lastSeenAt = user.lastSeenAt ?? null;
 
+  const resolvedUserAvatar = await resolveObjectUrl(user.avatarUrl ?? null);
   const resolvedClientAvatar = await resolveObjectUrl(user.clientProfile?.avatarUrl ?? null);
   const resolvedSupplierAvatar = await resolveObjectUrl(user.supplierProfile?.avatarUrl ?? null);
   const resolvedEmployeeAvatar = await resolveObjectUrl(user.employeeProfile?.avatarUrl ?? null);
@@ -63,11 +65,12 @@ export const getProfile = async (userId: number): Promise<Profile> => {
   }));
 
   // Преобразуем профили клиента/поставщика в предсказуемую форму
-  const transformProfile = (profile: any, avatarUrl: string | null) =>
+  const transformProfile = (profile: any, avatarUrl: string | null, type: 'CLIENT'|'SUPPLIER') =>
     profile
       ? {
           id: profile.id,
           avatarUrl,
+          ...profileAvatarAsset(user.id,type,profile.avatarUrl),
           lastSeenAt,
           isOnline,
           status: profile.status,
@@ -135,6 +138,7 @@ export const getProfile = async (userId: number): Promise<Profile> => {
     ? {
         id: user.employeeProfile.id,
         avatarUrl: resolvedEmployeeAvatar,
+        ...profileAvatarAsset(user.id,'EMPLOYEE',user.employeeProfile.avatarUrl),
         lastSeenAt,
         isOnline,
         status: user.employeeProfile.status,
@@ -157,12 +161,14 @@ export const getProfile = async (userId: number): Promise<Profile> => {
 
   const activeAvatarUrl =
     user.currentProfileType === 'CLIENT'
-      ? resolvedClientAvatar
+      ? resolvedClientAvatar || resolvedUserAvatar
       : user.currentProfileType === 'SUPPLIER'
-      ? resolvedSupplierAvatar
+      ? resolvedSupplierAvatar || resolvedUserAvatar
       : user.currentProfileType === 'EMPLOYEE'
-      ? resolvedEmployeeAvatar
-      : null;
+      ? resolvedEmployeeAvatar || resolvedUserAvatar
+      : resolvedUserAvatar;
+  const activeRaw = user.currentProfileType === 'CLIENT' ? user.clientProfile?.avatarUrl : user.currentProfileType === 'SUPPLIER' ? user.supplierProfile?.avatarUrl : user.currentProfileType === 'EMPLOYEE' ? user.employeeProfile?.avatarUrl : null;
+  const activeAsset = profileAvatarAsset(user.id,activeRaw ? user.currentProfileType! : 'USER',activeRaw || user.avatarUrl);
 
   const profile: Profile = {
       id: user.id,
@@ -184,14 +190,15 @@ export const getProfile = async (userId: number): Promise<Profile> => {
         passwordLoginPendingVerification: Boolean(user.email && user.passwordHash && !user.isActive),
       },
       avatarUrl: activeAvatarUrl,
+      ...activeAsset,
       lastSeenAt,
       isOnline,
       profileStatus: user.profileStatus,
       currentProfileType: user.currentProfileType,
       role: user.role,
       departmentRoles,
-      clientProfile: transformProfile(user.clientProfile, resolvedClientAvatar),
-      supplierProfile: transformProfile(user.supplierProfile, resolvedSupplierAvatar),
+      clientProfile: transformProfile(user.clientProfile, resolvedClientAvatar, 'CLIENT'),
+      supplierProfile: transformProfile(user.supplierProfile, resolvedSupplierAvatar, 'SUPPLIER'),
       employeeProfile: employeeProfile
   };
 

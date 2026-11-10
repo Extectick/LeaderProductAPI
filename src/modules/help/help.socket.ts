@@ -14,6 +14,7 @@ const liveSubscriber=(socket:DeliverySocket)=>socket.data.helpSubscribed&&validI
 /** Deduplicate only transport deliveries, never cache authorization across events. */
 const recentDeliveries=new Map<number,{at:number;sockets:Set<string>}>();
 const eventJobs=new Map<number,Promise<void>>();
+const ticketPublications=new Map<number,{again:boolean;work:Promise<void>}>();
 async function recipientSockets(io:Server,ids:number[]) {
   if(!ids.length)return [];
   // One local adapter lookup also deduplicates sessions that share several rooms.
@@ -62,14 +63,36 @@ async function deliverEvent(event:any,repeat=false):Promise<void> {
   eventJobs.set(event.id,work);
   try{await work;}finally{if(eventJobs.get(event.id)===work)eventJobs.delete(event.id);}
 }
-export async function publishHelpUpdates(ticketId:number) {
-  const event=await prisma.helpEvent.findFirst({where:{ticketId},orderBy:{id:'desc'}});
-  if(event) await deliverEvent(event);
+export function publishHelpUpdates(ticketId:number):Promise<void> {
+  const pending=ticketPublications.get(ticketId);
+  if(pending){pending.again=true;return pending.work;}
+  const job={again:false,work:Promise.resolve()};
+  // Each call is only a wakeup. While delivery is busy, merge further wakeups
+  // and then fetch the newest committed event. REST replay retains every event.
+  job.work=Promise.resolve().then(async()=>{
+    do {
+      job.again=false;
+      const event=await prisma.helpEvent.findFirst({where:{ticketId},orderBy:{id:'desc'}});
+      if(event)await deliverEvent(event);
+    }while(job.again);
+  }).finally(()=>{if(ticketPublications.get(ticketId)===job)ticketPublications.delete(ticketId);});
+  ticketPublications.set(ticketId,job);
+  return job.work;
+}
+export async function publishHelpUpdatesBatch(ids:number[]) {
+  let next=0;
+  await Promise.all(Array.from({length:Math.min(4,ids.length)},async()=>{
+    while(next<ids.length){
+      const id=ids[next++];
+      await publishHelpUpdates(id).catch(error=>console.warn('[help] live delivery deferred',{code:error?.code}));
+    }
+  }));
 }
 export function registerHelpSocket(io:Server,socket:Socket) {
   helpIo=io;
   const userId=Number(socket.data.user?.userId);
   let lastTypingAt=0;
+  let lastTypingTicket:number|undefined,lastTypingState:boolean|undefined;
   const check=async()=>{
     if(socket.data.user?.exp&&Date.now()>=socket.data.user.exp*1000) throw new Error('Expired');
     return helpActor(userId);
@@ -92,8 +115,12 @@ export function registerHelpSocket(io:Server,socket:Socket) {
   socket.on('disconnect',()=>{void prisma.helpSession.updateMany({where:{userId,socketId:socket.id},data:{active:false,ticketId:null,expiresAt:new Date()}}).catch(()=>{});});
   socket.on('help:typing',async(payload:any)=>{
     if(!payload||!validId(payload.ticketId)||typeof payload.typing!=='boolean') return;
-    if(Date.now()-lastTypingAt<700&&payload.typing) return;
+    // Deliver true -> false immediately, but suppress repeated stop packets.
+    // Recheck false after the throttle window so a transient delivery failure
+    // never suppresses that state forever.
+    if(Date.now()-lastTypingAt<700&&(payload.typing||lastTypingState===false&&lastTypingTicket===payload.ticketId)) return;
     lastTypingAt=Date.now();
+    lastTypingState=payload.typing;lastTypingTicket=payload.ticketId;
     try {
       const actor=await check();
       const ticket=await requireHelpTicket(prisma,payload.ticketId,actor,false);
@@ -109,7 +136,15 @@ async function pumpHelpEvents() {
   if(polling) return; polling=true;
   try {
     const events=await prisma.helpEvent.findMany({where:{id:{gt:eventCursor}},orderBy:{id:'asc'},take:200});
-    for(const event of events) {await deliverEvent(event);eventCursor=event.id;}
+    const latestAssistant=new Map<string,number>();
+    for(const event of events)if(event.type==='ASSISTANT_UPDATED'&&event.messageId!==null&&event.messageId!==undefined)latestAssistant.set(`${event.ticketId}:${event.messageId}`,event.id);
+    for(const event of events) {
+      // Only transport wakeups are coalesced. Never edit the journal, skip final
+      // events, or advance a cursor past a delivery that failed.
+      const superseded=event.type==='ASSISTANT_UPDATED'&&event.messageId!==null&&event.messageId!==undefined&&latestAssistant.get(`${event.ticketId}:${event.messageId}`)!==event.id;
+      if(!superseded)await deliverEvent(event);
+      eventCursor=event.id;
+    }
   } catch(error:any) { console.error('[help] event delivery retry',{code:error?.code,name:error?.name}); }
   finally {polling=false;}
 }

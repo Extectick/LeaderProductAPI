@@ -6334,6 +6334,9 @@ async function copyStoredClientOrder(guid: string, userId: number) {
       select: {
         guid: true,
         revision: true,
+        last1cSnapshot: true,
+        clientOrderId: true,
+        syncState: true,
         counterpartyId: true,
         agreementId: true,
         contractId: true,
@@ -6371,6 +6374,12 @@ async function copyStoredClientOrder(guid: string, userId: number) {
       },
     });
     if (!source) return null;
+    // Invoice bookkeeping has no authoritative rows/header. Use the normal
+    // authorized detail reader and materialization path for these 1C orders.
+    if (!source.items.length) {
+      if (isInvoiceShadowOrder({ ...source, items: [] })) return null;
+      throw new ClientOrdersError(400, ErrorCodes.VALIDATION_ERROR, 'Нельзя скопировать заказ без товаров');
+    }
     const copiedAt = now();
     const copiedGuid = randomUUID();
     const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);

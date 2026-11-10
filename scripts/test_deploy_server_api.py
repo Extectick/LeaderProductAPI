@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 
 spec = importlib.util.spec_from_file_location('release', Path(__file__).with_name('deploy-server-api.py'))
 release = importlib.util.module_from_spec(spec)
@@ -28,5 +29,21 @@ class TargetGuardTests(unittest.TestCase):
     def test_wrong_mode_rejected(self):
         env = self.env('dev'); env['NODE_ENV'] = 'production'
         with self.assertRaises(RuntimeError): release.validate_target('dev', env)
+
+    def test_t3_binding_overrides_bunny_and_never_applies_to_prod(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.assertEqual(release.help_binding_files('dev', root), [])
+            for name in ['help-bunny.private.json', 'help-t3.private.json']:
+                (root / name).write_text('{}')
+            self.assertEqual([p.name for p in release.help_binding_files('dev', root)],
+                             ['help-bunny.private.json', 'help-t3.private.json'])
+            self.assertEqual(release.help_binding_files('prod', root), [])
+            (root / 'help-bunny.private.json').unlink()
+            self.assertEqual([p.name for p in release.help_binding_files('dev', root)], ['help-t3.private.json'])
+            (root / 'help-openai.private.json').write_text('{}')
+            self.assertEqual([p.name for p in release.help_binding_files('dev', root)],
+                             ['help-t3.private.json', 'help-openai.private.json'])
+            self.assertEqual(release.help_binding_files('prod', root), [])
 
 if __name__ == '__main__': unittest.main()

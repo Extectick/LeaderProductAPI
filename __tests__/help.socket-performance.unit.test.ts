@@ -1,10 +1,10 @@
-jest.mock('../src/prisma/client',()=>({__esModule:true,default:{helpMember:{findMany:jest.fn()},helpEvent:{findFirst:jest.fn(),findMany:jest.fn(),findUnique:jest.fn()},helpNotification:{findMany:jest.fn(),updateMany:jest.fn(),update:jest.fn()},role:{findMany:jest.fn()},user:{findMany:jest.fn(),findUnique:jest.fn()}},pool:{connect:jest.fn()}}));
+jest.mock('../src/prisma/client',()=>({__esModule:true,default:{helpSession:{updateMany:jest.fn(async()=>({count:1}))},helpMember:{findMany:jest.fn()},helpEvent:{findFirst:jest.fn(),findMany:jest.fn(),findUnique:jest.fn()},helpNotification:{findMany:jest.fn(),updateMany:jest.fn(),update:jest.fn()},role:{findMany:jest.fn()},user:{findMany:jest.fn(),findUnique:jest.fn()}},pool:{connect:jest.fn()}}));
 jest.mock('../src/modules/help/help.service',()=>({helpActor:jest.fn(),requireHelpTicket:jest.fn()}));
 jest.mock('../src/modules/help/help.delivery',()=>({acknowledgeHelpNotification:jest.fn(),deliverHelpNotification:jest.fn(),maintainHelpDelivery:jest.fn(),updateHelpPresence:jest.fn()}));
 import prisma,{pool} from '../src/prisma/client';
 import {deliverHelpNotification} from '../src/modules/help/help.delivery';
 import {helpActor,requireHelpTicket} from '../src/modules/help/help.service';
-import {registerHelpSocket,publishHelpUpdates,pumpHelp} from '../src/modules/help/help.socket';
+import {registerHelpSocket,publishHelpUpdates,publishHelpUpdatesBatch,pumpHelp} from '../src/modules/help/help.socket';
 const db=prisma as any;
 let eventId=100;
 function session(id:string,userId:number,extra:any={}){return {id,data:{helpSubscribed:true,user:{userId,...extra}},emit:jest.fn(),on:jest.fn(),join:jest.fn(),leave:jest.fn()};}
@@ -98,8 +98,86 @@ test('notification acknowledgement retry deliberately re-emits an already publis
  expect(a.emit).toHaveBeenCalledTimes(2);expect(helpActor).toHaveBeenCalledTimes(2);
  expect(deliverHelpNotification).not.toHaveBeenCalled();expect(connection.release).toHaveBeenCalledTimes(1);
 });
+test('disconnect deactivates only sessions on that socket, leaving another device active',async()=>{
+ const {handlers}=setup([]);handlers.get('disconnect')!();
+ expect(db.helpSession.updateMany).toHaveBeenCalledWith({where:{userId:1,socketId:'owner'},data:{active:false,ticketId:null,expiresAt:expect.any(Date)}});
+});
 test('overlapping publishers do not duplicate a delivery',async()=>{
  const a=session('a8',2);setup([a]);
  await Promise.all([publishHelpUpdates(7),publishHelpUpdates(7)]);
  expect(a.emit).toHaveBeenCalledTimes(1);expect(helpActor).toHaveBeenCalledTimes(1);
+});
+test('a burst during delivery merges into one trailing fetch of the latest committed update',async()=>{
+ const a=session('burst',2);setup([a]);
+ let release!:()=>void,started!:()=>void;
+ const blocked=new Promise<void>(resolve=>{release=resolve;});
+ const entered=new Promise<void>(resolve=>{started=resolve;});
+ (requireHelpTicket as jest.Mock).mockImplementationOnce(async()=>{started();await blocked;return {};});
+ const first=publishHelpUpdates(7);await entered;
+ eventId++;
+ const rest=Array.from({length:20},()=>publishHelpUpdates(7));
+ release();await Promise.all([first,...rest]);
+ expect(db.helpEvent.findFirst).toHaveBeenCalledTimes(2);
+ expect(a.emit).toHaveBeenCalledTimes(2);
+ expect(a.emit.mock.calls[a.emit.mock.calls.length-1]?.[1].id).toBe(eventId);
+ // A new delivery still resolves current authorization; none is cached.
+ expect(helpActor).toHaveBeenCalledTimes(2);
+});
+test('poll coalesces only intermediate updates of the same message, preserving finals and other tickets',async()=>{
+ const a=session('poll-coalesce',2);setup([a]);
+ const base=eventId+10000;
+ db.helpEvent.findMany.mockResolvedValueOnce([
+  {id:base,ticketId:7,type:'ASSISTANT_UPDATED',messageId:30},
+  {id:base+1,ticketId:8,type:'ASSISTANT_UPDATED',messageId:31},
+  {id:base+2,ticketId:7,type:'ASSISTANT_UPDATED',messageId:30},
+  {id:base+3,ticketId:7,type:'MESSAGE_UPDATED',messageId:30},
+ ]);
+ await pumpHelp();
+ expect(a.emit.mock.calls.map(row=>row[1].id)).toEqual([base+1,base+2,base+3]);
+ expect(helpActor).toHaveBeenCalledTimes(3);
+ db.helpEvent.findMany.mockResolvedValue([]);await pumpHelp();
+ expect(db.helpEvent.findMany.mock.calls[db.helpEvent.findMany.mock.calls.length-1]?.[0].where.id).toEqual({gt:base+3});
+});
+test('null-message events are never coalesced and failed delivery retains the retry boundary',async()=>{
+ const a=session('poll-retry',2);setup([a]);
+ const base=eventId+20000;
+ db.helpEvent.findMany.mockResolvedValueOnce([
+  {id:base,ticketId:7,type:'ASSISTANT_UPDATED',messageId:null},
+  {id:base+1,ticketId:7,type:'MESSAGE_UPDATED',messageId:30},
+ ]);
+ db.helpMember.findMany.mockRejectedValueOnce(new Error('DB unavailable'));
+ const warning=jest.spyOn(console,'error').mockImplementation(()=>{});
+ await pumpHelp();
+ db.helpEvent.findMany.mockResolvedValue([]);await pumpHelp();
+ expect(db.helpEvent.findMany.mock.calls[db.helpEvent.findMany.mock.calls.length-1]?.[0].where.id.gt).toBeLessThan(base);
+ expect(a.emit).not.toHaveBeenCalled();warning.mockRestore();
+});
+test('stop typing is immediate after start, repeated stop packets are deduplicated',async()=>{
+ const a=session('typing-stop',2);const {handlers}=setup([a]);
+ await handlers.get('help:typing')!({ticketId:7,typing:true});
+ await handlers.get('help:typing')!({ticketId:7,typing:false});
+ await handlers.get('help:typing')!({ticketId:7,typing:false});
+ expect(a.emit.mock.calls.map(row=>row[1].typing)).toEqual([true,false]);
+ expect(helpActor).toHaveBeenCalledTimes(4); // sender + recipient for each transition
+});
+test('read-all wakeup batches cap in-flight publications at four and continue after failure',async()=>{
+ setup([]);
+ let active=0,peak=0;
+ const releases:Array<()=>void>=[];
+ db.helpEvent.findFirst.mockImplementation(async({where}:any)=>{
+  active++;peak=Math.max(peak,active);
+  await new Promise<void>(resolve=>{releases.push(resolve);});active--;
+  if(where.ticketId===3)throw new Error('transient');
+  return null;
+ });
+ const warning=jest.spyOn(console,'warn').mockImplementation(()=>{});
+ const batch=publishHelpUpdatesBatch(Array.from({length:11},(_,index)=>index+1));
+ // Drain each admitted group, allowing its replacements to enter.
+ for(let turn=0;turn<20;turn++){
+  await Promise.resolve();await Promise.resolve();await Promise.resolve();
+  for(const release of releases.splice(0))release();
+ }
+ await batch;
+ expect(peak).toBe(4);expect(db.helpEvent.findFirst).toHaveBeenCalledTimes(11);
+ expect(warning).toHaveBeenCalledTimes(1);warning.mockRestore();
 });

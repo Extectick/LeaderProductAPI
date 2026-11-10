@@ -5,7 +5,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.authPrisma = void 0;
 exports.authenticateToken = authenticateToken;
+exports.getRoleHierarchyByName = getRoleHierarchyByName;
 exports.authorizeRoles = authorizeRoles;
+exports.computeUserPermissions = computeUserPermissions;
 exports.authorizePermissions = authorizePermissions;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const client_1 = __importDefault(require("../prisma/client"));

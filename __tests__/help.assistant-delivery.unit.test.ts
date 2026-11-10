@@ -8,11 +8,22 @@ afterEach(()=>{process.env={...original};});
 test('foreground without this event ACK never suppresses a push',()=>{
  expect(helpNotificationSuppressed('token-a',[],[{sessionId:'open',deviceId:'token-a'}])).toBe(false);
 });
-test('notification ACK suppresses only the mapped device, not other phones',()=>{
+test('legacy or banner ACK suppresses only the mapped device, not other phones',()=>{
  const sessions=[{sessionId:'open',deviceId:'token-a'},{sessionId:'other',deviceId:'token-b'}];
  expect(helpNotificationSuppressed('token-a',[{sessionId:'open'}],sessions)).toBe(true);
  expect(helpNotificationSuppressed('token-b',[{sessionId:'open'}],sessions)).toBe(false);
  expect(helpNotificationSuppressed('token-a',[{sessionId:'missing'}],sessions)).toBe(false);
+});
+test('fresh chat ACK suppresses other phones even when the viewing web session has no push token',()=>{
+ const now=1000,sessions=[{sessionId:'web',deviceId:'browser-installation',active:true,ticketId:7,expiresAt:new Date(now+45000)}];
+ expect(helpNotificationSuppressed('phone',[{sessionId:'web',kind:'chat'}],sessions,7,now)).toBe(true);
+ expect(helpNotificationSuppressed('tablet',[{sessionId:'web',kind:'chat'}],sessions,7,now)).toBe(true);
+ expect(helpNotificationSuppressed('phone',[{sessionId:'web',kind:'banner'}],sessions,7,now)).toBe(false);
+ expect(helpNotificationSuppressed('phone',[],sessions,7,now)).toBe(false);
+});
+test.each(['expired','inactive','other-ticket','missing-session','missing-ticket-context'])('a %s viewing session cannot suppress another device',reason=>{
+ const now=1000,session={sessionId:'web',deviceId:'browser-installation',active:reason!=='inactive',ticketId:reason==='other-ticket'?8:7,expiresAt:new Date(reason==='expired'?now:now+45000)};
+ expect(helpNotificationSuppressed('phone',[{sessionId:'web',kind:'chat'}],reason==='missing-session'?[]:[session],reason==='missing-ticket-context'?undefined:7,now)).toBe(false);
 });
 test('server simulator requires explicit opt-in and cannot activate in production',()=>{
  process.env.HELP_AI_PROVIDER='simulator';process.env.HELP_AI_ENABLED='false';

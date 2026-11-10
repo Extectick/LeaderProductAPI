@@ -16,7 +16,8 @@ type PushPayload = {
   ttl?: number;
 };
 
-export async function sendPushToUser(userId: number, payload: PushPayload, options?: {includeTokens?:string[]}) {
+export async function sendPushToUser(userId: number, payload: PushPayload, options?: {includeTokens?:string[];client?:Expo}) {
+  const client = options?.client ?? expo;
   const tokens = await prisma.deviceToken.findMany({
     where: { userId },
   });
@@ -40,13 +41,13 @@ export async function sendPushToUser(userId: number, payload: PushPayload, optio
     ...(typeof payload.ttl === 'number' ? { ttl: payload.ttl } : {}),
   }));
 
-  const chunks = expo.chunkPushNotifications(messages);
+  const chunks = client.chunkPushNotifications(messages);
   const tickets: ExpoPushTicket[] = [];
   const invalidTokens: string[] = [];
 
   for (const chunk of chunks) {
     try {
-      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      const ticketChunk = await client.sendPushNotificationsAsync(chunk);
       tickets.push(...ticketChunk);
       ticketChunk.forEach((ticket, index) => {
         if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {

@@ -32,6 +32,26 @@ Selection rules:
 - If `expo-current-update-id` already equals the selected update id, API returns `204`.
 - Manifest `metadata.displayVersion` contains the human-readable runtime version, for example `v0.1.12+11.ota.2`.
 
+The public manifest's `launchAsset.key` and `assets[].key` are **local cache
+identifiers**, not S3 paths. For Metro assets the API preserves the MD5 file
+hash from the object basename, so `expo-asset` can find images and fonts in
+`ExpoUpdates.localAssets`. Other keys, including `bundle.hbc`, become the
+SHA-256 hex digest of the stored object key. Download URLs still resolve the original S3 paths and
+`hash` still verifies the downloaded bytes. Expo SDK 58 builds local filenames
+from `key + fileExtension` and rejects `/`, `\`, NUL, `.` and `..`. Passing an
+S3 path as the manifest key makes the installed APK reject the update before
+downloading it, even when the endpoint and all asset URLs return HTTP 200.
+
+On 2026-11-04 this caused APK 0.1.46 (build 45) to stay on embedded 0.1.46.0
+despite published OTA 0.1.46.3. The dev server fix is
+`leaderproductapi:ota-filename-dev-20261104-r2`, layered on the active
+`leaderproductapi:help-behavior-dev-20261104`; only `dist/routes/ota.js` changed.
+API and Help worker use the same image. No APK rebuild, OTA republication,
+storage rewrite or database change is required. The regression test in
+`__tests__/ota.manifest.unit.test.ts` exercises the real HTTP route, safe
+filenames, distinct objects with the same basename, stable identifiers and
+preservation of URLs and content hashes.
+
 ## Admin Endpoints
 
 All admin endpoints require bearer auth and `manage_updates`.

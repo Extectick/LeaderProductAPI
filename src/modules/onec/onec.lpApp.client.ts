@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { canonicalOrderWriteBody } from './onec.orderWriteBody';
+import {assertNoSharedOnecForHelpApi,HelpAppApiPersonalOnecRequiredError} from '../../lib/helpAppApiContext';
 const backgroundRequests = new AsyncLocalStorage<boolean>();
 /** Slow reference validation is allowed in a worker, never on the phone intake path. */
 export function withBackgroundOnecRequests<T>(operation: () => Promise<T>) { return backgroundRequests.run(true, operation); }
@@ -37,6 +38,18 @@ export class OnecLpAppConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'OnecLpAppConfigError';
+  }
+}
+
+function assertSharedOnecAllowed():void {
+  try{assertNoSharedOnecForHelpApi();}
+  catch(error){
+    if(error instanceof HelpAppApiPersonalOnecRequiredError){
+      // The existing cache/circuit layer recognizes a non-transient HTTP 422,
+      // so an intentionally blocked Help read cannot open its global circuit.
+      throw Object.assign(new OnecLpAppHttpError(error.status,{code:error.code},error.message),{code:error.code,status:error.status});
+    }
+    throw error;
   }
 }
 
@@ -176,6 +189,7 @@ async function readResponsePayload(response: Response) {
 }
 
 async function callOnecLpApp(path: string, options: { method?: string; query?: OnecLpAppQuery; body?: unknown; timeoutMs?: number } = {}) {
+  assertSharedOnecAllowed();
   const method = options.method ?? 'GET';
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -234,6 +248,7 @@ function buildBinaryHeaders(): Record<string, string> {
 }
 
 async function callOnecLpAppBinary(path: string, query?: OnecLpAppQuery, timeoutMs = getTimeoutMs()) {
+  assertSharedOnecAllowed();
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

@@ -3,6 +3,7 @@ import request from 'supertest';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 
 const tx = {
+  $queryRaw: jest.fn(),
   product: {
     findMany: jest.fn(),
   },
@@ -19,6 +20,7 @@ const prismaMock = {
   $disconnect: jest.fn(),
   $connect: jest.fn(),
   syncRun: {
+    findUniqueOrThrow: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
   },
@@ -51,10 +53,16 @@ describe('1C route contracts', () => {
     process.env.ONEC_SECRET = 'test-secret';
     jest.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx));
+    tx.$queryRaw.mockResolvedValue([{ id: 'session-1' }]);
+    tx.onecSyncSession = prismaMock.onecSyncSession;
+    tx.syncRun = prismaMock.syncRun;
+    tx.syncRunItem = prismaMock.syncRunItem;
+    tx.onecStageProductPrice = prismaMock.onecStageProductPrice;
     prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
     prismaMock.syncRun.update.mockResolvedValue({});
+    prismaMock.syncRun.findUniqueOrThrow.mockResolvedValue({ entity: 'PRODUCT_PRICES', direction: 'IMPORT' });
     prismaMock.syncRunItem.createMany.mockResolvedValue({ count: 0 });
-    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1' });
+    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1', status: 'ACCEPTING' });
     prismaMock.onecSyncSession.update.mockResolvedValue({});
     prismaMock.onecStageProductPrice.upsert.mockResolvedValue({});
   });
@@ -126,5 +134,6 @@ describe('1C route contracts', () => {
     expect(response.body.success).toBe(true);
     expect(response.body.results[0].key).toBe('PRODUCT_GUID||PRICE_TYPE_GUID||2025-01-01T00:00:00.000Z');
     expect(prismaMock.onecStageProductPrice.upsert).toHaveBeenCalled();
+    expect(tx.$queryRaw).toHaveBeenCalled();
   });
 });

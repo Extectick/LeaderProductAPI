@@ -86,7 +86,9 @@ model HelpAttachment {
   thumbnailDataUri String?
   position Int @default(0)
   createdAt DateTime @default(now())
+  audioTranscript HelpAudioTranscript?
   @@index([ownerId, messageId])
+  @@index([messageId, position])
   @@index([objectKey])
 }
 
@@ -110,6 +112,7 @@ model HelpEvent {
   createdAt DateTime @default(now())
   ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   @@index([ticketId, id])
+  @@index([messageId, type])
 }
 
 model HelpNotification {
@@ -191,4 +194,19 @@ model HelpNotificationDelivery {
   status String
   updatedAt DateTime @updatedAt
   @@id([notificationId, tokenHash])
+}
+
+// Permanent recognition result, shared by Help worker and on-demand UI requests.
+model HelpAudioTranscript {
+  attachmentId String @id
+  attachment HelpAttachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  sourceKey String
+  model String
+  status String
+  text String?
+  truncated Boolean @default(false)
+  leaseToken String?
+  lockedUntil DateTime? @db.Timestamp(3)
+  createdAt DateTime @default(now()) @db.Timestamp(3)
+  updatedAt DateTime @default(now()) @db.Timestamp(3)
 }

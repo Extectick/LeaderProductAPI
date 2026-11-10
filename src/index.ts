@@ -16,12 +16,15 @@ import { startClientOrderSubmissionWorker, stopClientOrderSubmissionWorker } fro
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
 import onecPersonalRouter from './modules/onec-personal/routes';
+import personalMailRouter from './modules/personal-mail/routes';
+import entityLinksRouter from './modules/entity-links/entity.routes';
 import clientContactsRouter from './modules/orderShare/clientContacts.routes';
 import { orderShareManagerRouter, publicOrderRouter } from './modules/orderShare/orderShare.routes';
 import qrRouter from './routes/qr';
 import passwordResetRouter from './routes/passwordReset';
 import appealsRouter from './routes/appeals';
 import helpRouter from './modules/help/help.routes';
+import helpT3Router from './modules/help/help.t3.routes';
 import { registerHelpSocket, startHelpDelivery, isHelpRoom } from './modules/help/help.socket';
 import departmentsRouter from './routes/departments';
 import trackingRouter from './routes/tracking';
@@ -173,6 +176,9 @@ app.use(morgan(':method :safe-url :status :response-time ms - :res[content-lengt
 app.use('/integrations/sentry/events', sentryWebhookRouter);
 // This router has its own bounded JSON parser and sanitized errors: no credentials in global logs.
 app.use('/users/me/onec-connections', onecPersonalRouter);
+app.use('/users/me/mail', personalMailRouter);
+// Temporary job capabilities and question text must bypass body/debug/Kafka logging.
+app.use('/help/t3/requests', helpT3Router);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
@@ -180,6 +186,8 @@ app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 app.use('/public/order', publicOrderRouter);
 app.use('/api/order-sharing', orderShareManagerRouter);
 app.use('/users', clientContactsRouter);
+// Object identities and private card data bypass request-body debug/Kafka logging.
+app.use('/entity-links', entityLinksRouter);
 app.use(kafkaRequestLogger);
 
 const allowDebugInProd = process.env.ALLOW_DEBUG_IN_PROD === '1';

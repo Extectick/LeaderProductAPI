@@ -12,6 +12,7 @@ import { enrichStockWarehouseGroups } from '../modules/clientOrders/stockWarehou
 import { availableStockForManager } from '../modules/clientOrders/stockAvailability';
 import { InvalidStockCursor, listStockMovements, stockMovementsQuery } from '../modules/clientOrders/stockMovements';
 import { withIncomingCosts } from '../modules/clientOrders/stockIncomingCosts';
+import {stockProductBaseAllowed} from '../modules/entity-links/entity.stock-source';
 
 export const stockProductsQuery = z.object({
   search: z.string().trim().max(200).default(''),
@@ -56,10 +57,10 @@ async function personalReserves(query: Query, managerGuid: string | null, produc
       ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
     }, _sum: { reserved: true } });
 }
-export async function listStockProducts(query: Query, userId?: number) {
+export async function listStockProducts(query: Query, userId?: number, productGuid?: string) {
   const scope = stockScope(query);
   const products = await prisma.product.findMany({
-    where: { stocks: { some: scope }, AND: query.search.split(/\s+/).filter(Boolean).map(term => ({
+    where: { ...(productGuid?{guid:productGuid}:{}), stocks: { some: scope }, AND: query.search.split(/\s+/).filter(Boolean).map(term => ({
       OR: ['name', 'code', 'article', 'sku'].map(field => ({ [field]: { contains: term, mode: 'insensitive' } })),
     })) },
     select: { id: true, guid: true, name: true, code: true, article: true,
@@ -160,6 +161,28 @@ router.get('/products', ...access, async (req: AuthRequest, res) => {
   if (!parsed.success) { res.status(400).json(errorResponse('Некорректные параметры поиска', ErrorCodes.VALIDATION_ERROR)); return; }
   try { res.json(successResponse(await listStockProducts(parsed.data, req.user?.userId))); }
   catch { res.status(500).json(errorResponse('Не удалось загрузить остатки', ErrorCodes.INTERNAL_ERROR)); }
+});
+/** Same application card/data/ACL as the stock list, with exact identity rather
+ * than a name search. Legacy 1C links require a configured stock-catalog alias. */
+router.get('/products/:guid', ...access, async (req:AuthRequest,res) => {
+  const guid=z.string().uuid().safeParse((req.params as Record<string,string>).guid);
+  const query=stockProductsQuery.safeParse(req.query);
+  const base=z.string().regex(/^[a-z0-9-]{1,48}$/).optional().safeParse((req.query as Record<string,unknown>).baseKey);
+  if(!guid.success||!query.success||!base.success){res.status(400).json(errorResponse('Некорректная ссылка на товар',ErrorCodes.VALIDATION_ERROR));return;}
+  res.set('Cache-Control','private, no-store');
+  try{
+    if(base.data&&!stockProductBaseAllowed(base.data)){
+      res.status(409).json({ok:false,error:{code:'STOCK_SOURCE_MISMATCH'},message:'Для этой базы не настроена связь с каталогом приложения.'});return;
+    }
+    const result=await listStockProducts({...query.data,search:'',offset:0,limit:1},req.user?.userId,guid.data.toLowerCase());
+    const product=result.items[0];
+    if(!product){res.status(404).json({ok:false,error:{code:'STOCK_PRODUCT_NOT_FOUND'},message:'Товар не найден в остатках приложения.'});return;}
+    res.json(successResponse(product));
+  }catch(error){
+    const code=(error as {code?:string}).code;
+    if(code==='ONEC_BASE_UNAVAILABLE'){res.status(409).json({ok:false,error:{code:'STOCK_SOURCE_MISMATCH'},message:'Для этой базы не настроена связь с каталогом приложения.'});return;}
+    res.status(503).json(errorResponse('Не удалось загрузить товар приложения. Повторите попытку.',ErrorCodes.INTERNAL_ERROR));
+  }
 });
 router.get('/products/:guid/movements', ...access, async (req: AuthRequest, res) => {
   const guid = (req.params as Record<string, string>).guid;

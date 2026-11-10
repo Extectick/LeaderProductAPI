@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 export class OnecPersonalError extends Error {
-  constructor(public code: string, public status = 422) { super(code); this.name = 'OnecPersonalError'; }
+  constructor(public code: string, public status = 422, public diagnostic?: { line?: number; column?: number }) { super(code); this.name = 'OnecPersonalError'; }
 }
 const baseSchema = z.object({
   key: z.string().regex(/^[a-z0-9-]{1,48}$/), label: z.string().min(1).max(100),

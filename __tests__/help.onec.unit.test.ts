@@ -3,18 +3,19 @@ import { HelpOnecConnectionRequired } from '../src/modules/help/help.onec-tools'
 import type { HelpOnecTools } from '../src/modules/help/help.onec-tools';
 beforeEach(() => Object.assign(process.env, { HELP_AI_ENABLED: 'true', HELP_AI_PROVIDER: 'openai', HELP_OPENAI_ENABLED: 'true', HELP_OPENAI_MODEL: 'test-model', OPENAI_API_KEY: 'test-api-key', KNOWLEDGE_ENABLED: 'true' }));
 const answer = { id: 'r2', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify({ decision: 'answer', message: 'Проверено в базе Test.', source_ids: [] }) }] }] };
-test('server executes one read then supplies only result to Responses; no credentials or source URL', async () => {
+test('server executes one rights read then reviews its limited conclusion; no credentials or source URL', async () => {
+  const verifiedAnswer={...answer,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify({task:{kind:'information',status:'complete',goal:'Проверить право чтения указанного объекта',remaining:''},decision:'answer',message:'Проверено в базе Test.',source_ids:[]})}]}]};
   const tools: HelpOnecTools = { bases: [{ key: 'test', label: 'Test' }], definitions: [{ type: 'function', name: 'onec_get_access_rights' }], proofs: [], validate: async () => {}, call: async () => { tools.proofs.push({ baseKey: 'test', revision: 1, binding: 'safe-binding' }); return '{"read":true}'; } };
   const transport = jest.fn().mockImplementationOnce(async (_url, init) => {
     const body = JSON.parse(init.body); expect(body.store).toBe(false); expect(body.parallel_tool_calls).toBe(false);
     expect(body.input[0].content).not.toContain('password');
     return Response.json({ id: 'r1', status: 'completed', output: [{ type: 'function_call', name: 'onec_get_access_rights', call_id: 'c1', arguments: '{"baseKey":"test","arguments":{"metadata":"Справочник.Товары"}}' }] });
   }).mockImplementationOnce(async (_url, init) => {
-    const body = JSON.parse(init.body); expect(body.input.at(-1)).toEqual({ type: 'function_call_output', call_id: 'c1', output: '{"read":true}' });
-    return Response.json(answer);
-  });
-  const r = await requestOpenAIAnswer({ messages: [{ role: 'user', text: 'Проверь данные в 1С' }], sources: [], onec: tools }, new AbortController().signal, transport);
-  expect(r.text).toBe('Проверено в базе Test.'); expect(transport).toHaveBeenCalledTimes(2);
+    const body = JSON.parse(init.body); expect(body.input.at(-1)).toMatchObject({ type: 'function_call_output', call_id: 'c1' }); expect(JSON.parse(body.input.at(-1).output)).toMatchObject({read:true}); expect(body.input.at(-1).output).not.toContain('safe-binding');
+    return Response.json(verifiedAnswer);
+  }).mockImplementationOnce(async()=>Response.json(verifiedAnswer));
+  const r = await requestOpenAIAnswer({ messages: [{ role: 'user', text: 'Проверь право чтения справочника Товары в 1С' }], sources: [], onec: tools }, new AbortController().signal, transport);
+  expect(r.text).toBe('Проверено в базе Test.'); expect(transport).toHaveBeenCalledTimes(3);
 });
 test('missing personal credentials stops model loop and asks application to show secure form', async () => {
   const tools: HelpOnecTools = { bases: [{ key: 'test', label: 'Test' }], definitions: [], proofs: [], validate: async () => {}, call: async () => { throw new HelpOnecConnectionRequired('test'); } };

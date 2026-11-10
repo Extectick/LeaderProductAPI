@@ -1,0 +1,64 @@
+{
+  "services": {
+    "api": {
+      "environment": {
+        "HELP_AI_ENABLED": "true",
+        "HELP_AI_PROVIDER": "t3",
+        "HELP_T3_DEV_ENABLED": "true",
+        "HELP_T3_ALLOW_GENERAL": "true",
+        "HELP_T3_WEBHOOK_URL_FILE": "/run/secrets/help_t3_webhook_url",
+        "HELP_BUNNY_DEV_ENABLED": "false",
+        "BUNNY_CHAT_API_KEY": "",
+        "BUNNY_CHAT_API_KEY_FILE": "",
+        "HELP_OPENAI_ENABLED": "false",
+        "OPENAI_API_KEY": "",
+        "OPENAI_API_KEY_FILE": ""
+      },
+      "volumes": [
+        "/opt/leader-api-dev/secrets/help-t3-webhook-url:/run/secrets/help_t3_webhook_url:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "node",
+          "-e",
+          "try{const fs=require('node:fs');for(const file of ['help.t3','help.t3-exchange','help.t3.routes'])fs.accessSync('./dist/modules/help/'+file+'.js');const c=require('./dist/modules/help/help.assistant').helpAssistantConfiguration();if(!c.enabled||c.provider!=='t3')process.exit(1);const u=new URL(fs.readFileSync(process.env.HELP_T3_WEBHOOK_URL_FILE,'utf8').trim());if(u.protocol!=='https:')process.exit(1);}catch{process.exit(1)};fetch('http://127.0.0.1:3000/health',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 3,
+        "start_period": "10s"
+      }
+    },
+    "help-assistant-worker": {
+      "environment": {
+        "HELP_AI_ENABLED": "true",
+        "HELP_AI_PROVIDER": "t3",
+        "HELP_T3_DEV_ENABLED": "true",
+        "HELP_T3_ALLOW_GENERAL": "true",
+        "HELP_T3_WEBHOOK_URL_FILE": "/run/secrets/help_t3_webhook_url",
+        "HELP_BUNNY_DEV_ENABLED": "false",
+        "BUNNY_CHAT_API_KEY": "",
+        "BUNNY_CHAT_API_KEY_FILE": "",
+        "HELP_OPENAI_ENABLED": "false",
+        "OPENAI_API_KEY": "",
+        "OPENAI_API_KEY_FILE": ""
+      },
+      "volumes": [
+        "/opt/leader-api-dev/secrets/help-t3-webhook-url:/run/secrets/help_t3_webhook_url:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "node",
+          "-e",
+          "try{const fs=require('node:fs');for(const file of ['help.t3','help.t3-exchange','help.t3.routes'])fs.accessSync('./dist/modules/help/'+file+'.js');const c=require('./dist/modules/help/help.assistant').helpAssistantConfiguration();if(!c.enabled||c.provider!=='t3')process.exit(1);const u=new URL(fs.readFileSync(process.env.HELP_T3_WEBHOOK_URL_FILE,'utf8').trim());if(u.protocol!=='https:')process.exit(1);}catch{process.exit(1)};process.exit(0)"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 3,
+        "start_period": "10s"
+      }
+    }
+  }
+}

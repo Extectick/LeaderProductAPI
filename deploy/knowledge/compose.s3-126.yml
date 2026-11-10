@@ -1,0 +1,31 @@
+# Local S3 is the primary document store. Nextcloud retains its independent metadata volume.
+services:
+  knowledge-s3:
+    image: ${KNOWLEDGE_S3_IMAGE:?Set the pinned local RustFS image}
+    restart: unless-stopped
+    env_file: [./secrets/s3.env]
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+      RUSTFS_OBS_LOG_DIRECTORY: /logs
+    volumes: [s3-data:/data]
+    tmpfs: ["/logs:size=32m,uid=10001,gid=10001"]
+    mem_limit: 768m
+    cpus: 0.50
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:9000/health]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 8
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  nextcloud:
+    depends_on:
+      knowledge-s3: {condition: service_healthy}
+volumes:
+  s3-data:

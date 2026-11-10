@@ -14,12 +14,15 @@ import { helpImageMetadata } from './help.image';
 import * as service from './help.service';
 import {controlHelpAssistant,helpAssistantConfiguration} from './help.assistant';
 import {helpDeliveryDiagnostics} from './help.delivery';
-import { publishHelpUpdates } from './help.socket';
+import { publishHelpUpdates, publishHelpUpdatesBatch } from './help.socket';
 import { helpDateQuery, helpHistoryQuery, helpSearchQuery, helpSyncQuery } from './help.history';
+import {helpClientContextSchema} from './help.chat-context';
+import {helpItBrief} from './help.it-brief';
+import {helpAttachmentTranscript} from './help.audio-transcript';
 
 const router=express.Router();
 const idSchema=z.coerce.number().int().positive();
-const messageSchema=z.object({clientMessageId:z.string().min(8).max(100),text:z.string().max(20000).default(''),attachmentIds:z.array(z.string().uuid()).max(HELP_MAX_ATTACHMENTS).default([]).refine(a=>new Set(a).size===a.length),replyToId:idSchema.optional(),forwardedFromId:idSchema.optional(),rating:z.number().int().min(0).max(5).optional()}).strict();
+const messageSchema=z.object({clientMessageId:z.string().min(8).max(100),text:z.string().max(20000).default(''),attachmentIds:z.array(z.string().uuid()).max(HELP_MAX_ATTACHMENTS).default([]).refine(a=>new Set(a).size===a.length),replyToId:idSchema.optional(),forwardedFromId:idSchema.optional(),rating:z.number().int().min(0).max(5).optional(),clientContext:helpClientContextSchema.optional()}).strict();
 const createSchema=messageSchema.extend({clientTicketId:z.string().min(8).max(100),sourceTicketId:idSchema.optional()});
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:HELP_MAX_FILE_BYTES,files:HELP_MAX_ATTACHMENTS,fields:2,fieldSize:1024}}).array('files',HELP_MAX_ATTACHMENTS);
 const activeUploads=new Set<number>();
@@ -62,6 +65,7 @@ for(const action of ['stop','retry'] as const) router.post(`/tickets/:id/assista
   await controlHelpAssistant(id,actor,body.runId,action==='retry');await detail(res,id,actor);
 }));
 router.get('/tickets/:id',route(async(req,res,actor)=>res.json(await service.helpDetail(ticketId(req),actor))));
+router.get('/tickets/:id/it-brief',route(async(req,res,actor)=>res.json(await helpItBrief(ticketId(req),actor))));
 router.get('/tickets/:id/messages',route(async(req,res,actor)=>res.json(await service.helpMessages(ticketId(req),actor,helpHistoryQuery.parse(req.query)))));
 router.get('/tickets/:id/search',route(async(req,res,actor)=>res.json(await service.searchHelpMessages(ticketId(req),actor,helpSearchQuery.parse(req.query)))));
 router.get('/tickets/:id/date',route(async(req,res,actor)=>res.json(await service.findHelpMessageByDate(ticketId(req),actor,helpDateQuery.parse(req.query)))));
@@ -69,6 +73,16 @@ router.get('/tickets/:id/sync',route(async(req,res,actor)=>res.json(await servic
 router.post('/tickets/:id/messages',route(async(req,res,actor)=>{const id=ticketId(req);await service.sendHelpMessage(id,actor,messageSchema.parse(req.body));await detail(res,id,actor);}));
 for(const action of ['close','reopen'] as const) router.post(`/tickets/:id/${action}`,route(async(req,res,actor)=>{const id=ticketId(req);await service.changeHelpStatus(id,actor,messageSchema.parse(req.body),action);await detail(res,id,actor);}));
 for(const action of ['request-it','claim'] as const) router.post(`/tickets/:id/${action}`,route(async(req,res,actor)=>{const id=ticketId(req);await service.helpItAction(id,actor,action==='claim');await detail(res,id,actor);}));
+for(const action of ['leave-it','close-it'] as const) router.post(`/tickets/:id/${action}`,route(async(req,res,actor)=>{
+  z.object({}).strict().parse(req.body||{});
+  const id=ticketId(req);
+  if(action==='leave-it')await service.leaveHelpIt(id,actor);else await service.closeHelpByIt(id,actor);
+  await detail(res,id,actor);
+}));
+router.post('/tickets/:id/continue-ai',route(async(req,res,actor)=>{
+  z.object({}).strict().parse(req.body||{});
+  const id=ticketId(req);await service.continueHelpWithAi(id,actor);await detail(res,id,actor);
+}));
 router.post('/tickets/:id/read',route(async(req,res,actor)=>{
   const id=ticketId(req);
   const body=z.object({sequence:z.number().int().nonnegative().optional()}).strict().parse(req.body||{});
@@ -77,7 +91,9 @@ router.post('/tickets/:id/read',route(async(req,res,actor)=>{
 }));
 router.post('/read-all',route(async(_req,res,actor)=>{
   const changed=await service.readAllHelp(actor);
-  void Promise.all(changed.map(id=>publishHelpUpdates(id))).catch(error=>console.warn('[help] live delivery deferred',{code:error?.code}));
+  // One read-all can touch thousands of tickets. Limit concurrent wakeups just
+  // like normal delivery; the persisted journal remains the replay authority.
+  void publishHelpUpdatesBatch(changed);
   res.json({ok:true});
 }));
 router.patch('/messages/:id',route(async(req,res,actor)=>{const body=z.object({text:z.string().max(20000),rating:z.number().int().min(0).max(5).optional(),attachmentIds:z.array(z.string().uuid()).max(HELP_MAX_ATTACHMENTS).refine(ids=>new Set(ids).size===ids.length).optional()}).strict().parse(req.body);await detail(res,await service.editHelpMessage(ticketId(req),actor,body.text,body.rating,body.attachmentIds),actor);}));
@@ -106,6 +122,16 @@ router.post('/attachments',route(async(req,res,actor)=>{
   }
   res.status(201).json({attachments});
   } finally { activeUploads.delete(actor.userId); }
+}));
+for (const method of ['get','post'] as const) router[method]('/attachments/:id/transcript',route(async(req,res,actor)=>{
+  if (method==='post') z.object({}).strict().parse(req.body||{});
+  const abort=new AbortController();
+  const onClose=()=>{if(!res.writableEnded)abort.abort();};
+  res.once('close',onClose);
+  try {
+    const result=await helpAttachmentTranscript(z.string().uuid().parse(req.params.id),actor,method==='post',abort.signal);
+    if(!res.destroyed) res.status(result.status==='pending'?202:200).json(result);
+  } finally {res.removeListener('close',onClose);}
 }));
 router.get('/attachments/:id',route(async(req,res,actor)=>{
   const row=await prisma.helpAttachment.findUnique({where:{id:z.string().uuid().parse(req.params.id)},include:{message:true}});

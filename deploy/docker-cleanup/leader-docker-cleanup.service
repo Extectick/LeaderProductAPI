@@ -1,0 +1,12 @@
+[Unit]
+Description=Retain rollback images and clean aged Docker images/build cache
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/leader-docker-cleanup/cleanup.py --config %h/.config/leader-docker-cleanup/policy.json --apply
+TimeoutStartSec=20min
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes

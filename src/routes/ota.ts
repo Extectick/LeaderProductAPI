@@ -242,11 +242,22 @@ function buildDisplayVersion(data: {
   return `${baseVersionName}.${data.otaSequence}`;
 }
 
+function manifestAssetKey(storageKey: string) {
+  // Expo uses this key as a local filename. SDK 58 rejects path separators;
+  // the object-store path belongs only in the resolved download URL.
+  // Metro's content-addressed asset names must also remain lookup keys for
+  // expo-asset (images/fonts); hashing those names again breaks localAssets.
+  const filename = storageKey.split(/[/\\]/).pop() || '';
+  const metroHash = /^([a-f0-9]{32})(?:\.[a-z0-9]+)?$/.exec(filename);
+  if (metroHash) return metroHash[1];
+  return crypto.createHash('sha256').update(storageKey).digest('hex');
+}
+
 async function buildAssetDescriptor(asset: OtaAssetInput) {
   const url = await resolveObjectUrl(asset.key);
   return {
     hash: asset.hash || crypto.createHash('sha256').update(asset.key).digest('hex'),
-    key: asset.key,
+    key: manifestAssetKey(asset.key),
     fileExtension: asset.fileExtension || '',
     contentType: asset.contentType || 'application/octet-stream',
     url,
@@ -266,7 +277,7 @@ async function buildManifest(update: any) {
     runtimeVersion: update.runtimeVersion,
     launchAsset: {
       hash: update.launchAssetHash || crypto.createHash('sha256').update(update.launchAssetKey).digest('hex'),
-      key: update.launchAssetKey,
+      key: manifestAssetKey(update.launchAssetKey),
       contentType: update.launchAssetType,
       url: launchAssetUrl,
     },

@@ -62,7 +62,7 @@ test('the account feed repairs missed progress and answer events with monotone c
  const again=await replayHelp(owner,replay.nextCursor);expect(again.events).toHaveLength(0);
 });
 
-test('chat and banner acknowledgements suppress only their own device, with durable per-token receipts',async()=>{
+test('banner acknowledgements suppress only their own device, with durable per-token receipts',async()=>{
  const {Expo}=await import('expo-server-sdk');
  const {updateHelpPresence,acknowledgeHelpNotification,deliverHelpNotification}=await import('../src/modules/help/help.delivery');
  const id=await create(),job=await prisma.helpAssistantJob.findFirstOrThrow({where:{ticketId:id}});await finish(job.id);
@@ -72,7 +72,7 @@ test('chat and banner acknowledgements suppress only their own device, with dura
  await prisma.deviceToken.createMany({data:[{userId:owner.userId,token:phone,platform:'android'},{userId:owner.userId,token:tablet,platform:'android'}]});
  expect(await updateHelpPresence(owner.userId,'socket-phone',{sessionId:'session-phone',deviceId:'phone',pushToken:phone,active:true,ticketId:id})).toBe(true);
  expect(await acknowledgeHelpNotification(owner.userId,'wrong-socket',{sessionId:'session-phone',eventId:event.id,kind:'chat'})).toBe(false);
- expect(await acknowledgeHelpNotification(owner.userId,'socket-phone',{sessionId:'session-phone',eventId:event.id,kind:'chat'})).toBe(true);
+ expect(await acknowledgeHelpNotification(owner.userId,'socket-phone',{sessionId:'session-phone',eventId:event.id,kind:'banner'})).toBe(true);
  const spy=jest.spyOn(Expo.prototype,'sendPushNotificationsAsync');
  try{
   expect(await deliverHelpNotification(notification)).toBe(true);

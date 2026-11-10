@@ -61,6 +61,15 @@ describe('Help reads use bounded work without changing visible data',()=>{
     expect(mockDb.user.findMany).not.toHaveBeenCalled();
     expect(mockDb.helpMessage.groupBy).not.toHaveBeenCalled();
   });
+  test('ticket-list search treats percent, underscore and backslash as literal text',async()=>{
+    mockDb.helpTicket.findMany.mockResolvedValue([]);
+    await listHelpTickets(actor,'OPEN',false,undefined,'%_\\');
+    const search=mockDb.helpTicket.findMany.mock.calls[0][0].where.AND[2];
+    expect(search.OR).toEqual([
+      {title:{contains:'\\%\\_\\\\',mode:'insensitive'}},
+      {messages:{some:{text:{contains:'\\%\\_\\\\',mode:'insensitive'}}}},
+    ]);
+  });
   test('detail reuses the tail message and preserves closure metadata',async()=>{
     mockDb.helpTicket.findUnique.mockResolvedValue(ticket(1));
     mockDb.helpMessage.findMany.mockResolvedValue([message(1)]);
@@ -73,6 +82,26 @@ describe('Help reads use bounded work without changing visible data',()=>{
     // duplicate latest-message lookup or redundant boundary probes.
     expect(mockDb.helpMessage.findFirst).toHaveBeenCalledTimes(1);
     expect(mockDb.helpEvent.findMany).toHaveBeenCalledTimes(1);
+  });
+  test('legacy IT member names are surname-first without changing owner or ordinary message names',async()=>{
+    mockDb.helpTicket.findUnique.mockResolvedValue({...ticket(1),members:[{userId:7,role:'OWNER'},{userId:8,role:'IT'}]});
+    mockDb.user.findMany.mockResolvedValue([{id:7,firstName:'Анна',lastName:'Петрова',avatarUrl:null},{id:8,firstName:'Иван',lastName:'Иванов',avatarUrl:'/avatar'}]);
+    mockDb.helpMessage.findMany.mockResolvedValue([{...message(1),authorId:8,authorRole:'IT'}]);
+    const result=await helpDetail(1,actor);
+    expect(result.ticket.members[0].user).toEqual({id:7,name:'Анна Петрова',avatarUrl:null});
+    expect(result.ticket.members[1].itDisplayName).toBe('Иванов Иван');
+    expect(result.ticket.members[1].user).toEqual({id:8,name:'Иванов Иван',avatarUrl:'/avatar'});
+    expect(result.messages[0].author).toEqual({id:8,name:'Иван Иванов',avatarUrl:'/avatar'});
+    expect(mockDb.user.findMany).toHaveBeenCalledTimes(2); // one history batch, one ticket-members batch
+  });
+  test('an IT closure offers owner feedback until a real closure feedback replaces the tail',async()=>{
+    mockDb.helpTicket.findUnique.mockResolvedValue({...ticket(1),status:'CLOSED',closedAt:new Date(),ownerId:7});
+    mockDb.helpMessage.findMany.mockResolvedValue([{...message(1),kind:'SYSTEM',authorId:8,authorRole:'SYSTEM',text:'Иванов Иван закрыл обращение'}]);
+    mockDb.helpEvent.findMany.mockResolvedValue([{messageId:100,type:'TICKET_CLOSED'}]);
+    expect((await helpDetail(1,actor)).ticket.canRate).toBe(true);
+    mockDb.helpMessage.findMany.mockResolvedValue([{...message(1),kind:'CLOSURE',authorId:7,rating:5}]);
+    mockDb.helpEvent.findMany.mockResolvedValue([]);
+    expect((await helpDetail(1,actor)).ticket.canRate).toBe(false);
   });
   test('detail still rejects an unrelated user before reading history',async()=>{
     mockDb.helpTicket.findUnique.mockResolvedValue({...ticket(1),members:[{userId:8,role:'OWNER'}]});

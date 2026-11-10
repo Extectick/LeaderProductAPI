@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { KnowledgeError, MAX_FILE_BYTES, MAX_TEXT_CHARS } from './knowledge.config';
 
-export function extractKnowledgeText(bytes: Buffer, extension: string): Promise<string> {
+export function extractKnowledgeText(bytes: Buffer, extension: string, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.reject(new KnowledgeError(409, 'EXTRACTION_CANCELLED'));
   if (bytes.length > MAX_FILE_BYTES) return Promise.reject(new KnowledgeError(413, 'DOCUMENT_TOO_LARGE'));
   return new Promise((resolve, reject) => {
     // Use the compiled entry point in development too: no ts-node or API environment in the child.
@@ -13,11 +14,13 @@ export function extractKnowledgeText(bytes: Buffer, extension: string): Promise<
       env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, LANG: 'C.UTF-8' },
     });
     let output = '', settled = false;
+    const abort = () => finish(new KnowledgeError(409, 'EXTRACTION_CANCELLED'));
     const finish = (error?: Error, text?: string) => {
-      if (settled) return; settled = true; clearTimeout(timer);
+      if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
       if (error) { child.kill('SIGKILL'); reject(error); } else resolve(text!);
     };
     const timer = setTimeout(() => finish(new KnowledgeError(422, 'EXTRACTION_TIMEOUT')), 25000);
+    timer.unref();
     child.on('error', () => finish(new KnowledgeError(503, 'EXTRACTOR_UNAVAILABLE')));
     child.stdin.on('error', () => {});
     child.stdout.setEncoding('utf8');
@@ -34,7 +37,9 @@ export function extractKnowledgeText(bytes: Buffer, extension: string): Promise<
         finish(new KnowledgeError(422, allowed.includes(result.error) ? result.error : 'EXTRACTION_FAILED'));
       } catch { finish(new KnowledgeError(422, 'EXTRACTION_FAILED')); }
     });
-    child.stdin.end(bytes);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    if (!settled) child.stdin.end(bytes);
   });
 }
 

@@ -1,0 +1,28 @@
+name: Help quality regressions
+on:
+  pull_request:
+    paths: ['src/modules/help/**', '__tests__/help.*', 'scripts/help-quality/**', 'scripts/help-performance/**', 'scripts/help-learning/followup.cjs', 'scripts/help-learning/test_followup.cjs', '.github/workflows/help-quality-check.yml']
+  push:
+    branches: [dev]
+    paths: ['src/modules/help/**', '__tests__/help.*', 'scripts/help-quality/**', 'scripts/help-performance/**', 'scripts/help-learning/followup.cjs', 'scripts/help-learning/test_followup.cjs', '.github/workflows/help-quality-check.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/LeaderAPI_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx prisma generate
+      - run: npm run type-check
+      - run: npm run test:help-quality
+      - run: node --test scripts/help-learning/test_followup.cjs scripts/help-learning/test_triage.cjs
+      - run: node --test scripts/help-quality/test_evaluate.cjs scripts/help-performance/test_report.cjs

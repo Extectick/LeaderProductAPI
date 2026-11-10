@@ -1,3 +1,5 @@
+jest.mock('../src/modules/entity-links/entity.stock-source',()=>({stockProductBaseAllowed:jest.fn(()=>true)}));
+import {stockProductBaseAllowed} from '../src/modules/entity-links/entity.stock-source';
 import express from 'express';
 import request from 'supertest';
 import prisma from '../src/prisma/client';
@@ -62,7 +64,7 @@ it('skips aggregate and image work on an empty product page', async () => {
   expect(result.items).toEqual([]); expect(result.hasMore).toBe(false); expect(prisma.$queryRaw).not.toHaveBeenCalled();
 });
 it('requires authentication and permission on every new endpoint', async () => {
-  for (const path of ['/filters', '/products', `/products/${guid}/balances`, `/products/${guid}/movements`]) {
+  for (const path of ['/filters', '/products', `/products/${guid}`, `/products/${guid}/balances`, `/products/${guid}/movements`]) {
     expect((await request(app).get(path)).status).toBe(401);
     expect((await request(app).get(path).set('Authorization', 'test')).status).toBe(403);
   }
@@ -106,4 +108,25 @@ it('reads series live on each request without persistence and rejects legacy non
   expect(getOnecLpAppStock).toHaveBeenCalledWith(expect.objectContaining({ managerGuid: 'manager-1', bySeries: '1' }));
   jest.mocked(getOnecLpAppStock).mockResolvedValue({ items: [] } as any);
   await expect(listSeriesBalances(guid, query, 42)).rejects.toThrow();
+});
+
+it('exact app product lookup keeps GUID, scope, images and reserve rules without a name fallback',async()=>{
+ jest.mocked(prisma.product.findMany).mockResolvedValue([{id:'p1',guid,name:'Молоко',code:'УТ-1',baseUnit:null}] as any);
+ jest.mocked(prisma.$queryRaw).mockResolvedValue([{productId:'p1',quantity:10,reserved:2}]);
+ const result=await request(app).get(`/products/${guid}?baseKey=qa&warehouseGuid=${guid}`).set('Authorization','test').set('x-test-permission','yes');
+ expect(result.status).toBe(200);expect(result.body.data).toMatchObject({guid,name:'Молоко',inStock:10,reserved:2});
+ expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({where:expect.objectContaining({guid,stocks:{some:{warehouse:{guid}}}}),skip:0,take:2}));
+ expect(stockProductBaseAllowed).toHaveBeenCalledWith('qa');expect(enrichProductsWithImages).toHaveBeenCalledWith(expect.any(Array),{lazySyncMissing:false});
+});
+it('unknown app GUID and unapproved legacy base never fall back to another catalog',async()=>{
+ jest.mocked(stockProductBaseAllowed).mockReturnValueOnce(false);
+ const blocked=await request(app).get(`/products/${guid}?baseKey=other`).set('Authorization','test').set('x-test-permission','yes');
+ expect(blocked.status).toBe(409);expect(blocked.body.error.code).toBe('STOCK_SOURCE_MISMATCH');expect(prisma.product.findMany).not.toHaveBeenCalled();
+ jest.mocked(prisma.product.findMany).mockResolvedValue([]);
+ const missing=await request(app).get(`/products/${guid}`).set('Authorization','test').set('x-test-permission','yes');
+ expect(missing.status).toBe(404);expect(missing.body.error.code).toBe('STOCK_PRODUCT_NOT_FOUND');
+});
+it('bad exact lookup parameters fail before database access',async()=>{
+ for(const path of ['/products/bad',`/products/${guid}?baseKey=bad/path`])expect((await request(app).get(path).set('Authorization','test').set('x-test-permission','yes')).status).toBe(400);
+ expect(prisma.product.findMany).not.toHaveBeenCalled();
 });

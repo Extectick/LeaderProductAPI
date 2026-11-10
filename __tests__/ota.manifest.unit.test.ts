@@ -94,8 +94,52 @@ test.each(['0.1.26', '0.1.33'])('repairs a legacy manifest for %s without changi
   expect(manifest.launchAsset.hash).toBe(old.launchAssetHash);
 });
 
+test('SDK 58 receives safe local filenames while storage URLs and content hashes stay intact', async () => {
+  const update = release({ expoClient: config, expoConfigSchemaVersion: 1 });
+  update.assets = [
+    { key: 'dev/updates/first/image.png', hash: 'first-hash' },
+    { key: 'dev/updates/second/image.png', hash: 'second-hash' },
+    { key: 'legacy\\updates\\image.png', hash: 'legacy-hash' },
+  ];
+  findMany.mockResolvedValue([update]);
+  const manifest = parseManifest(await check());
+  const descriptors = [manifest.launchAsset, ...manifest.assets];
+  for (const asset of descriptors) {
+    // expo-updates constructs the local filename from key + fileExtension.
+    const filename = asset.key + (asset.fileExtension || '');
+    expect(filename).not.toMatch(/[/\\\0]/);
+    expect(['', '.', '..']).not.toContain(filename);
+  }
+  expect(new Set(descriptors.map((asset) => asset.key)).size).toBe(descriptors.length);
+  expect(manifest.launchAsset).toMatchObject({
+    hash: update.launchAssetHash,
+    url: `https://assets.example.test/${update.launchAssetKey}`,
+  });
+  update.assets.forEach((asset, index) => {
+    expect(manifest.assets[index]).toMatchObject({
+      hash: asset.hash, url: `https://assets.example.test/${asset.key}`,
+    });
+  });
+  const second = parseManifest(await check());
+  expect(second.launchAsset.key).toBe(manifest.launchAsset.key);
+  expect(second.assets.map((asset: { key: string }) => asset.key)).toEqual(manifest.assets.map((asset: { key: string }) => asset.key));
+});
+
 test('legacy fallback does not invent a native build number', () => {
   expect(resolveOtaExpoConfig(release()).android).toEqual({ package: 'com.leaderproduct.app' });
+});
+
+test('preserves Metro file hashes for expo-asset local image and font lookups across releases', async () => {
+  const metroHash = '0a328cd9c1afd0afe8e3b1ec5165b1b4';
+  const update = release();
+  update.assets = [{ key: `dev/updates/first/assets/${metroHash}`, hash: 'sha256-base64url' }];
+  findMany.mockResolvedValue([update]);
+  const first = parseManifest(await check());
+  expect(first.assets[0].key).toBe(metroHash);
+  update.assets[0].key = `dev/updates/second/assets/${metroHash}.png`;
+  const second = parseManifest(await check());
+  expect(second.assets[0].key).toBe(metroHash);
+  expect(second.assets[0].hash).toBe('sha256-base64url');
 });
 
 test('already installed update and unknown runtime still receive 204, with no storage requests', async () => {

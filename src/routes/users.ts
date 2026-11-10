@@ -27,6 +27,7 @@ import { checkUserStatus } from '../middleware/checkUserStatus';
 import { auditLog } from '../middleware/audit';
 import { successResponse, errorResponse, ErrorCodes } from '../utils/apiResponse';
 import { getProfile } from '../services/userService';
+import { serveProfileAvatar, normalizeAvatarUpload } from '../services/avatarService';
 import { notifyProfileActivated } from '../services/pushService';
 import { notifyEmployeeModerationResult } from '../services/profileModerationNotificationService';
 import { getPresenceForUsers, markUserOnline } from '../services/presenceService';
@@ -53,6 +54,7 @@ import {
 } from '../rbac/permissionCatalog';
 
 const router = express.Router();
+router.get('/:userId/avatars/:type/:version', authenticateToken, checkUserStatus, serveProfileAvatar);
 const USER_LIST_SELECT = {
   id: true,
   email: true,
@@ -2610,7 +2612,9 @@ router.post(
         );
       }
 
-      const stored = await uploadMulterFile(file, false, 'avatars');
+      const normalized = await normalizeAvatarUpload(file).catch(() => null);
+      if (!normalized) return res.status(400).json(errorResponse('Не удалось прочитать изображение. Выберите JPEG, PNG или WebP.', ErrorCodes.VALIDATION_ERROR));
+      const stored = await uploadMulterFile(normalized, false, 'avatars');
 
       if (type === 'EMPLOYEE') {
         const profile = await prisma.employeeProfile.findUnique({ where: { userId } });

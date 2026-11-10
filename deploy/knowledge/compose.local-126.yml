@@ -1,0 +1,31 @@
+# Apply after compose.yml with project name leader-knowledge-126.
+# Documents live in their own persistent local volume, independent of Nextcloud metadata.
+name: leader-knowledge-126
+services:
+  nextcloud:
+    environment:
+      OVERWRITEPROTOCOL: https
+    volumes:
+      - documents:/srv/knowledge
+  cron:
+    volumes:
+      - documents:/srv/knowledge
+  proxy:
+    image: ${KNOWLEDGE_PROXY_IMAGE:?Set a pinned Nginx image}
+    restart: unless-stopped
+    ports:
+      - "192.168.30.126:18443:443"
+    volumes:
+      - ./nginx.local-126.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./secrets/tls/server.crt:/etc/nginx/knowledge/server.crt:ro
+      - ./secrets/tls/server.key:/etc/nginx/knowledge/server.key:ro
+    depends_on:
+      nextcloud: {condition: service_healthy}
+    mem_limit: 96m
+    cpus: 0.25
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  documents:

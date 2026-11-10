@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { ProfileStatus } from '@prisma/client';
 import prisma from '../prisma/client';
+import {runHelpAppApiRequest} from '../lib/helpAppApiContext';
 
 interface JwtPayload {
   userId: number;
@@ -10,6 +11,7 @@ interface JwtPayload {
   profileStatus: ProfileStatus;
   iat: number;
   exp: number;
+  helpApi?: boolean;
 }
 
 export interface AuthRequest<P = {}, ResBody = {}, ReqBody = {}, ReqQuery = {}>
@@ -66,6 +68,11 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
     }
 
     req.user = decoded;
+    if(decoded.helpApi===true){
+      return runHelpAppApiRequest(decoded.userId,()=>next(),error=>{
+        if(!res.headersSent)res.setHeader('X-Help-App-API-Error',error.code);
+      });
+    }
     next();
   } catch (err: any) {
     const isExpired = err?.name === 'TokenExpiredError';
@@ -87,7 +94,7 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
 /**
  * Собирает все названия ролей с учётом иерархии (по имени роли).
  */
-async function getRoleHierarchyByName(roleName: string): Promise<Set<string>> {
+export async function getRoleHierarchyByName(roleName: string): Promise<Set<string>> {
   const names = new Set<string>();
   let current: string | null = roleName;
 
@@ -154,7 +161,7 @@ async function collectRoleChain(roleId?: number | null): Promise<Set<number>> {
  * - базовой роли user.role (+ вся иерархия parentRoleId),
  * - всех ролей из DepartmentRole (+ их иерархии).
  */
-async function computeUserPermissions(userId: number): Promise<Set<string>> {
+export async function computeUserPermissions(userId: number): Promise<Set<string>> {
   const user = await authPrisma.user.findUnique({
     where: { id: userId },
     select: {

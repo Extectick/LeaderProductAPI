@@ -1,4 +1,7 @@
 import express from 'express';
+import { getLinkedClientOrder } from './clientOrders.entity';
+import { OnecPersonalError, connectionAction } from '../onec-personal/config';
+import { EntityResolveError } from '../entity-links/entity.service';
 import { acceptClientOrderSubmissionBatch, getClientOrderSubmissionStatuses, getClientOrderSubmissionOrder, submissionsBatchSchema, submissionsStatusSchema } from './clientOrderSubmissions';
 import { wakeClientOrderSubmissionWorker } from '../../services/clientOrderSubmissionWorker';
 import { getStoredClientOrderForSubmission } from './clientOrders.service';
@@ -602,12 +605,33 @@ router.get('/:guid', authorizePermissions(['view_client_orders']), async (req: A
     return res.status(400).json(errorResponse(validationMessage(parsed.error), ErrorCodes.VALIDATION_ERROR));
   }
 
+  const controller = new AbortController();
+  const onClose = () => { if (!res.writableEnded) controller.abort(); };
+  res.on('close', onClose);
   try {
+    // A qualified link reads its exact personal base. The ordinary application
+    // route below retains its existing manager-scoped behavior.
+    const baseKey = (req.query as Record<string, unknown>).baseKey;
+    if (baseKey !== undefined) {
+      res.set('Cache-Control', 'private, no-store');
+      if (typeof baseKey !== 'string' || !/^[a-z0-9-]{1,48}$/.test(baseKey)) {
+        return res.status(400).json(errorResponse('Некорректная база ссылки на заказ.', ErrorCodes.VALIDATION_ERROR));
+      }
+      const result = await getLinkedClientOrder(req.user!.userId, baseKey, parsed.data.guid, controller.signal);
+      return res.json(successResponse(result, 'Карточка заказа клиента'));
+    }
     const result = await getClientOrderByGuid(parsed.data.guid, req.user!.userId);
     return res.json(successResponse(result, 'Карточка заказа клиента'));
   } catch (err) {
+    if (controller.signal.aborted || res.destroyed) return;
+    if (err instanceof OnecPersonalError || err instanceof EntityResolveError) {
+      const connect = ['ONEC_AUTH_REQUIRED', 'ONEC_CREDENTIALS_INVALID', 'ONEC_ACCESS_DENIED'].includes(err.code);
+      return res.status(connect ? 422 : err.status).json({ ok: false, error: { code: err.code },
+        message: connect ? 'Подключите свою учётную запись 1С, чтобы открыть заказ.' : err.status === 404 ? 'Заказ не найден или больше недоступен.' : 'Не удалось прочитать заказ из указанной базы 1С.',
+        ...(connect ? { action: connectionAction(String((req.query as Record<string, unknown>).baseKey)) } : {}) });
+    }
     return handleError(res, err, 'Ошибка получения карточки заказа клиента');
-  }
+  } finally { res.off('close', onClose); }
 });
 
 router.get('/:guid/export-debug', authorizePermissions(['manage_client_orders']), async (req: AuthRequest, res) => {

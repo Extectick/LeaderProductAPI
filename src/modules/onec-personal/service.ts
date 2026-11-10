@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import prisma from '../../prisma/client';
 import { baseBinding, OnecBase, onecBase, onecBases, OnecPersonalError } from './config';
 import { seal, unseal } from './vault';
-import { mcpOperation } from './mcp';
+import { mcpOperation, mcpListTools } from './mcp';
 
 type DB = Prisma.TransactionClient;
 const aad = (b: OnecBase, userId: number, guid: string | null, part: string) => JSON.stringify(['onec-user-v1', baseBinding(b), userId, guid, part]);
@@ -97,13 +97,13 @@ export async function validateOnecProofs(userId: number, proofs: OnecProof[], db
     if (!row?.verifiedAt || !row.passwordCipher || row.revision !== proof.revision || row.boundGuid !== guid || proof.binding !== baseBinding(base)) throw new OnecPersonalError('ONEC_AUTH_REQUIRED');
   }
 }
-export async function userMcpCall(userId: number, baseKey: string, tool: string, args: unknown, signal?: AbortSignal) {
+async function userMcpOperation<T>(userId: number, baseKey: string, operation: (base: OnecBase, login: string, password: string) => Promise<T>) {
   const base = onecBase(baseKey), row = await locked(userId, db => ensure(db, userId, base));
   if (!row.loginCipher || !row.passwordCipher || !row.verifiedAt) throw new OnecPersonalError('ONEC_AUTH_REQUIRED');
   const proof = { baseKey, revision: row.revision, binding: baseBinding(base) };
   try {
-    const value = await mcpOperation(base, unseal(row.loginCipher, aad(base, userId, row.boundGuid, 'login')),
-      unseal(row.passwordCipher, aad(base, userId, row.boundGuid, 'password')), { tool, args }, signal);
+    const value = await operation(base, unseal(row.loginCipher, aad(base, userId, row.boundGuid, 'login')),
+      unseal(row.passwordCipher, aad(base, userId, row.boundGuid, 'password')));
     await validateOnecProofs(userId, [proof]);
     return { ...value, proof };
   } catch (e) {
@@ -113,6 +113,13 @@ export async function userMcpCall(userId: number, baseKey: string, tool: string,
     }
     throw e;
   }
+}
+
+export function userMcpCall(userId: number, baseKey: string, tool: string, args: unknown, signal?: AbortSignal) {
+  return userMcpOperation(userId, baseKey, (base, login, password) => mcpOperation(base, login, password, { tool, args }, signal));
+}
+export function userMcpListTools(userId: number, baseKey: string, signal?: AbortSignal) {
+  return userMcpOperation(userId, baseKey, (base, login, password) => mcpListTools(base, login, password, signal));
 }
 
 /** Administrative importer only. Input is the minimal authoritative directory, never passwords. */

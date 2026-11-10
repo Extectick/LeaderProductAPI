@@ -1,0 +1,8 @@
+[Unit]
+Description=Maintain narrow T3 Help relay egress for dev containers
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/leader-api-dev/help-t3-egress.py

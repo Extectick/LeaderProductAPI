@@ -35,4 +35,26 @@ describe('Help status events in paginated history', () => {
     await expect(helpMessages(11, actor)).rejects.toMatchObject({ status: 404 });
     expect(mockDb.helpEvent.findMany).not.toHaveBeenCalled();
   });
+  test('handoff markers survive history with one event lookup and a real surname-first join avatar',async()=>{
+    mockDb.helpMessage.findMany.mockResolvedValue([
+      {...message(3,'SYSTEM'),text:'Продолжаем с AI'},
+      {...message(2,'SYSTEM'),authorId:8,text:'Иванов Иван подключился'},
+      {...message(1,'SYSTEM'),text:'Вызван IT-специалист'},
+    ]);
+    mockDb.user.findMany.mockResolvedValue([{id:7,firstName:'Автор',lastName:'',avatarUrl:null},{id:8,firstName:'Иван',lastName:'Иванов',avatarUrl:'/avatar-old',employeeProfile:{avatarUrl:'/avatar-current'}}]);
+    mockDb.helpEvent.findMany.mockResolvedValue([{messageId:1,type:'IT_REQUESTED'},{messageId:2,type:'IT_JOINED'},{messageId:3,type:'AI_RESUMED'}]);
+    const page=await helpMessages(11,actor);
+    expect(page.messages.map(row=>row.itStatusChange)).toEqual(['REQUESTED','JOINED','AI_RESUMED']);
+    expect(page.messages.every(row=>row.ticketStatusChange===null)).toBe(true);
+    expect(page.messages[1].author).toEqual({id:8,name:'Иванов Иван',avatarUrl:'/avatar-current'});
+    expect(mockDb.helpEvent.findMany).toHaveBeenCalledTimes(1);expect(mockDb.user.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  test('leave metadata preserves the recorded surname-first name even after profile changes',async()=>{
+    mockDb.helpMessage.findMany.mockResolvedValue([{...message(4,'SYSTEM'),authorId:8,text:'Иванов Иван отключился'}]);
+    mockDb.user.findMany.mockResolvedValue([{id:8,firstName:'Новое имя',lastName:'Новая фамилия',avatarUrl:'/avatar'}]);
+    mockDb.helpEvent.findMany.mockResolvedValue([{messageId:4,type:'IT_LEFT'}]);
+    expect((await helpMessages(11,actor)).messages[0]).toMatchObject({itStatusChange:'LEFT',text:'Иванов Иван отключился',author:{id:8,name:'Иванов Иван',avatarUrl:'/avatar'}});
+  });
+
 });

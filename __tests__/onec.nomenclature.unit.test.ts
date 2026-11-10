@@ -3,6 +3,7 @@ import request from 'supertest';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 
 const tx = {
+  $queryRaw: jest.fn(),
   productGroup: {
     findUnique: jest.fn(),
     upsert: jest.fn(),
@@ -25,6 +26,7 @@ const prismaMock = {
   $disconnect: jest.fn(),
   $connect: jest.fn(),
   syncRun: {
+    findUniqueOrThrow: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
   },
@@ -60,10 +62,16 @@ describe('POST /api/1c/nomenclature/batch (unit)', () => {
     tx.productPackage.create.mockResolvedValue({});
     tx.productPackage.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx));
+    tx.$queryRaw.mockResolvedValue([{ id: 'session-1' }]);
+    tx.onecSyncSession = prismaMock.onecSyncSession;
+    tx.syncRun = prismaMock.syncRun;
+    tx.syncRunItem = prismaMock.syncRunItem;
+    tx.onecStageNomenclature = prismaMock.onecStageNomenclature;
     prismaMock.syncRun.create.mockResolvedValue({ id: 'run-1', requestId: 'req-1' });
     prismaMock.syncRun.update.mockResolvedValue({});
+    prismaMock.syncRun.findUniqueOrThrow.mockResolvedValue({ entity: 'NOMENCLATURE', direction: 'IMPORT' });
     prismaMock.syncRunItem.createMany.mockResolvedValue({ count: 0 });
-    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1' });
+    prismaMock.onecSyncSession.findUnique.mockResolvedValue({ id: 'session-1', status: 'ACCEPTING' });
     prismaMock.onecSyncSession.update.mockResolvedValue({});
     prismaMock.onecStageNomenclature.upsert.mockResolvedValue({});
   });
@@ -122,6 +130,7 @@ describe('POST /api/1c/nomenclature/batch (unit)', () => {
     expect(response.body.success).toBe(true);
     expect(response.body.count).toBe(2);
     expect(prismaMock.onecStageNomenclature.upsert).toHaveBeenCalledTimes(2);
+    expect(tx.$queryRaw).toHaveBeenCalled();
     expect(prismaMock.onecSyncSession.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'session-1' },

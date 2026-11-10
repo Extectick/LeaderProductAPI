@@ -1,0 +1,12 @@
+CREATE TABLE "HelpAudioTranscript" (
+  "attachmentId" TEXT NOT NULL PRIMARY KEY REFERENCES "HelpAttachment"("id") ON DELETE CASCADE,
+  "sourceKey" TEXT NOT NULL,
+  "model" TEXT NOT NULL,
+  "status" TEXT NOT NULL CHECK ("status" IN ('PROCESSING','TRANSCRIBED','NO_SPEECH','FAILED')),
+  "text" TEXT,
+  "truncated" BOOLEAN NOT NULL DEFAULT false,
+  "leaseToken" TEXT,
+  "lockedUntil" TIMESTAMP(3),
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

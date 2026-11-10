@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh T3 Help relay addresses after boot and DNS changes
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+Unit=leader-help-t3-egress.service
+
+[Install]
+WantedBy=timers.target

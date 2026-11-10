@@ -65,8 +65,16 @@ def healthy(container):
     raise RuntimeError('API health check failed')
 
 
-def release_services(target, bunny_bound):
-    return ['api', 'help-assistant-worker'] if target == 'dev' and bunny_bound else ['api']
+def release_services(target, assistant_bound):
+    return ['api', 'help-assistant-worker'] if target == 'dev' and assistant_bound else ['api']
+
+
+def help_binding_files(target, root):
+    # Later provider bindings override earlier ones; keep prior files for rollback.
+    if target != 'dev':
+        return []
+    return [root / name for name in ['help-bunny.private.json', 'help-t3.private.json', 'help-openai.private.json']
+            if (root / name).exists()]
 
 
 def main():
@@ -100,9 +108,8 @@ def main():
         files = [str(root / 'compose.yml')]
         if args.target == 'prod':
             files.append(str(root / 'compose.s3.yml'))
-        binding = root / 'help-bunny.private.json'
-        if args.target == 'dev' and binding.exists():
-            files.append(str(binding))
+        bindings = help_binding_files(args.target, root)
+        files.extend(map(str, bindings))
         overlay = root / 'release-image.json'
         previous_overlay = overlay.read_bytes() if overlay.exists() else None
         if previous_overlay is not None:
@@ -121,7 +128,7 @@ def main():
         service['image'] = api['Config']['Image']
         if env.get('DB_INIT_MODE'):
             service['environment']['DB_INIT_MODE'] = env['DB_INIT_MODE']
-        services = release_services(args.target, binding.exists())
+        services = release_services(args.target, bool(bindings))
         excluded = ['/' + container] + (['/leader_help_assistant_dev'] if len(services) > 1 else [])
         protected = {x['Name']: x['Id'] for x in json.loads(run(['docker', 'inspect'] +
             run(['docker', 'ps', '-q']).splitlines())) if x['Name'] not in excluded}

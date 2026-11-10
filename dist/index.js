@@ -22,12 +22,14 @@ const clientOrderSubmissionWorker_1 = require("./services/clientOrderSubmissionW
 const auth_1 = __importDefault(require("./routes/auth"));
 const users_1 = __importDefault(require("./routes/users"));
 const routes_1 = __importDefault(require("./modules/onec-personal/routes"));
+const entity_routes_1 = __importDefault(require("./modules/entity-links/entity.routes"));
 const clientContacts_routes_1 = __importDefault(require("./modules/orderShare/clientContacts.routes"));
 const orderShare_routes_1 = require("./modules/orderShare/orderShare.routes");
 const qr_1 = __importDefault(require("./routes/qr"));
 const passwordReset_1 = __importDefault(require("./routes/passwordReset"));
 const appeals_1 = __importDefault(require("./routes/appeals"));
 const help_routes_1 = __importDefault(require("./modules/help/help.routes"));
+const help_t3_routes_1 = __importDefault(require("./modules/help/help.t3.routes"));
 const help_socket_1 = require("./modules/help/help.socket");
 const departments_1 = __importDefault(require("./routes/departments"));
 const tracking_1 = __importDefault(require("./routes/tracking"));
@@ -149,6 +151,8 @@ app.use((0, morgan_1.default)(':method :safe-url :status :response-time ms - :re
 app.use('/integrations/sentry/events', monitoring_routes_1.sentryWebhookRouter);
 // This router has its own bounded JSON parser and sanitized errors: no credentials in global logs.
 app.use('/users/me/onec-connections', routes_1.default);
+// Temporary job capabilities and question text must bypass body/debug/Kafka logging.
+app.use('/help/t3/requests', help_t3_routes_1.default);
 app.use(express_1.default.json({ limit: '1mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '1mb' }));
 app.use('/uploads', express_1.default.static(path_1.default.resolve(process.cwd(), 'uploads')));
@@ -156,6 +160,8 @@ app.use('/uploads', express_1.default.static(path_1.default.resolve(process.cwd(
 app.use('/public/order', orderShare_routes_1.publicOrderRouter);
 app.use('/api/order-sharing', orderShare_routes_1.orderShareManagerRouter);
 app.use('/users', clientContacts_routes_1.default);
+// Object identities and private card data bypass request-body debug/Kafka logging.
+app.use('/entity-links', entity_routes_1.default);
 app.use(kafkaRequestLogger_1.kafkaRequestLogger);
 const allowDebugInProd = process.env.ALLOW_DEBUG_IN_PROD === '1';
 if (process.env.DEBUG_REQUESTS === '1' && (process.env.NODE_ENV !== 'production' || allowDebugInProd)) {
