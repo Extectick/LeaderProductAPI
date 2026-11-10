@@ -28,7 +28,8 @@ import {
   reconcilePreviousOrderWrite, supportsAtomicOrderWrite,
 } from '../modules/onec/onec.orderWriteSafety';
 import { appendOrderEvent } from '../modules/orders/orderEvents';
-import { getLiveProductsByGuids } from '../modules/clientOrders/clientOrders.onecLive';
+import { getLiveClientOrder, getLiveProductsByGuids } from '../modules/clientOrders/clientOrders.onecLive';
+import { cancellationDocumentMatches, cancellationDenialMessage, ClientOrderCancellationDenied, deniedCancellationState, readCancelFailurePolicy } from '../modules/clientOrders/clientOrderCancellation';
 
 const LOCK_KEY = 'client-orders:export-worker:lock';
 const DEFAULT_INTERVAL_MS = 10_000;
@@ -555,6 +556,40 @@ export async function markOrderExportFailure(order: QueuedOrderForExport, error:
   const nextAttempts = (order.exportAttempts ?? 0) + 1;
   const debugPayload = context ? serializeDebugPayload(context.payload) : null;
   const isCancelExport = isCancelExportOrder(order);
+  const denial = isCancelExport ? cancellationDenialMessage(error) : null;
+  const cancelEvent = denial ? await prisma.orderEvent.findFirst({
+    where: { orderId: order.id, revision: order.revision, eventType: 'CLIENT_ORDER_CANCELLED' },
+    orderBy: { createdAt: 'desc' }, select: { payload: true },
+  }) : null;
+  const cancelPolicy = readCancelFailurePolicy(cancelEvent?.payload);
+  // Prospective only: legacy pending cancellations have no policy marker.
+  // Never backfill, replay or silently repair historical operations here.
+  if (denial && cancelPolicy) {
+    let live = error instanceof ClientOrderCancellationDenied ? error.live : null;
+    if (!live) {
+      try {
+        live = await getLiveClientOrder(String(order.guid), {
+          appGuid: order.guid, managerGuid: order.createdByUser?.employeeProfile?.onecUserGuid ?? '',
+        });
+        if (!cancellationDocumentMatches(live, String(order.guid))) live = null;
+      } catch { /* Keep the pre-cancel state when readback is temporarily unavailable. */ }
+    }
+    await prisma.$transaction(async tx => {
+      const applied = await tx.order.updateMany({ where: { id: order.id, revision: order.revision,
+        status: OrderStatus.CANCELLED, syncState: OrderSyncState.CANCEL_REQUESTED }, data: {
+        ...deniedCancellationState(cancelPolicy, live), revision: { increment: 1 },
+        exportAttempts: nextAttempts, sourceUpdatedAt: failedAt,
+      } });
+      if (applied.count !== 1) return;
+      await appendOrderEvent(tx, { orderId: order.id, revision: order.revision + 1,
+        source: OrderEventSource.ONEC_ACK, eventType: 'ONEC_ORDER_CANCEL_DENIED',
+        note: denial,
+        payload: { requestId: context?.requestId ?? null, message: denial, willRetry: false,
+          documentStatus1c: live?.documentStatus1c ?? null, isPostedIn1c: live?.isPostedIn1c ?? null,
+          hasRealization: live?.hasRealization ?? null, stateVerified: !!live } });
+    });
+    return;
+  }
   const isValidationError = error instanceof ClientOrderExportValidationError;
   const isWriteUncertain = error instanceof OnecOrderWriteUncertainError;
   const stopRetry = isValidationError || isWriteUncertain;
@@ -678,10 +713,21 @@ export async function exportOrder(order: QueuedOrderForExport) {
     // earlier create. Success ACKs close an operation; PUSH_ERROR does not.
     const previousOperation = await prisma.orderEvent.findFirst({
       where: { orderId: order.id, eventType: { in: [
-        'ORDER_EXPORT_PACKET', 'ONEC_ORDER_PUSH_OK', 'ONEC_ORDER_PUSH_SAVED_NOT_POSTED', 'ONEC_ORDER_CANCEL_PUSH_OK',
+        'ORDER_EXPORT_PACKET', 'ONEC_ORDER_PUSH_OK', 'ONEC_ORDER_PUSH_SAVED_NOT_POSTED', 'ONEC_ORDER_CANCEL_PUSH_OK', 'ONEC_ORDER_CANCEL_DENIED',
       ] } },
       orderBy: { createdAt: 'desc' }, select: { eventType: true, payload: true },
     });
+    if (isCancelExportOrder(order)) {
+      const event = await prisma.orderEvent.findFirst({ where: { orderId: order.id, revision: order.revision,
+        eventType: 'CLIENT_ORDER_CANCELLED' }, select: { payload: true }, orderBy: { createdAt: 'desc' } });
+      if (readCancelFailurePolicy(event?.payload)) {
+        const live = await getLiveClientOrder(String(order.guid), {
+          appGuid: order.guid, managerGuid: order.createdByUser?.employeeProfile?.onecUserGuid ?? '',
+        });
+        if (!cancellationDocumentMatches(live, String(order.guid))) throw new OnecOrderWriteUncertainError('Не удалось сверить заказ перед отменой.');
+        if (live.hasRealization) throw new ClientOrderCancellationDenied(live);
+      }
+    }
     if (frozen) {
       payload = frozen.payload as unknown as typeof payload;
       if (!payload || typeof payload.guid !== 'string' || payload.guid.toLowerCase() !== String(order.guid).toLowerCase()

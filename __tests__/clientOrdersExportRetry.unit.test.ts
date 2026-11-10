@@ -2,7 +2,7 @@ jest.mock('../src/prisma/client', () => ({ __esModule: true, default: {
   order: { findFirst: jest.fn() }, orderEvent: { findFirst: jest.fn(), create: jest.fn() }, $transaction: jest.fn(),
 }, pool: { connect: jest.fn() } }));
 jest.mock('../src/lib/redis', () => ({ getRedis: () => ({ isOpen: false }) }));
-jest.mock('../src/modules/clientOrders/clientOrders.onecLive', () => ({ getLiveProductsByGuids: jest.fn() }));
+jest.mock('../src/modules/clientOrders/clientOrders.onecLive', () => ({ getLiveProductsByGuids: jest.fn(), getLiveClientOrder: jest.fn() }));
 jest.mock('../src/modules/onec/onec.lpApp.client', () => ({
   ...jest.requireActual('../src/modules/onec/onec.lpApp.client'),
   getOnecLpAppClientOrder: jest.fn(), postOnecLpAppClientOrder: jest.fn(),
@@ -14,6 +14,8 @@ import { exportOrder, markOrderExportFailure } from '../src/services/clientOrder
 import { buildQueuedOrderPayload } from '../src/modules/onec/onec.orderQueuePayload';
 import { getOnecLpAppClientOrder, postOnecLpAppClientOrder, putOnecLpAppClientOrder, pingOnecLpApp, OnecLpAppHttpError } from '../src/modules/onec/onec.lpApp.client';
 import { ATOMIC_ORDER_WRITE_PROTOCOL, OnecOrderWriteUncertainError } from '../src/modules/onec/onec.orderWriteSafety';
+import { getLiveClientOrder } from '../src/modules/clientOrders/clientOrders.onecLive';
+import { CANCEL_FAILURE_POLICY, ClientOrderCancellationDenied } from '../src/modules/clientOrders/clientOrderCancellation';
 
 const order: any = { id: 'order', guid: 'app-order', revision: 3, status: 'QUEUED', syncState: 'QUEUED',
   exportAttempts: 1, source: 'MANAGER_APP', organization: { guid: 'org' }, counterparty: { guid: 'client' },
@@ -42,6 +44,77 @@ beforeEach(() => {
   tx = { order: { findFirst: jest.fn().mockResolvedValue({ revision: 3 }), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     orderEvent: { create: jest.fn() } };
   (prisma.$transaction as jest.Mock).mockImplementation(fn => fn(tx));
+});
+
+describe('new cancellation business denials without sticky document errors', () => {
+  const cancelling = () => ({ ...order, status: 'CANCELLED', syncState: 'CANCEL_REQUESTED' });
+  const policy = { failurePolicy: CANCEL_FAILURE_POLICY, previousStatus: 'CONFIRMED', previousSyncState: 'SYNCED',
+    previousExportError: null, previous1cError: null };
+  const live: any = { appGuid: order.guid, isPostedIn1c: true, hasRealization: true, documentStatus1c: 'Закрыт' };
+  const refused = () => new OnecLpAppHttpError(500, {}, 'Нельзя отменить заказ в 1С: по заказу создана проведенная реализация товаров и услуг.');
+
+  it('checks a new cancellation before POST and never writes when a realization appeared after enqueue', async () => {
+    (prisma.order.findFirst as jest.Mock).mockResolvedValue(cancelling());
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ payload: policy });
+    jest.mocked(getLiveClientOrder).mockResolvedValue(live);
+    await expect(exportOrder(cancelling())).rejects.toThrow('Отмена не выполнена');
+    expect(postOnecLpAppClientOrder).not.toHaveBeenCalled();
+    expect(putOnecLpAppClientOrder).not.toHaveBeenCalled();
+    expect(prisma.orderEvent.create).not.toHaveBeenCalled();
+    expect(connection.release).toHaveBeenCalled();
+  });
+
+  it('restores the confirmed status, stops retries and records the denial only in history', async () => {
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue({ payload: policy });
+    jest.mocked(getLiveClientOrder).mockResolvedValue(live);
+    await markOrderExportFailure(cancelling(), refused());
+    expect(tx.order.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: 'CONFIRMED', syncState: 'SYNCED', hasRealization: true, cancelRequestedAt: null,
+      lastExportError: null, last1cError: null,
+    }) }));
+    expect(tx.orderEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      eventType: 'ONEC_ORDER_CANCEL_DENIED', payload: expect.objectContaining({ willRetry: false, stateVerified: true }),
+    }) }));
+    expect(postOnecLpAppClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('keeps pre-cancel state when readback is unavailable; never invents a successful cancellation', async () => {
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue({ payload: policy });
+    jest.mocked(getLiveClientOrder).mockRejectedValue(new Error('offline'));
+    await markOrderExportFailure(cancelling(), refused());
+    expect(tx.order.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'CONFIRMED', syncState: 'SYNCED', lastExportError: null });
+    expect(tx.orderEvent.create.mock.calls[0][0].data.payload.stateVerified).toBe(false);
+  });
+
+  it('uses actual unposted state from a fresh readback rather than the old confirmed flag', async () => {
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue({ payload: policy });
+    jest.mocked(getLiveClientOrder).mockResolvedValue({ ...live, isPostedIn1c: false, hasRealization: false });
+    await markOrderExportFailure(cancelling(), new OnecLpAppHttpError(500, {}, 'Нельзя отменить заказ в 1С: объект документа не получен.'));
+    expect(tx.order.updateMany.mock.calls[0][0].data).toMatchObject({ status: 'SENT_TO_1C', isPostedIn1c: false, syncState: 'SYNCED' });
+  });
+
+  it('does not apply the new policy to old pending cancellations', async () => {
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue({ payload: { requiresOnecCancel: true } });
+    await markOrderExportFailure(cancelling(), refused());
+    expect(tx.order.updateMany.mock.calls[0][0].data.syncState).toBe('CANCEL_REQUESTED');
+    expect(tx.orderEvent.create.mock.calls[0][0].data.eventType).toBe('ONEC_ORDER_PUSH_ERROR');
+    expect(getLiveClientOrder).not.toHaveBeenCalled();
+  });
+
+  it('keeps network/unknown failures retryable, rather than hiding them as business denials', async () => {
+    await markOrderExportFailure(cancelling(), new OnecLpAppHttpError(500, {}, 'Непредвиденная ошибка'));
+    expect(tx.order.updateMany.mock.calls[0][0].data.syncState).toBe('CANCEL_REQUESTED');
+    expect(tx.orderEvent.create.mock.calls[0][0].data.payload.willRetry).toBe(true);
+  });
+
+  it('does not overwrite a newer order revision after a late refusal', async () => {
+    (prisma.orderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue({ payload: policy });
+    tx.order.updateMany.mockResolvedValue({ count: 0 });
+    await markOrderExportFailure(cancelling(), new ClientOrderCancellationDenied(live));
+    expect(tx.orderEvent.create).not.toHaveBeenCalled();
+    expect(tx.order.updateMany.mock.calls[0][0].where).toMatchObject({ revision: 3, syncState: 'CANCEL_REQUESTED' });
+  });
 });
 afterEach(() => { delete process.env.CLIENT_ORDERS_EXPORT_STOCK_PREFLIGHT_DISABLED; });
 

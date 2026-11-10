@@ -10,6 +10,7 @@ beforeEach(() => {
   delete process.env.OPENAI_API_KEY_FILE;
   delete process.env.HELP_OPENAI_PROXY_URL;
   delete process.env.HELP_OPENAI_ALLOW_GENERAL;
+  delete process.env.HELP_OPENAI_ALLOW_GENERAL_PRODUCTION;
   delete process.env.HELP_OPENAI_REASONING_EFFORT;
   jest.spyOn(globalThis, 'fetch').mockImplementation(async () => { throw new Error('Real network is forbidden in this suite'); });
 });
@@ -233,4 +234,22 @@ test('provider reasoning summaries are not published as employee-facing activity
   expect(JSON.stringify(progress.mock.calls)).toContain('Проверяю инструкцию.');
   const body = JSON.parse(String(transport.mock.calls[0][1].body));
   expect(body.reasoning?.summary).toBeUndefined();
+});
+
+
+test('production general diagnostics require both explicit flags and preserve request-level grounding', async () => {
+  process.env.NODE_ENV = 'production';
+  process.env.HELP_OPENAI_ALLOW_GENERAL_PRODUCTION = 'true';
+  expect(openAIConfiguration().allowGeneral).toBe(false);
+  process.env.HELP_OPENAI_ALLOW_GENERAL = 'true';
+  expect(openAIConfiguration().allowGeneral).toBe(true);
+  const transport = mockResponse(envelope({ ...answer, source_ids: [] }));
+  await expect(requestOpenAIAnswer({ ...input, sources: [], allowGeneral: true }, new AbortController().signal, transport))
+    .resolves.toMatchObject({ sources: [] });
+  await expect(requestOpenAIAnswer(input, new AbortController().signal, mockResponse(envelope({ ...answer, source_ids: [] }))))
+    .rejects.toMatchObject({ code: 'HELP_OPENAI_INVALID_CITATIONS' });
+  const unapproved = mockResponse(envelope());
+  await expect(requestOpenAIAnswer({ ...input, sources: [] }, new AbortController().signal, unapproved))
+    .rejects.toMatchObject({ code: 'HELP_OPENAI_EMPTY_CONTEXT' });
+  expect(unapproved).not.toHaveBeenCalled();
 });

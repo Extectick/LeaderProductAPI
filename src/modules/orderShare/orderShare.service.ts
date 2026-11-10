@@ -67,8 +67,8 @@ export function presentOwnedShare(link: OrderShareLink) {
   const origin = publicShareOrigin();
   // Enable only after the public page and token-redacted nginx route are deployed.
   const prefix = process.env.ORDER_SHARE_PATH_LINKS_ENABLED === '1' ? '' : '#';
-  return { url: `${origin}/order/${prefix}${decryptShareToken(link.tokenEncrypted)}`, expiresAt: link.expiresAt.toISOString(),
-    active: !link.revokedAt && link.expiresAt.getTime() > Date.now() };
+  return { url: `${origin}/order/${prefix}${decryptShareToken(link.tokenEncrypted)}`, expiresAt: link.expiresAt?.toISOString() ?? null,
+    active: !link.revokedAt && (!link.expiresAt || link.expiresAt.getTime() > Date.now()) };
 }
 
 export async function publishOrder(orderGuid: string, ownerId: number, rotate: boolean) {
@@ -90,12 +90,12 @@ export async function publishOrder(orderGuid: string, ownerId: number, rotate: b
   const weightCache = existing?.counterpartyGuid === snapshot.counterpartyGuid ? existing?.snapshot as any : null;
   if (localSource && weightCache) snapshot = { ...projectShareOrder(order, weightCache._weightReferences),
     ...Object.fromEntries(Object.entries(weightCache).filter(([key]) => ['_weightReferences','_weightOrderKey','_weightCursor','_weightCheckedAt'].includes(key))) };
-  const replaceToken = rotate || !existing || !!existing.revokedAt || existing.expiresAt.getTime() <= Date.now()
+  const replaceToken = rotate || !existing || !!existing.revokedAt
     || existing.counterpartyGuid !== snapshot.counterpartyGuid;
   const token = replaceToken ? createShareToken() : decryptShareToken(existing!.tokenEncrypted);
   const data = { localOrderId: localSource?.id ?? null, counterpartyGuid: snapshot.counterpartyGuid,
     tokenHash: shareTokenHash(token), tokenEncrypted: encryptShareToken(token), snapshot,
-    version: shareVersion(snapshot), revokedAt: null, refreshedAt: new Date(), expiresAt: new Date(Date.now() + 30 * 86400_000) };
+    version: shareVersion(snapshot), revokedAt: null, refreshedAt: new Date(), expiresAt: null };
   // A concurrent first publication must return the winning stable link.
   return tx.orderShareLink.upsert({
     where: { ownerId_orderGuid: { ownerId, orderGuid } },
@@ -108,7 +108,7 @@ export async function publishOrder(orderGuid: string, ownerId: number, rotate: b
 
 export async function authorizePublicShare(token: string) {
   const link = await prisma.orderShareLink.findUnique({ where: { tokenHash: shareTokenHash(token) } });
-  if (!link || link.revokedAt || link.expiresAt.getTime() <= Date.now()) throw unavailable();
+  if (!link || link.revokedAt || (link.expiresAt && link.expiresAt.getTime() <= Date.now())) throw unavailable();
   const owner = await prisma.user.findFirst({ where: { id: link.ownerId, deletedAt: null, isActive: true, profileStatus: { not: 'BLOCKED' } },
     select: { firstName: true, lastName: true, phone: true, clientContacts: true } });
   if (!owner) throw unavailable();

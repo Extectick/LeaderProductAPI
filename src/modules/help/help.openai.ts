@@ -91,7 +91,10 @@ export function openAIConfiguration() {
     maxAttempts: bounded(process.env.HELP_OPENAI_MAX_ATTEMPTS, 3, 1, 5),
     maxToolCalls: bounded(process.env.HELP_OPENAI_MAX_TOOL_CALLS, 48, 1, 96),
     reasoningEffort: process.env.HELP_OPENAI_REASONING_EFFORT?.trim() || '',
-    allowGeneral: process.env.NODE_ENV === 'development' && process.env.HELP_OPENAI_ALLOW_GENERAL === 'true',
+    allowGeneral: process.env.HELP_OPENAI_ALLOW_GENERAL === 'true' && (
+      process.env.NODE_ENV === 'development' ||
+      (process.env.NODE_ENV === 'production' && process.env.HELP_OPENAI_ALLOW_GENERAL_PRODUCTION === 'true')
+    ),
   };
 }
 let proxy: { url: string; agent: ProxyAgent } | undefined;
@@ -535,7 +538,7 @@ export async function requestOpenAIAnswer(input: OpenAIContext, signal: AbortSig
     // dictionary decides whether a question deserves actual data or continuation.
     const task = answer.task;
     const recordTask = task?.kind === 'records';
-    const missingRows = recordTask && task.status === 'complete' && successfulMetadata && !dataEvidence &&
+    const missingRows = recordTask && task.status === 'complete' && (successfulMetadata || historyRead && !artifactEvidence) && !dataEvidence &&
       !input.appTools?.hasEvidence() && !input.peopleTools?.hasEvidence() && !answer.source_ids.length;
     // Compatibility for persisted/test legacy envelopes: metadata alone still
     // must not become invented records. The live strict provider requires task.

@@ -6,7 +6,14 @@ import {
   resolveMergedClientOrderLast1cError,
   resolveActiveTrackingOrderSnapshot,
   resolveUpdatedOrderQueueState,
+  latestExportValidationFromEvents,
 } from '../src/modules/clientOrders/clientOrders.service';
+
+it.each(['ONEC_ORDER_PUSH_OK', 'ONEC_ORDER_CANCEL_DENIED', 'ONEC_ORDER_CANCEL_PUSH_OK'])('does not resurrect an old export error after %s', eventType => {
+  const failure = { eventType: 'ONEC_ORDER_PUSH_ERROR', payload: { error: 'Old error' } };
+  expect(latestExportValidationFromEvents([{ eventType, payload: {} }, failure])).toBeNull();
+  expect(latestExportValidationFromEvents([failure, { eventType, payload: {} }])?.message).toBe('Old error');
+});
 
 describe('clientOrders copy preparation', () => {
   const copiedAt = new Date('2026-08-03T06:00:00.000Z');

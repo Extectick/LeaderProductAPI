@@ -1,8 +1,18 @@
 import type { OrderDetailRecord } from '../orders/orderModel';
 import type { mapOrderDetail } from '../orders/orderModel';
 import type { LiveClientOrder } from './clientOrders.onecLive';
+import { restoreClientOrderDetailSnapshot } from './clientOrders.onecLive';
 
 type MappedOrder = ReturnType<typeof mapOrderDetail>;
+
+/** Read-only projection: invoice bookkeeping never becomes an editable order. */
+export function invoiceShadowListSnapshot(snapshot: unknown, guid: string): LiveClientOrder | null {
+  const root = snapshot as { invoiceShadow?: boolean; item?: { documentGuid?: string; appGuid?: string } } | null;
+  if (!root?.invoiceShadow || !root.item?.documentGuid) return null;
+  if (![root.item.documentGuid, root.item.appGuid].some(id => id?.toLowerCase() === guid.toLowerCase())) return null;
+  const detail = restoreClientOrderDetailSnapshot(root.item, root.item.documentGuid);
+  return detail?.isDeleted ? null : detail;
+}
 
 /** Invoice bookkeeping is not an editable API-owned order document. */
 export function isInvoiceShadowOrder(order: Pick<OrderDetailRecord, 'last1cSnapshot' | 'items' | 'clientOrderId' | 'syncState'>) {

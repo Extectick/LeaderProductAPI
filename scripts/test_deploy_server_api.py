@@ -24,7 +24,8 @@ class TargetGuardTests(unittest.TestCase):
     def test_bunny_worker_only_deploys_with_dev_binding(self):
         self.assertEqual(release.release_services('dev', True), ['api', 'help-assistant-worker'])
         self.assertEqual(release.release_services('dev', False), ['api'])
-        self.assertEqual(release.release_services('prod', True), ['api'])
+        self.assertEqual(release.release_services('prod', True), ['api', 'help-assistant-worker', 'knowledge-worker'])
+        self.assertEqual(release.release_services('prod', False), ['api'])
 
     def test_wrong_mode_rejected(self):
         env = self.env('dev'); env['NODE_ENV'] = 'production'
@@ -45,5 +46,13 @@ class TargetGuardTests(unittest.TestCase):
             self.assertEqual([p.name for p in release.help_binding_files('dev', root)],
                              ['help-t3.private.json', 'help-openai.private.json'])
             self.assertEqual(release.help_binding_files('prod', root), [])
+
+    def test_prod_overlay_is_explicit_and_separate_from_dev_provider_secrets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ['help-openai.private.json', 'help-t3.private.json', 'help-production.private.json']:
+                (root / name).write_text('{}')
+            self.assertEqual([p.name for p in release.help_binding_files('prod', root)], ['help-production.private.json'])
+            self.assertEqual([p.name for p in release.help_binding_files('dev', root)], ['help-t3.private.json', 'help-openai.private.json'])
 
 if __name__ == '__main__': unittest.main()

@@ -42,8 +42,9 @@ test('a recovered historical 1C answer cannot substitute for a requested fresh b
  const liveQuestion={role:'user' as const,text:'Покажи последнее приобретение по складу Северный'};
  const historyTools={definitions:[],validate:jest.fn(async()=>{}),call:jest.fn(async()=>JSON.stringify({messages:[{id:1,sequence:1,role:'assistant',text:'Старый документ OLD-1'}]}))};
  const onec={definitions:[],bases:[],proofs:[{baseKey:'base',revision:1,binding:'fixture'}],validate:jest.fn(async()=>{}),call:jest.fn(async()=>JSON.stringify({data:JSON.stringify({success:true,rowCount:1,data:[{Номер:'NEW-2'}]})}))};
- const transport=jest.fn().mockResolvedValueOnce(call('help_read_history',{messageId:1})).mockResolvedValueOnce(final('Актуальный документ OLD-1'))
-  .mockResolvedValueOnce(call('onec_execute_query',{baseKey:'base',arguments:{query:'ВЫБРАТЬ ПЕРВЫЕ 1 Номер ИЗ Документ.Приобретение'}})).mockResolvedValueOnce(final('Проверен новый документ NEW-2'));
+ const records=(text:string)=>Response.json({id:'r',status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify({task:{kind:'records',status:'complete',goal:'Показать актуальный документ',remaining:''},decision:'answer',message:text,source_ids:[],history_ids:[]})}]}]});
+ const transport=jest.fn().mockResolvedValueOnce(call('help_read_history',{messageId:1})).mockResolvedValueOnce(records('Актуальный документ OLD-1'))
+  .mockResolvedValueOnce(call('onec_execute_query',{baseKey:'base',arguments:{query:'ВЫБРАТЬ ПЕРВЫЕ 1 Номер ИЗ Документ.Приобретение'}})).mockResolvedValueOnce(records('Проверен новый документ NEW-2')).mockResolvedValueOnce(records('Проверен новый документ NEW-2'));
  const result=await requestOpenAIAnswer({messages:[liveQuestion],sources:[],conversation:{...conversation,messages:[{id:300,sequence:300,...liveQuestion,attachments:[]}]},historyTools,onec},new AbortController().signal,transport);
  expect(result.text).toContain('NEW-2');expect(onec.call).toHaveBeenCalledTimes(1);
  expect(JSON.parse(transport.mock.calls[2][1].body).tool_choice).toBe('required');

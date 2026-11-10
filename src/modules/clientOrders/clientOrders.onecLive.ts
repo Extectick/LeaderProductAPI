@@ -254,6 +254,7 @@ export type LiveClientOrderDefaults = {
 
 export type LiveClientOrder = {
   guid: string;
+  isDeleted?: boolean;
   appGuid: string | null;
   documentGuid: string;
   number1c: string | null;
@@ -1326,6 +1327,7 @@ function mapClientOrder(record: AnyRecord, preferDocumentGuid = false): LiveClie
   const profitRevision = text(record, ['profitRevision'], null);
   return {
     guid: orderGuid!,
+    isDeleted: bool(record, ['isDeleted', 'deletionMark', 'DeletionMark', 'ПометкаУдаления'], false),
     appGuid,
     documentGuid: documentGuid ?? orderGuid!,
     number1c: text(record, ['number1c', 'documentNumber', 'number', 'Номер'], null),
@@ -1546,7 +1548,10 @@ export async function getLiveClientOrders(query: ClientOrdersListQuery & { manag
   const normalized = normalizeQuery(query);
   const limit = Number(normalized.limit ?? DEFAULT_LIMIT);
   const offset = Number(normalized.offset ?? 0);
-  return paged(await getOnecLpAppClientOrders(normalized), ['clientOrders', 'orders'], (item) => mapClientOrder(item, true), {
+  return paged(await getOnecLpAppClientOrders(normalized), ['clientOrders', 'orders'], (item) => {
+    const mapped = mapClientOrder(item, true);
+    return mapped?.isDeleted ? null : mapped;
+  }, {
     limit,
     offset,
   });

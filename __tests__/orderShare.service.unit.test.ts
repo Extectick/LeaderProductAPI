@@ -138,3 +138,22 @@ test('publishes short links for API drafts and preserves previously shared long 
   expect(new URL((await publishOrder('order', 1, false)).url).hash.slice(1)).toBe(oldToken);
   expect(new URL((await publishOrder('order', 1, true)).url).hash.slice(1)).toHaveLength(12);
 });
+
+
+test('production permanent links stay active without expiry and keep their existing token when republished', async () => {
+  process.env.ORDER_SHARE_SECRET = 'unit-test-only-32-byte-secret-not-live';
+  process.env.ORDER_SHARE_PUBLIC_ORIGIN = 'https://api.example.test';
+  const token = 'x'.repeat(12);
+  const permanent = { ...link, expiresAt: null, tokenEncrypted: encryptShareToken(token) };
+  db.orderShareLink.findUnique.mockResolvedValue(permanent);
+  expect(presentOwnedShare(permanent as any)).toMatchObject({ expiresAt: null, active: true });
+  await expect(authorizePublicShare(token)).resolves.toMatchObject({ link: permanent });
+  db.$executeRaw = jest.fn(async () => undefined);
+  db.orderShareLink.upsert = jest.fn(async ({ update }: any) => ({ ...permanent, ...update }));
+  const published = await publishOrder('order', 1, false);
+  expect(published).toMatchObject({ expiresAt: null, active: true });
+  expect(published.url).toContain(token);
+  expect(db.orderShareLink.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: expect.objectContaining({ expiresAt: null }) }));
+  db.orderShareLink.findUnique.mockResolvedValue({ ...permanent, revokedAt: new Date() });
+  await expect(authorizePublicShare(token)).rejects.toMatchObject({ status: 410 });
+});

@@ -89,6 +89,16 @@ async function main() {
   const autoSeed = process.env.DB_AUTO_SEED !== '0';
   const acceptDataLoss = process.env.DB_ACCEPT_DATA_LOSS !== '0';
 
+  if (initMode === 'verify-production') {
+    // These additive tables include deliberately SQL-owned objects outside Prisma.
+    // Check their full catalog and pinned migration ledger without mutating data.
+    run('node scripts/apply-production-help-schema.cjs --verify');
+    return;
+  }
+  if (process.env.NODE_ENV === 'production' && initMode !== 'verify') {
+    throw new Error('Production startup requires explicit verification; automatic db push is forbidden');
+  }
+
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
   async function resolveColumnName(tableName, columnName) {

@@ -1,6 +1,10 @@
 import express from 'express';
 import request from 'supertest';
 import { OnecPersonalError } from '../src/modules/onec-personal/config';
+import { getClientOrderStates } from '../src/modules/clientOrders/clientOrderStates';
+jest.mock('../src/modules/clientOrders/clientOrderStates', () => ({
+  ...jest.requireActual('../src/modules/clientOrders/clientOrderStates'), getClientOrderStates: jest.fn(),
+}));
 import { getCustomerPurchaseHistory } from '../src/modules/clientOrders/customerPurchaseHistory';
 import { getLinkedClientOrder } from '../src/modules/clientOrders/clientOrders.entity';
 jest.mock('../src/modules/clientOrders/clientOrders.entity', () => ({ getLinkedClientOrder: jest.fn() }));
@@ -81,6 +85,15 @@ import { saveDraftBackup, getDraftBackup } from '../src/modules/clientOrders/cli
 const app = express();
 app.use(express.json());
 app.use('/api/client-orders', clientOrdersRouter);
+
+it('reads bounded canonical states as the authenticated owner, never a body-supplied user', async () => {
+  jest.mocked(getClientOrderStates).mockResolvedValue({ items: [] });
+  const response = await request(app).post('/api/client-orders/states').send({ identifiers: ['client-id-123'] });
+  expect(response.status).toBe(200);
+  expect(getClientOrderStates).toHaveBeenCalledWith(1, ['client-id-123'], []);
+  expect((await request(app).post('/api/client-orders/states').send({ identifiers: ['client-id-123'], userId: 98 })).status).toBe(400);
+  expect((await request(app).post('/api/client-orders/states').send({ identifiers: Array(51).fill('client-id-123') })).status).toBe(400);
+});
 
 function page(items: unknown[], patch: Partial<{ total: number; limit: number; offset: number }> = {}) {
   return {

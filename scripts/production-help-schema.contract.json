@@ -1,0 +1,2584 @@
+{
+  "columns": [
+    {
+      "name": "id",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "taskId",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ownerId",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "revision",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "contextStartSequence",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "context",
+      "type": "jsonb",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": "'QUEUED'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "step",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attempts",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "provider",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "durationMs",
+      "type": "integer",
+      "table": "HelpAssistantJob",
+      "default": "5000",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "nextAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAssistantJob",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "leaseUntil",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "leaseToken",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "errorCode",
+      "type": "text",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAssistantJob",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "completedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAssistantJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ownerId",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "name",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "mimeType",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "kind",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "size",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "objectKey",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sha256",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAttachment",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "width",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "height",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "thumbnailDataUri",
+      "type": "text",
+      "table": "HelpAttachment",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "position",
+      "type": "integer",
+      "table": "HelpAttachment",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attachmentId",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sourceKey",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "model",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "text",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "truncated",
+      "type": "boolean",
+      "table": "HelpAudioTranscript",
+      "default": "false",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "leaseToken",
+      "type": "text",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "lockedUntil",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAudioTranscript",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAudioTranscript",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpAudioTranscript",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "integer",
+      "table": "HelpEvent",
+      "default": "nextval('\"HelpEvent_id_seq\"'::regclass)",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "type",
+      "type": "text",
+      "table": "HelpEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "actorId",
+      "type": "integer",
+      "table": "HelpEvent",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "integer",
+      "table": "HelpEvent",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpEvent",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "uuid",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ownerId",
+      "type": "integer",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "provider",
+      "type": "text",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "connectionRevision",
+      "type": "integer",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sender",
+      "type": "text",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "payload",
+      "type": "jsonb",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "contentHash",
+      "type": "text",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "HelpMailDraft",
+      "default": "'DRAFT'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp with time zone",
+      "table": "HelpMailDraft",
+      "default": "now()",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attemptedAt",
+      "type": "timestamp with time zone",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "sentAt",
+      "type": "timestamp with time zone",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "text",
+      "table": "HelpMailDraft",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpMember",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "HelpMember",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "role",
+      "type": "text",
+      "table": "HelpMember",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "lastReadSequence",
+      "type": "integer",
+      "table": "HelpMember",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "joinedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpMember",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": "nextval('\"HelpMessage_id_seq\"'::regclass)",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "authorId",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "authorRole",
+      "type": "text",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "kind",
+      "type": "text",
+      "table": "HelpMessage",
+      "default": "'TEXT'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "clientMessageId",
+      "type": "text",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "requestHash",
+      "type": "text",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sequence",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "text",
+      "type": "text",
+      "table": "HelpMessage",
+      "default": "''::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "replyToId",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "forwardedFromId",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "rating",
+      "type": "integer",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpMessage",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "editedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "assistantState",
+      "type": "jsonb",
+      "table": "HelpMessage",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": "nextval('\"HelpNotification_id_seq\"'::regclass)",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "eventId",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attempts",
+      "type": "integer",
+      "table": "HelpNotification",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "dueAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpNotification",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "deliveredAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpNotification",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpNotification",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "HelpNotificationAck",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "eventId",
+      "type": "integer",
+      "table": "HelpNotificationAck",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sessionId",
+      "type": "text",
+      "table": "HelpNotificationAck",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "kind",
+      "type": "text",
+      "table": "HelpNotificationAck",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpNotificationAck",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "notificationId",
+      "type": "integer",
+      "table": "HelpNotificationDelivery",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "tokenHash",
+      "type": "text",
+      "table": "HelpNotificationDelivery",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "HelpNotificationDelivery",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpNotificationDelivery",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "messageId",
+      "type": "integer",
+      "table": "HelpReaction",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "HelpReaction",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "emoji",
+      "type": "text",
+      "table": "HelpReaction",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpReaction",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "HelpSchemaVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "checksum",
+      "type": "text",
+      "table": "HelpSchemaVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "appliedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpSchemaVersion",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sessionId",
+      "type": "text",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "deviceId",
+      "type": "text",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "socketId",
+      "type": "text",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "active",
+      "type": "boolean",
+      "table": "HelpSession",
+      "default": "false",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ticketId",
+      "type": "integer",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "expiresAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpSession",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "integer",
+      "table": "HelpTicket",
+      "default": "nextval('\"HelpTicket_id_seq\"'::regclass)",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ownerId",
+      "type": "integer",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "clientTicketId",
+      "type": "text",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "requestHash",
+      "type": "text",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "title",
+      "type": "text",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "HelpTicket",
+      "default": "'OPEN'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "itRequested",
+      "type": "boolean",
+      "table": "HelpTicket",
+      "default": "true",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sourceTicketId",
+      "type": "integer",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpTicket",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "closedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "HelpTicket",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "messageSequence",
+      "type": "integer",
+      "table": "HelpTicket",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sourceId",
+      "type": "text",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "documentId",
+      "type": "text",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "versionId",
+      "type": "text",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "actorId",
+      "type": "integer",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "action",
+      "type": "text",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "detail",
+      "type": "jsonb",
+      "table": "KnowledgeAuditEvent",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeAuditEvent",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeChunk",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "versionId",
+      "type": "text",
+      "table": "KnowledgeChunk",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ordinal",
+      "type": "integer",
+      "table": "KnowledgeChunk",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "text",
+      "type": "text",
+      "table": "KnowledgeChunk",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "searchVector",
+      "type": "tsvector",
+      "table": "KnowledgeChunk",
+      "default": "(to_tsvector('russian'::regconfig, text) || to_tsvector('simple'::regconfig, text))",
+      "notNull": false,
+      "generated": "s"
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sourceId",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "remoteId",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "path",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "title",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "section",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "etag",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "size",
+      "type": "bigint",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "mimeType",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "currentRevision",
+      "type": "integer",
+      "table": "KnowledgeDocument",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "publishedRevision",
+      "type": "integer",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "publishedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "publishedById",
+      "type": "integer",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "allEmployees",
+      "type": "boolean",
+      "table": "KnowledgeDocument",
+      "default": "false",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "allowedUserIds",
+      "type": "integer[]",
+      "table": "KnowledgeDocument",
+      "default": "ARRAY[]::integer[]",
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "allowedDepartmentIds",
+      "type": "integer[]",
+      "table": "KnowledgeDocument",
+      "default": "ARRAY[]::integer[]",
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "seenScanId",
+      "type": "text",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "lastSeenAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeDocument",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "deletedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeDocument",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeDocument",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "versionId",
+      "type": "text",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "KnowledgeIngestionJob",
+      "default": "'QUEUED'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attempts",
+      "type": "integer",
+      "table": "KnowledgeIngestionJob",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "nextAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeIngestionJob",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "leaseToken",
+      "type": "text",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "leaseUntil",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "errorCode",
+      "type": "text",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeIngestionJob",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeIngestionJob",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "key",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "name",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "configFingerprint",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "enabled",
+      "type": "boolean",
+      "table": "KnowledgeSource",
+      "default": "true",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "nextScanAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "lastScanAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "lastSuccessAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "lastErrorCode",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "scanLeaseToken",
+      "type": "text",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "scanLeaseUntil",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeSource",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "id",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "documentId",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "revision",
+      "type": "integer",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "etag",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "path",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": "'QUEUED'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "sha256",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "text",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "errorCode",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "extractor",
+      "type": "text",
+      "table": "KnowledgeVersion",
+      "default": "'text-v1'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "extractedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeVersion",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "createdAt",
+      "type": "timestamp(3) without time zone",
+      "table": "KnowledgeVersion",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "baseKey",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "boundGuid",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "loginCipher",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "passwordCipher",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "loginSource",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": "'manual'::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "verifiedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "revision",
+      "type": "integer",
+      "table": "OnecConnection",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attempts",
+      "type": "integer",
+      "table": "OnecConnection",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attemptWindow",
+      "type": "timestamp(3) without time zone",
+      "table": "OnecConnection",
+      "default": "CURRENT_TIMESTAMP",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "displayNameCipher",
+      "type": "text",
+      "table": "OnecConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "baseKey",
+      "type": "text",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "guid",
+      "type": "text",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "ibGuid",
+      "type": "text",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "loginCipher",
+      "type": "text",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "updatedAt",
+      "type": "timestamp(3) without time zone",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "displayNameCipher",
+      "type": "text",
+      "table": "OnecDirectoryEntry",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "userId",
+      "type": "integer",
+      "table": "PersonalMailConnection",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "provider",
+      "type": "text",
+      "table": "PersonalMailConnection",
+      "default": null,
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "email",
+      "type": "text",
+      "table": "PersonalMailConnection",
+      "default": "''::text",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "passwordCipher",
+      "type": "text",
+      "table": "PersonalMailConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "verifiedAt",
+      "type": "timestamp with time zone",
+      "table": "PersonalMailConnection",
+      "default": null,
+      "notNull": false,
+      "generated": ""
+    },
+    {
+      "name": "revision",
+      "type": "integer",
+      "table": "PersonalMailConnection",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attempts",
+      "type": "integer",
+      "table": "PersonalMailConnection",
+      "default": "0",
+      "notNull": true,
+      "generated": ""
+    },
+    {
+      "name": "attemptWindow",
+      "type": "timestamp with time zone",
+      "table": "PersonalMailConnection",
+      "default": "now()",
+      "notNull": true,
+      "generated": ""
+    }
+  ],
+  "indexes": [
+    {
+      "name": "HelpAssistantJob_messageId_key",
+      "ready": true,
+      "table": "HelpAssistantJob",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpAssistantJob_messageId_key\" ON public.\"HelpAssistantJob\" USING btree (\"messageId\")"
+    },
+    {
+      "name": "HelpAssistantJob_pkey",
+      "ready": true,
+      "table": "HelpAssistantJob",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpAssistantJob_pkey\" ON public.\"HelpAssistantJob\" USING btree (id)"
+    },
+    {
+      "name": "HelpAssistantJob_status_nextAt_leaseUntil_idx",
+      "ready": true,
+      "table": "HelpAssistantJob",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpAssistantJob_status_nextAt_leaseUntil_idx\" ON public.\"HelpAssistantJob\" USING btree (status, \"nextAt\", \"leaseUntil\")"
+    },
+    {
+      "name": "HelpAssistantJob_taskId_revision_key",
+      "ready": true,
+      "table": "HelpAssistantJob",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpAssistantJob_taskId_revision_key\" ON public.\"HelpAssistantJob\" USING btree (\"taskId\", revision)"
+    },
+    {
+      "name": "HelpAssistantJob_ticketId_createdAt_idx",
+      "ready": true,
+      "table": "HelpAssistantJob",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpAssistantJob_ticketId_createdAt_idx\" ON public.\"HelpAssistantJob\" USING btree (\"ticketId\", \"createdAt\")"
+    },
+    {
+      "name": "HelpAttachment_messageId_position_idx",
+      "ready": true,
+      "table": "HelpAttachment",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpAttachment_messageId_position_idx\" ON public.\"HelpAttachment\" USING btree (\"messageId\", \"position\")"
+    },
+    {
+      "name": "HelpAttachment_objectKey_idx",
+      "ready": true,
+      "table": "HelpAttachment",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpAttachment_objectKey_idx\" ON public.\"HelpAttachment\" USING btree (\"objectKey\")"
+    },
+    {
+      "name": "HelpAttachment_ownerId_messageId_idx",
+      "ready": true,
+      "table": "HelpAttachment",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpAttachment_ownerId_messageId_idx\" ON public.\"HelpAttachment\" USING btree (\"ownerId\", \"messageId\")"
+    },
+    {
+      "name": "HelpAttachment_pkey",
+      "ready": true,
+      "table": "HelpAttachment",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpAttachment_pkey\" ON public.\"HelpAttachment\" USING btree (id)"
+    },
+    {
+      "name": "HelpAudioTranscript_pkey",
+      "ready": true,
+      "table": "HelpAudioTranscript",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpAudioTranscript_pkey\" ON public.\"HelpAudioTranscript\" USING btree (\"attachmentId\")"
+    },
+    {
+      "name": "HelpEvent_messageId_type_idx",
+      "ready": true,
+      "table": "HelpEvent",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpEvent_messageId_type_idx\" ON public.\"HelpEvent\" USING btree (\"messageId\", type)"
+    },
+    {
+      "name": "HelpEvent_pkey",
+      "ready": true,
+      "table": "HelpEvent",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpEvent_pkey\" ON public.\"HelpEvent\" USING btree (id)"
+    },
+    {
+      "name": "HelpEvent_ticketId_id_idx",
+      "ready": true,
+      "table": "HelpEvent",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpEvent_ticketId_id_idx\" ON public.\"HelpEvent\" USING btree (\"ticketId\", id)"
+    },
+    {
+      "name": "HelpMailDraft_ownerId_ticketId_contentHash_key",
+      "ready": true,
+      "table": "HelpMailDraft",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMailDraft_ownerId_ticketId_contentHash_key\" ON public.\"HelpMailDraft\" USING btree (\"ownerId\", \"ticketId\", \"contentHash\")"
+    },
+    {
+      "name": "HelpMailDraft_owner_created_idx",
+      "ready": true,
+      "table": "HelpMailDraft",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpMailDraft_owner_created_idx\" ON public.\"HelpMailDraft\" USING btree (\"ownerId\", \"createdAt\")"
+    },
+    {
+      "name": "HelpMailDraft_pkey",
+      "ready": true,
+      "table": "HelpMailDraft",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMailDraft_pkey\" ON public.\"HelpMailDraft\" USING btree (id)"
+    },
+    {
+      "name": "HelpMember_pkey",
+      "ready": true,
+      "table": "HelpMember",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMember_pkey\" ON public.\"HelpMember\" USING btree (\"ticketId\", \"userId\")"
+    },
+    {
+      "name": "HelpMember_userId_idx",
+      "ready": true,
+      "table": "HelpMember",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpMember_userId_idx\" ON public.\"HelpMember\" USING btree (\"userId\")"
+    },
+    {
+      "name": "HelpMessage_pkey",
+      "ready": true,
+      "table": "HelpMessage",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMessage_pkey\" ON public.\"HelpMessage\" USING btree (id)"
+    },
+    {
+      "name": "HelpMessage_ticketId_authorId_clientMessageId_key",
+      "ready": true,
+      "table": "HelpMessage",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMessage_ticketId_authorId_clientMessageId_key\" ON public.\"HelpMessage\" USING btree (\"ticketId\", \"authorId\", \"clientMessageId\")"
+    },
+    {
+      "name": "HelpMessage_ticketId_sequence_key",
+      "ready": true,
+      "table": "HelpMessage",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpMessage_ticketId_sequence_key\" ON public.\"HelpMessage\" USING btree (\"ticketId\", sequence)"
+    },
+    {
+      "name": "HelpNotification_deliveredAt_dueAt_idx",
+      "ready": true,
+      "table": "HelpNotification",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpNotification_deliveredAt_dueAt_idx\" ON public.\"HelpNotification\" USING btree (\"deliveredAt\", \"dueAt\")"
+    },
+    {
+      "name": "HelpNotification_eventId_userId_key",
+      "ready": true,
+      "table": "HelpNotification",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpNotification_eventId_userId_key\" ON public.\"HelpNotification\" USING btree (\"eventId\", \"userId\")"
+    },
+    {
+      "name": "HelpNotification_pkey",
+      "ready": true,
+      "table": "HelpNotification",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpNotification_pkey\" ON public.\"HelpNotification\" USING btree (id)"
+    },
+    {
+      "name": "HelpNotificationAck_eventId_userId_idx",
+      "ready": true,
+      "table": "HelpNotificationAck",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpNotificationAck_eventId_userId_idx\" ON public.\"HelpNotificationAck\" USING btree (\"eventId\", \"userId\")"
+    },
+    {
+      "name": "HelpNotificationAck_pkey",
+      "ready": true,
+      "table": "HelpNotificationAck",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpNotificationAck_pkey\" ON public.\"HelpNotificationAck\" USING btree (\"userId\", \"eventId\", \"sessionId\")"
+    },
+    {
+      "name": "HelpNotificationDelivery_pkey",
+      "ready": true,
+      "table": "HelpNotificationDelivery",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpNotificationDelivery_pkey\" ON public.\"HelpNotificationDelivery\" USING btree (\"notificationId\", \"tokenHash\")"
+    },
+    {
+      "name": "HelpReaction_pkey",
+      "ready": true,
+      "table": "HelpReaction",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpReaction_pkey\" ON public.\"HelpReaction\" USING btree (\"messageId\", \"userId\", emoji)"
+    },
+    {
+      "name": "HelpSchemaVersion_pkey",
+      "ready": true,
+      "table": "HelpSchemaVersion",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpSchemaVersion_pkey\" ON public.\"HelpSchemaVersion\" USING btree (id)"
+    },
+    {
+      "name": "HelpSession_pkey",
+      "ready": true,
+      "table": "HelpSession",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpSession_pkey\" ON public.\"HelpSession\" USING btree (\"userId\", \"sessionId\")"
+    },
+    {
+      "name": "HelpSession_userId_expiresAt_idx",
+      "ready": true,
+      "table": "HelpSession",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpSession_userId_expiresAt_idx\" ON public.\"HelpSession\" USING btree (\"userId\", \"expiresAt\")"
+    },
+    {
+      "name": "HelpTicket_ownerId_clientTicketId_key",
+      "ready": true,
+      "table": "HelpTicket",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpTicket_ownerId_clientTicketId_key\" ON public.\"HelpTicket\" USING btree (\"ownerId\", \"clientTicketId\")"
+    },
+    {
+      "name": "HelpTicket_ownerId_status_updatedAt_idx",
+      "ready": true,
+      "table": "HelpTicket",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpTicket_ownerId_status_updatedAt_idx\" ON public.\"HelpTicket\" USING btree (\"ownerId\", status, \"updatedAt\")"
+    },
+    {
+      "name": "HelpTicket_pkey",
+      "ready": true,
+      "table": "HelpTicket",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"HelpTicket_pkey\" ON public.\"HelpTicket\" USING btree (id)"
+    },
+    {
+      "name": "HelpTicket_status_itRequested_updatedAt_idx",
+      "ready": true,
+      "table": "HelpTicket",
+      "valid": true,
+      "definition": "CREATE INDEX \"HelpTicket_status_itRequested_updatedAt_idx\" ON public.\"HelpTicket\" USING btree (status, \"itRequested\", \"updatedAt\")"
+    },
+    {
+      "name": "KnowledgeAuditEvent_documentId_createdAt_idx",
+      "ready": true,
+      "table": "KnowledgeAuditEvent",
+      "valid": true,
+      "definition": "CREATE INDEX \"KnowledgeAuditEvent_documentId_createdAt_idx\" ON public.\"KnowledgeAuditEvent\" USING btree (\"documentId\", \"createdAt\")"
+    },
+    {
+      "name": "KnowledgeAuditEvent_pkey",
+      "ready": true,
+      "table": "KnowledgeAuditEvent",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeAuditEvent_pkey\" ON public.\"KnowledgeAuditEvent\" USING btree (id)"
+    },
+    {
+      "name": "KnowledgeChunk_pkey",
+      "ready": true,
+      "table": "KnowledgeChunk",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeChunk_pkey\" ON public.\"KnowledgeChunk\" USING btree (id)"
+    },
+    {
+      "name": "KnowledgeChunk_searchVector_idx",
+      "ready": true,
+      "table": "KnowledgeChunk",
+      "valid": true,
+      "definition": "CREATE INDEX \"KnowledgeChunk_searchVector_idx\" ON public.\"KnowledgeChunk\" USING gin (\"searchVector\")"
+    },
+    {
+      "name": "KnowledgeChunk_versionId_ordinal_key",
+      "ready": true,
+      "table": "KnowledgeChunk",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeChunk_versionId_ordinal_key\" ON public.\"KnowledgeChunk\" USING btree (\"versionId\", ordinal)"
+    },
+    {
+      "name": "KnowledgeDocument_pkey",
+      "ready": true,
+      "table": "KnowledgeDocument",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeDocument_pkey\" ON public.\"KnowledgeDocument\" USING btree (id)"
+    },
+    {
+      "name": "KnowledgeDocument_sourceId_remoteId_key",
+      "ready": true,
+      "table": "KnowledgeDocument",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeDocument_sourceId_remoteId_key\" ON public.\"KnowledgeDocument\" USING btree (\"sourceId\", \"remoteId\")"
+    },
+    {
+      "name": "KnowledgeDocument_sourceId_section_deletedAt_idx",
+      "ready": true,
+      "table": "KnowledgeDocument",
+      "valid": true,
+      "definition": "CREATE INDEX \"KnowledgeDocument_sourceId_section_deletedAt_idx\" ON public.\"KnowledgeDocument\" USING btree (\"sourceId\", section, \"deletedAt\")"
+    },
+    {
+      "name": "KnowledgeDocument_sourceId_seenScanId_idx",
+      "ready": true,
+      "table": "KnowledgeDocument",
+      "valid": true,
+      "definition": "CREATE INDEX \"KnowledgeDocument_sourceId_seenScanId_idx\" ON public.\"KnowledgeDocument\" USING btree (\"sourceId\", \"seenScanId\")"
+    },
+    {
+      "name": "KnowledgeIngestionJob_pkey",
+      "ready": true,
+      "table": "KnowledgeIngestionJob",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeIngestionJob_pkey\" ON public.\"KnowledgeIngestionJob\" USING btree (id)"
+    },
+    {
+      "name": "KnowledgeIngestionJob_status_nextAt_idx",
+      "ready": true,
+      "table": "KnowledgeIngestionJob",
+      "valid": true,
+      "definition": "CREATE INDEX \"KnowledgeIngestionJob_status_nextAt_idx\" ON public.\"KnowledgeIngestionJob\" USING btree (status, \"nextAt\")"
+    },
+    {
+      "name": "KnowledgeIngestionJob_versionId_key",
+      "ready": true,
+      "table": "KnowledgeIngestionJob",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeIngestionJob_versionId_key\" ON public.\"KnowledgeIngestionJob\" USING btree (\"versionId\")"
+    },
+    {
+      "name": "KnowledgeSource_key_key",
+      "ready": true,
+      "table": "KnowledgeSource",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeSource_key_key\" ON public.\"KnowledgeSource\" USING btree (key)"
+    },
+    {
+      "name": "KnowledgeSource_pkey",
+      "ready": true,
+      "table": "KnowledgeSource",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeSource_pkey\" ON public.\"KnowledgeSource\" USING btree (id)"
+    },
+    {
+      "name": "KnowledgeVersion_documentId_revision_key",
+      "ready": true,
+      "table": "KnowledgeVersion",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeVersion_documentId_revision_key\" ON public.\"KnowledgeVersion\" USING btree (\"documentId\", revision)"
+    },
+    {
+      "name": "KnowledgeVersion_pkey",
+      "ready": true,
+      "table": "KnowledgeVersion",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"KnowledgeVersion_pkey\" ON public.\"KnowledgeVersion\" USING btree (id)"
+    },
+    {
+      "name": "OnecConnection_pkey",
+      "ready": true,
+      "table": "OnecConnection",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"OnecConnection_pkey\" ON public.\"OnecConnection\" USING btree (\"userId\", \"baseKey\")"
+    },
+    {
+      "name": "OnecDirectoryEntry_pkey",
+      "ready": true,
+      "table": "OnecDirectoryEntry",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"OnecDirectoryEntry_pkey\" ON public.\"OnecDirectoryEntry\" USING btree (\"baseKey\", guid)"
+    },
+    {
+      "name": "PersonalMailConnection_pkey",
+      "ready": true,
+      "table": "PersonalMailConnection",
+      "valid": true,
+      "definition": "CREATE UNIQUE INDEX \"PersonalMailConnection_pkey\" ON public.\"PersonalMailConnection\" USING btree (\"userId\", provider)"
+    }
+  ],
+  "constraints": [
+    {
+      "name": "HelpAssistantJob_messageId_fkey",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"messageId\") REFERENCES \"HelpMessage\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpAssistantJob_messageId_key",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "UNIQUE (\"messageId\")"
+    },
+    {
+      "name": "HelpAssistantJob_ownerId_fkey",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ownerId\") REFERENCES \"User\"(id) ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpAssistantJob_pkey",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpAssistantJob_taskId_revision_key",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "UNIQUE (\"taskId\", revision)"
+    },
+    {
+      "name": "HelpAssistantJob_ticketId_fkey",
+      "table": "HelpAssistantJob",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ticketId\") REFERENCES \"HelpTicket\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpAttachment_image_dimensions_check",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "CHECK ((((width IS NULL) AND (height IS NULL)) OR ((width > 0) AND (height > 0) AND (width IS NOT NULL) AND (height IS NOT NULL))))"
+    },
+    {
+      "name": "HelpAttachment_messageId_fkey",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"messageId\") REFERENCES \"HelpMessage\"(id) ON UPDATE CASCADE ON DELETE SET NULL"
+    },
+    {
+      "name": "HelpAttachment_ownerId_fkey",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ownerId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpAttachment_pkey",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpAttachment_position_check",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "CHECK ((\"position\" >= 0))"
+    },
+    {
+      "name": "HelpAttachment_thumbnail_size_check",
+      "table": "HelpAttachment",
+      "validated": true,
+      "definition": "CHECK (((\"thumbnailDataUri\" IS NULL) OR (octet_length(\"thumbnailDataUri\") <= 2048)))"
+    },
+    {
+      "name": "HelpAudioTranscript_attachmentId_fkey",
+      "table": "HelpAudioTranscript",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"attachmentId\") REFERENCES \"HelpAttachment\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpAudioTranscript_pkey",
+      "table": "HelpAudioTranscript",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"attachmentId\")"
+    },
+    {
+      "name": "HelpAudioTranscript_status_check",
+      "table": "HelpAudioTranscript",
+      "validated": true,
+      "definition": "CHECK ((status = ANY (ARRAY['PROCESSING'::text, 'TRANSCRIBED'::text, 'NO_SPEECH'::text, 'FAILED'::text])))"
+    },
+    {
+      "name": "HelpEvent_actorId_fkey",
+      "table": "HelpEvent",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"actorId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpEvent_pkey",
+      "table": "HelpEvent",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpEvent_ticketId_fkey",
+      "table": "HelpEvent",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ticketId\") REFERENCES \"HelpTicket\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpMailDraft_ownerId_fkey",
+      "table": "HelpMailDraft",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ownerId\") REFERENCES \"User\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpMailDraft_ownerId_ticketId_contentHash_key",
+      "table": "HelpMailDraft",
+      "validated": true,
+      "definition": "UNIQUE (\"ownerId\", \"ticketId\", \"contentHash\")"
+    },
+    {
+      "name": "HelpMailDraft_pkey",
+      "table": "HelpMailDraft",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpMailDraft_status_check",
+      "table": "HelpMailDraft",
+      "validated": true,
+      "definition": "CHECK ((status = ANY (ARRAY['DRAFT'::text, 'SENDING'::text, 'SENT'::text, 'UNKNOWN'::text, 'FAILED'::text])))"
+    },
+    {
+      "name": "HelpMailDraft_ticketId_fkey",
+      "table": "HelpMailDraft",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ticketId\") REFERENCES \"HelpTicket\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpMember_pkey",
+      "table": "HelpMember",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"ticketId\", \"userId\")"
+    },
+    {
+      "name": "HelpMember_ticketId_fkey",
+      "table": "HelpMember",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ticketId\") REFERENCES \"HelpTicket\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpMember_userId_fkey",
+      "table": "HelpMember",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpMessage_authorId_fkey",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"authorId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpMessage_pkey",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpMessage_rating_check",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "CHECK (((rating IS NULL) OR ((rating >= 0) AND (rating <= 5))))"
+    },
+    {
+      "name": "HelpMessage_replyToId_fkey",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"replyToId\") REFERENCES \"HelpMessage\"(id) ON UPDATE CASCADE ON DELETE SET NULL"
+    },
+    {
+      "name": "HelpMessage_sequence_check",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "CHECK ((sequence > 0))"
+    },
+    {
+      "name": "HelpMessage_ticketId_fkey",
+      "table": "HelpMessage",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ticketId\") REFERENCES \"HelpTicket\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpNotification_pkey",
+      "table": "HelpNotification",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpNotification_userId_fkey",
+      "table": "HelpNotification",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpNotificationAck_pkey",
+      "table": "HelpNotificationAck",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"userId\", \"eventId\", \"sessionId\")"
+    },
+    {
+      "name": "HelpNotificationAck_userId_fkey",
+      "table": "HelpNotificationAck",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpNotificationDelivery_notificationId_fkey",
+      "table": "HelpNotificationDelivery",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"notificationId\") REFERENCES \"HelpNotification\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpNotificationDelivery_pkey",
+      "table": "HelpNotificationDelivery",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"notificationId\", \"tokenHash\")"
+    },
+    {
+      "name": "HelpReaction_messageId_fkey",
+      "table": "HelpReaction",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"messageId\") REFERENCES \"HelpMessage\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpReaction_pkey",
+      "table": "HelpReaction",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"messageId\", \"userId\", emoji)"
+    },
+    {
+      "name": "HelpReaction_userId_fkey",
+      "table": "HelpReaction",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpSchemaVersion_pkey",
+      "table": "HelpSchemaVersion",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpSession_pkey",
+      "table": "HelpSession",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"userId\", \"sessionId\")"
+    },
+    {
+      "name": "HelpSession_userId_fkey",
+      "table": "HelpSession",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON DELETE CASCADE"
+    },
+    {
+      "name": "HelpTicket_ownerId_fkey",
+      "table": "HelpTicket",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"ownerId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    },
+    {
+      "name": "HelpTicket_pkey",
+      "table": "HelpTicket",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "HelpTicket_sourceTicketId_fkey",
+      "table": "HelpTicket",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"sourceTicketId\") REFERENCES \"HelpTicket\"(id) ON UPDATE CASCADE ON DELETE SET NULL"
+    },
+    {
+      "name": "HelpTicket_status_check",
+      "table": "HelpTicket",
+      "validated": true,
+      "definition": "CHECK ((status = ANY (ARRAY['OPEN'::text, 'CLOSED'::text])))"
+    },
+    {
+      "name": "KnowledgeAuditEvent_pkey",
+      "table": "KnowledgeAuditEvent",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeChunk_pkey",
+      "table": "KnowledgeChunk",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeChunk_versionId_fkey",
+      "table": "KnowledgeChunk",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"versionId\") REFERENCES \"KnowledgeVersion\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "KnowledgeDocument_pkey",
+      "table": "KnowledgeDocument",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeDocument_publication_check",
+      "table": "KnowledgeDocument",
+      "validated": true,
+      "definition": "CHECK (((\"publishedRevision\" IS NULL) OR ((\"publishedRevision\" = \"currentRevision\") AND (section = 'COMPANY'::text) AND (\"deletedAt\" IS NULL))))"
+    },
+    {
+      "name": "KnowledgeDocument_section_check",
+      "table": "KnowledgeDocument",
+      "validated": true,
+      "definition": "CHECK ((section = ANY (ARRAY['COMPANY'::text, 'AI_WORKSPACE'::text, 'ARCHIVE'::text, 'OTHER'::text])))"
+    },
+    {
+      "name": "KnowledgeDocument_size_check",
+      "table": "KnowledgeDocument",
+      "validated": true,
+      "definition": "CHECK ((size >= 0))"
+    },
+    {
+      "name": "KnowledgeDocument_sourceId_fkey",
+      "table": "KnowledgeDocument",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"sourceId\") REFERENCES \"KnowledgeSource\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "KnowledgeIngestionJob_pkey",
+      "table": "KnowledgeIngestionJob",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeIngestionJob_status_check",
+      "table": "KnowledgeIngestionJob",
+      "validated": true,
+      "definition": "CHECK ((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'COMPLETED'::text, 'ERROR'::text, 'CANCELLED'::text])))"
+    },
+    {
+      "name": "KnowledgeIngestionJob_versionId_fkey",
+      "table": "KnowledgeIngestionJob",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"versionId\") REFERENCES \"KnowledgeVersion\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "KnowledgeSource_pkey",
+      "table": "KnowledgeSource",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeVersion_documentId_fkey",
+      "table": "KnowledgeVersion",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"documentId\") REFERENCES \"KnowledgeDocument\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "KnowledgeVersion_pkey",
+      "table": "KnowledgeVersion",
+      "validated": true,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "name": "KnowledgeVersion_status_check",
+      "table": "KnowledgeVersion",
+      "validated": true,
+      "definition": "CHECK ((status = ANY (ARRAY['QUEUED'::text, 'PROCESSING'::text, 'READY'::text, 'ERROR'::text, 'SKIPPED'::text])))"
+    },
+    {
+      "name": "OnecConnection_pkey",
+      "table": "OnecConnection",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"userId\", \"baseKey\")"
+    },
+    {
+      "name": "OnecConnection_userId_fkey",
+      "table": "OnecConnection",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON UPDATE CASCADE ON DELETE CASCADE"
+    },
+    {
+      "name": "OnecDirectoryEntry_pkey",
+      "table": "OnecDirectoryEntry",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"baseKey\", guid)"
+    },
+    {
+      "name": "PersonalMailConnection_pkey",
+      "table": "PersonalMailConnection",
+      "validated": true,
+      "definition": "PRIMARY KEY (\"userId\", provider)"
+    },
+    {
+      "name": "PersonalMailConnection_provider_check",
+      "table": "PersonalMailConnection",
+      "validated": true,
+      "definition": "CHECK ((provider = ANY (ARRAY['mail'::text, 'yandex'::text])))"
+    },
+    {
+      "name": "PersonalMailConnection_userId_fkey",
+      "table": "PersonalMailConnection",
+      "validated": true,
+      "definition": "FOREIGN KEY (\"userId\") REFERENCES \"User\"(id) ON DELETE CASCADE"
+    }
+  ]
+}

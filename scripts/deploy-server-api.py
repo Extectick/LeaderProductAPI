@@ -66,13 +66,16 @@ def healthy(container):
 
 
 def release_services(target, assistant_bound):
-    return ['api', 'help-assistant-worker'] if target == 'dev' and assistant_bound else ['api']
+    if not assistant_bound:
+        return ['api']
+    return ['api', 'help-assistant-worker', 'knowledge-worker'] if target == 'prod' else ['api', 'help-assistant-worker']
 
 
 def help_binding_files(target, root):
     # Later provider bindings override earlier ones; keep prior files for rollback.
-    if target != 'dev':
-        return []
+    if target == 'prod':
+        binding = root / 'help-production.private.json'
+        return [binding] if binding.exists() else []
     return [root / name for name in ['help-bunny.private.json', 'help-t3.private.json', 'help-openai.private.json']
             if (root / name).exists()]
 
@@ -129,7 +132,9 @@ def main():
         if env.get('DB_INIT_MODE'):
             service['environment']['DB_INIT_MODE'] = env['DB_INIT_MODE']
         services = release_services(args.target, bool(bindings))
-        excluded = ['/' + container] + (['/leader_help_assistant_dev'] if len(services) > 1 else [])
+        if any(name not in original['services'] for name in services):
+            raise RuntimeError('Enabled provider binding is missing a required worker service')
+        excluded = ['/' + original['services'][name].get('container_name', container) for name in services]
         protected = {x['Name']: x['Id'] for x in json.loads(run(['docker', 'inspect'] +
             run(['docker', 'ps', '-q']).splitlines())) if x['Name'] not in excluded}
         image = 'ghcr.io/extectick/leaderproductapi:' + args.sha
@@ -158,10 +163,11 @@ def main():
             updated['services'][name]['pull_policy'] = 'never'
         updated['services']['api'].pop('build', None)
         updated['services']['api']['pull_policy'] = 'never'
-        updated['services']['api']['environment']['DB_INIT_MODE'] = 'verify'
+        verification = 'verify-production' if args.target == 'prod' and bindings else 'verify'
+        updated['services']['api']['environment']['DB_INIT_MODE'] = verification
         private_json(state / 'compose.private.json', updated)
         image_services = {name: {'image': image, 'pull_policy': 'never'} for name in services}
-        image_services['api']['environment'] = {'DB_INIT_MODE': 'verify'}
+        image_services['api']['environment'] = {'DB_INIT_MODE': verification}
         private_json(overlay, {'services': image_services})
         release_command = ['docker', 'compose', '--project-name', 'leader-api-' + args.target,
             '--project-directory', str(root)]
@@ -170,10 +176,20 @@ def main():
         try:
             run(release_command + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never'] + services, timeout=300)
             healthy(container)
-            if 'help-assistant-worker' in services:
-                worker = inspect('leader_help_assistant_dev')
-                if worker['Config']['Image'] != image or not worker['State']['Running']:
-                    raise RuntimeError('Dev assistant worker did not start')
+            for name in services:
+                if name == 'api':
+                    continue
+                worker_name = original['services'][name].get('container_name')
+                if not worker_name:
+                    raise RuntimeError('Worker container name must be explicit')
+                for _ in range(60):
+                    worker = inspect(worker_name)
+                    if (worker['Config']['Image'] == image and worker['State']['Running']
+                            and worker['State'].get('Health', {}).get('Status') == 'healthy'):
+                        break
+                    time.sleep(2)
+                else:
+                    raise RuntimeError('Worker health check failed: ' + name)
             if inspect(container)['Config']['Image'] != image:
                 raise RuntimeError('Unexpected running image')
             if any(inspect(name)['Id'] != identity for name, identity in protected.items()):

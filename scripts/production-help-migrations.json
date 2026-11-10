@@ -1,0 +1,38 @@
+[
+  {
+    "id": "20261023070000_help_service",
+    "sha256": "eed14d7cb8e127f25ccf728277e3cd57755fefef97f27aba8371e4e3cab9cc1d"
+  },
+  {
+    "id": "20261028120000_help_attachment_previews",
+    "sha256": "1681cb1edb964eedcde6a631b05e059accd3587a5aa0c48680264bb1bf94b9d9"
+  },
+  {
+    "id": "20261030110000_help_assistant_delivery",
+    "sha256": "54f022ba9f8eaa644771f984c5c55ef716bacf6d1b75bb175a9382eead187e8d"
+  },
+  {
+    "id": "20261031150000_knowledge_catalog",
+    "sha256": "a675d55c5bae81c678c6881e977d67c53be7b237032ce77387086950d5a0fe7c"
+  },
+  {
+    "id": "20261101030000_onec_personal_connections",
+    "sha256": "a108c284d86ffb58a08c8c050bad99059d23bb9d114396d57b1fb4c5e064c273"
+  },
+  {
+    "id": "20261101040000_onec_personal_display_names",
+    "sha256": "a467ba9928bf2b57b78ad92cc64ed567c3c0e93d7e81128e9c1a33adb72591c7"
+  },
+  {
+    "id": "20261105120000_help_read_indexes",
+    "sha256": "5e6e06bf9dd574d3c2f73be5b720fbb5b22b26e01569b230dddd8b7dbe7bdb46"
+  },
+  {
+    "id": "20261108010000_help_audio_transcripts",
+    "sha256": "b1e97281c03db5e06ed3128420b1f637b56c620f17aa04eac9a8bb9a55904671"
+  },
+  {
+    "id": "20261108090000_personal_mail",
+    "sha256": "f9eb99ad8e22d806745ae5ee207300939b0a67db3294416fc9883dddbfb50892"
+  }
+]
