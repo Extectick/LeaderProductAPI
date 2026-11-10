@@ -10,13 +10,28 @@ export const SOURCE_FRESH_MS = 10 * 60 * 1000;
 export const SCAN_INTERVAL_MS = 60000;
 export const MAX_SCAN_ENTRIES = 10000;
 export const MAX_SCAN_FOLDERS = 1000;
+export type KnowledgeIngestSection = 'COMPANY' | 'AI_WORKSPACE';
 export type KnowledgeConfig = {
   key: string; name: string; url: string; user: string; password: string;
   root: string; fingerprint: string;
+  ingestSections?: readonly KnowledgeIngestSection[];
 };
 export const knowledgeEnabled = () => process.env.KNOWLEDGE_ENABLED === 'true';
 // Opt-in per environment. Folder editors approve content by placing it in COMPANY.
 export const folderPublicationEnabled = () => knowledgeEnabled() && process.env.KNOWLEDGE_PUBLICATION_MODE === 'folder';
+export function knowledgeIngestSections(): KnowledgeIngestSection[] | undefined {
+  const value = process.env.KNOWLEDGE_INGEST_SECTIONS;
+  // Unset preserves the existing dev traversal, including AI working files.
+  if (value === undefined) return undefined;
+  const sections = value.split(',').map(section => section.trim());
+  if (!sections.length || sections.some(section => section !== 'COMPANY' && section !== 'AI_WORKSPACE') || new Set(sections).size !== sections.length) {
+    throw new KnowledgeError(503, 'KNOWLEDGE_INGEST_SECTIONS_INVALID');
+  }
+  return sections as KnowledgeIngestSection[];
+}
+export function knowledgePathAllowed(config: KnowledgeConfig, path: string): boolean {
+  return config.ingestSections === undefined || config.ingestSections.some(section => section === documentSection(path));
+}
 export function knowledgeConfig(): KnowledgeConfig {
   if (!knowledgeEnabled()) throw new KnowledgeError(503, 'KNOWLEDGE_DISABLED');
   const url = new URL(process.env.KNOWLEDGE_NEXTCLOUD_URL || 'https://invalid.invalid');
@@ -32,7 +47,7 @@ export function knowledgeConfig(): KnowledgeConfig {
     throw new KnowledgeError(503, 'KNOWLEDGE_CONFIGURATION_INVALID');
   }
   const origin = url.origin;
-  return { key, name: 'База знаний компании', url: origin, user, password, root,
+  return { key, name: 'База знаний компании', url: origin, user, password, root, ingestSections: knowledgeIngestSections(),
     fingerprint: createHash('sha256').update(JSON.stringify([origin, user, root])).digest('hex') };
 }
 export function documentSection(path: string) {

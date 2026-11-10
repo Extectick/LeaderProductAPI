@@ -46,3 +46,39 @@ test('chunking retains the tail and useful overlap without splitting surrogate p
   expect(chunks[chunks.length - 1]).toContain('Последняя строка 999');
   expect(chunks.every(x=>x.length<=500&&!/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(x))).toBe(true);
 });
+
+test('COMPANY-only ingestion prunes AI workspace, archive and similarly named folders before reading their children', async () => {
+  const calls: string[] = [];
+  const fetcher = jest.fn(async (input: string | URL | Request) => {
+    const requestPath = decodeURIComponent(new URL(String(input)).pathname).split(config.root + '/')[1];
+    calls.push(requestPath);
+    if (requestPath === '') return new Response(xml(row('', 1, true), row('Материалы компании', 2, true), row('Рабочая область ИИ', 3, true), row('Архив', 4, true), row('Материалы компании старые', 5, true)), { status: 207 });
+    if (requestPath === 'Материалы компании') return new Response(xml(row('Материалы компании', 2, true), row('Материалы компании/published.md', 6)), { status: 207 });
+    throw new Error('Excluded subtree must never be fetched');
+  });
+  const client = new KnowledgeDav({ ...config, ingestSections: ['COMPANY'] }, fetcher);
+  const files = await client.walk(async () => {});
+  expect(files.map(file => file.path)).toEqual(['Материалы компании/published.md']);
+  expect(calls).toEqual(['', 'Материалы компании']);
+});
+
+test('unset ingestion policy preserves existing workspace traversal', async () => {
+  const fetcher = jest.fn(async (input: string | URL | Request) => {
+    const requestPath = decodeURIComponent(new URL(String(input)).pathname).split(config.root + '/')[1];
+    return new Response(requestPath === ''
+      ? xml(row('', 1, true), row('Рабочая область ИИ', 3, true))
+      : xml(row('Рабочая область ИИ', 3, true), row('Рабочая область ИИ/draft.md', 8)), { status: 207 });
+  });
+  const files = await new KnowledgeDav(config, fetcher).walk(async () => {});
+  expect(files.map(file => file.path)).toEqual(['Рабочая область ИИ/draft.md']);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+test('direct excluded reads and stale ingestion jobs cannot bypass the traversal policy', async () => {
+  const fetcher = jest.fn();
+  const client = new KnowledgeDav({ ...config, ingestSections: ['COMPANY'] }, fetcher);
+  await expect(client.list('Рабочая область ИИ')).rejects.toThrow('EXCLUDED_SECTION');
+  await expect(client.stat('Рабочая область ИИ/draft.md')).rejects.toThrow('EXCLUDED_SECTION');
+  await expect(client.download({ remoteId: '8', path: 'Рабочая область ИИ/draft.md', etag: '"v1"', size: 5n, mimeType: 'text/plain', directory: false })).rejects.toThrow('EXCLUDED_SECTION');
+  expect(fetcher).not.toHaveBeenCalled();
+});

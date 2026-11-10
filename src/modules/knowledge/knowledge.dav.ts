@@ -1,5 +1,5 @@
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
-import { KnowledgeConfig, KnowledgeError, MAX_FILE_BYTES, MAX_SCAN_ENTRIES, MAX_SCAN_FOLDERS } from './knowledge.config';
+import { KnowledgeConfig, KnowledgeError, MAX_FILE_BYTES, MAX_SCAN_ENTRIES, MAX_SCAN_FOLDERS, knowledgePathAllowed } from './knowledge.config';
 
 export type DavEntry = { remoteId: string; path: string; etag: string; size: bigint; mimeType: string; directory: boolean };
 const propfind = `<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:resourcetype/><d:getetag/><d:getcontentlength/><d:getcontenttype/><oc:fileid/><oc:permissions/></d:prop></d:propfind>`;
@@ -66,6 +66,9 @@ export class KnowledgeDav {
   }
   private async request(path: string, method: string, headers: Record<string, string> = {}, body?: string) {
     if (path.startsWith('/') || path.split('/').some(x => x === '..' || x === '.') || /[\\\x00-\x1f]/.test(path)) throw new KnowledgeError(400, 'DAV_INVALID_PATH');
+    // Guard direct reads as well as traversal: an old queued job must not fetch
+    // a section excluded by the current environment's ingestion policy.
+    if ((path || method !== 'PROPFIND') && !knowledgePathAllowed(this.config, path)) throw new KnowledgeError(403, 'EXCLUDED_SECTION');
     let response: Response;
     try {
       response = await this.fetcher(new URL(encodePath(path), this.base), { method, body, redirect: 'error',
@@ -105,6 +108,9 @@ export class KnowledgeDav {
         paths.add(item.path); identities.add(item.remoteId);
         if (paths.size > MAX_SCAN_ENTRIES) throw new KnowledgeError(413, 'SOURCE_TOO_LARGE');
         if (item.path.split('/').some(part => part.startsWith('.') || part.startsWith('~$'))) continue;
+        // Prune before enqueuing folders, so excluded subtrees are never read.
+        // A completed scan applies the normal missing-document tombstones.
+        if (!knowledgePathAllowed(this.config, item.path)) continue;
         if (item.directory) queue.push(item.path); else files.push(item);
       }
     }
