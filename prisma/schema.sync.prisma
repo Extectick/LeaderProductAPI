@@ -100,6 +100,7 @@ model SyncRun {
 
   @@index([entity, direction, startedAt])
   @@index([status, startedAt])
+  @@index([startedAt])
 }
 
 model SyncRunItem {
