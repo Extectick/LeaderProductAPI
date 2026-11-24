@@ -17,7 +17,8 @@ import { getRedis } from '../../lib/redis';
 import prisma from '../../prisma/client';
 import { cacheDelPrefix } from '../../utils/cache';
 import { appendOrderEvent } from '../orders/orderEvents';
-import { recordOfflineDatasetChanges, resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
+import { resetOfflineDataset } from '../clientOrders/offlineClientOrders.service';
+import { lockDirectOfflineBatch, applyManagerReservations, applySellingPrices } from './onec.directOfflineBatch';
 import { lockOrderMutation, OrderIntegrityError } from '../orders/orderIntegrity';
 import {
   canRetryDuplicateLineSnapshot, canRetryMissingReferenceSnapshot, MissingOrderSnapshotReferenceError,
@@ -296,10 +297,14 @@ const clearOnecEntity = async (entity: ClearEntityCode) => {
         await tx.stockBalance.deleteMany({});
         return;
       case 'manager-stock':
+        await lockDirectOfflineBatch(tx, 'manager-stock');
         await tx.managerStockReservation.deleteMany({});
+        await resetOfflineDataset('manager-stock', tx);
         return;
       case 'selling-prices':
+        await lockDirectOfflineBatch(tx, 'selling-prices');
         await tx.sellingPrice.deleteMany({});
+        await resetOfflineDataset('selling-prices', tx);
         return;
       case 'organizations':
         await tx.stockBalance.deleteMany({});
@@ -412,9 +417,7 @@ export const handleEntityClear = async (req: Request, res: Response) => {
 
   try {
     await clearOnecEntity(entity);
-    if (entity === 'selling-prices') await resetOfflineDataset('selling-prices');
     if (entity === 'stock') await resetOfflineDataset('stock');
-    if (entity === 'manager-stock') await resetOfflineDataset('manager-stock');
     if (entity === 'stock' || entity === 'nomenclature' || entity === 'warehouses' || entity === 'organizations') {
       await cacheDelPrefix(STOCK_BALANCES_CACHE_PREFIX);
     }
@@ -736,10 +739,11 @@ export const handleProductPricesBatch = async (req: Request, res: Response) => {
 export const handleSellingPricesBatch = async (req: Request, res: Response) => {
   try {
     const parsed = sellingPricesBatchSchema.parse(req.body);
-    const syncedAt = now();
     const results: BatchResult[] = [];
-    const changedKeys: string[] = [];
+    const rows = new Map<string, Prisma.SellingPriceCreateManyInput>();
     await prisma.$transaction(async (tx) => {
+      await lockDirectOfflineBatch(tx, 'selling-prices');
+      const syncedAt = now();
       const productGuids = [...new Set(parsed.items.map((item) => item.productGuid))];
       const priceTypeGuids = [...new Set(parsed.items.map((item) => item.priceTypeGuid))];
       const [products, existingPriceTypes] = await Promise.all([
@@ -790,19 +794,18 @@ export const handleSellingPricesBatch = async (req: Request, res: Response) => {
             priority: item.priority ?? (item.sourceRegister === 'ЦеныНоменклатуры' ? 100 : 50),
             startDate: item.startDate ?? null,
             endDate: item.endDate ?? null,
-            minQty: toDecimal(item.minQty),
+            minQty: toDecimal(item.minQty) ?? rows.get(key)?.minQty,
             isActive: item.isActive ?? true,
             sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
             lastSyncedAt: syncedAt,
           };
-          await tx.sellingPrice.upsert({ where: { syncKey: key }, create: { syncKey: key, ...data }, update: data });
-          changedKeys.push(key);
+          rows.set(key, { syncKey: key, ...data });
           results.push({ key, status: 'ok' });
         } catch (error) {
           results.push({ key, status: 'error', error: error instanceof Error ? error.message : String(error) });
         }
       }
-      await recordOfflineDatasetChanges(tx, 'selling-prices', changedKeys, syncedAt);
+      await applySellingPrices(tx, rows, syncedAt);
     });
     const success = results.every((item) => item.status === 'ok');
     return res.status(success ? 200 : 422).json({ success, count: results.length, results });
@@ -816,10 +819,11 @@ export const handleSellingPricesBatch = async (req: Request, res: Response) => {
 export const handleManagerStockBatch = async (req: Request, res: Response) => {
   try {
     const parsed = managerStockBatchSchema.parse(req.body);
-    const syncedAt = now();
     const results: BatchResult[] = [];
-    const changedReserveKeys: string[] = [];
+    const rows = new Map<string, Prisma.ManagerStockReservationCreateManyInput>();
     await prisma.$transaction(async (tx) => {
+      await lockDirectOfflineBatch(tx, 'manager-stock');
+      const syncedAt = now();
       const productGuids = [...new Set(parsed.items.map((item) => item.productGuid))];
       const warehouseGuids = [...new Set(parsed.items.map((item) => item.warehouseGuid))];
       const organizationGuids = [...new Set(parsed.items.flatMap((item) => item.organizationGuid ? [item.organizationGuid] : []))];
@@ -852,14 +856,13 @@ export const handleManagerStockBatch = async (req: Request, res: Response) => {
             sourceUpdatedAt: item.sourceUpdatedAt ?? syncedAt,
             lastSyncedAt: syncedAt,
           };
-          await tx.managerStockReservation.upsert({ where: { syncKey: key }, create: { syncKey: key, ...data }, update: data });
-          changedReserveKeys.push(key);
+          rows.set(key, { syncKey: key, ...data });
           results.push({ key, status: 'ok' });
         } catch (error) {
           results.push({ key, status: 'error', error: error instanceof Error ? error.message : String(error) });
         }
       }
-      await recordOfflineDatasetChanges(tx, 'manager-stock', changedReserveKeys, syncedAt);
+      await applyManagerReservations(tx, rows, syncedAt);
     });
     const success = results.every((item) => item.status === 'ok');
     return res.status(success ? 200 : 422).json({ success, count: results.length, results });
