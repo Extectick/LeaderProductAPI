@@ -1,0 +1,7 @@
+[Unit]
+Description=LeaderAPI daily table measurements and expiration of inactive token families
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/leader-db-maintenance/run.py prod maintain --state %h/.local/state/leader-db-maintenance
+UMask=0077
+TimeoutStartSec=5min
