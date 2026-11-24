@@ -201,3 +201,31 @@ test('successful stock HTTP batch journals totals rather than one item per balan
   expect(await prisma.syncRunItem.count()).toBe(0);
   expect(await prisma.syncRun.findFirstOrThrow()).toMatchObject({ totalCount: 1, successCount: 1, errorCount: 0, status: 'COMPLETED' });
 });
+
+test('confirmed removals resolve missing products and protect later restored quantities', async () => {
+  const { stockBatchSchema } = await import('../src/modules/onec/onec.schemas');
+  const tombstone = {
+    ...stock, quantity: 0, reserved: 0, inStock: 0, available: 0, clientReserved: 0, managerReserved: 0,
+    shipping: 0, removedFromSource: true as const,
+  };
+  const send = async (item: typeof tombstone) => {
+    const { items } = stockBatchSchema.parse({ secret: 'test', items: [item] });
+    const session = await start();
+    await stageStockBatch(session.id, items);
+    return complete(session.id);
+  };
+  expect(stockBatchSchema.safeParse({ secret: 'test', items: [{ ...tombstone, shipping: undefined }] }).success).toBe(false);
+  expect(stockBatchSchema.safeParse({ secret: 'test', items: [{ ...tombstone, available: 1 }] }).success).toBe(false);
+  expect((await send({ ...tombstone, productGuid: 'missing' })).status).toBe('COMPLETED');
+  expect((await send({ ...tombstone, productGuid: 'missing', warehouseGuid: 'missing' })).status).toBe('PARTIAL');
+  expect((await importStock([{ ...stock, quantity: 0, productGuid: 'missing' }])).status).toBe('PARTIAL');
+  expect(await prisma.stockBalance.count()).toBe(0);
+  expect(await prisma.offlineDatasetChange.count()).toBe(0);
+  await importStock();
+  await send({ ...tombstone, updatedAt: new Date(+stamp + 1000) });
+  expect((await prisma.stockBalance.findFirstOrThrow()).quantity.toNumber()).toBe(0);
+  await importStock([{ ...stock, quantity: 13, updatedAt: new Date(+stamp + 2000) }]);
+  await send(tombstone);
+  expect((await prisma.stockBalance.findFirstOrThrow()).quantity.toNumber()).toBe(13);
+  expect(await prisma.offlineDatasetChange.count()).toBe(3);
+});

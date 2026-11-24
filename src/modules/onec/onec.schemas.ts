@@ -52,6 +52,15 @@ export const nomenclatureBatchSchema = z.object({
   items: z.array(nomenclatureItemSchema).min(1),
 });
 
+export function isStockRemoval(item: {
+  removedFromSource?: boolean; quantity: number; reserved?: number; inStock?: number; shipping?: number;
+  clientReserved?: number; managerReserved?: number; available?: number;
+}): boolean {
+  return item.removedFromSource === true && item.quantity === 0 && item.reserved === 0 &&
+    item.inStock === 0 && item.shipping === 0 && item.clientReserved === 0 &&
+    item.managerReserved === 0 && item.available === 0;
+}
+
 const stockItemSchema = z.object({
   productGuid: z.string().min(1),
   warehouseGuid: z.string().min(1),
@@ -63,12 +72,13 @@ const stockItemSchema = z.object({
   clientReserved: z.number().optional(),
   managerReserved: z.number().optional(),
   available: z.number().optional(),
+  removedFromSource: z.literal(true).optional(),
   updatedAt: nullableDate,
   seriesGuid: z.string().optional(),
   seriesNumber: z.string().optional(),
   seriesProductionDate: nullableDate,
   seriesExpiresAt: nullableDate,
-});
+}).refine(item => !item.removedFromSource || isStockRemoval(item), { message: 'A removed stock key requires seven explicit zero balances' });
 export type StockItem = z.infer<typeof stockItemSchema>;
 
 export const stockBatchSchema = z.object({
