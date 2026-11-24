@@ -40,6 +40,7 @@ import marketplaceRouter from './modules/marketplace/marketplace.routes';
 import clientOrdersRouter from './modules/clientOrders/clientOrders.routes';
 import counterpartiesRouter from './modules/counterparties/counterparties.routes';
 import catalogRouter from './modules/catalog/catalog.routes';
+import { appErrorReportsRouter } from './modules/monitoring/appErrorReports';
 import { sentryWebhookRouter, crashEventsRouter } from './modules/monitoring/monitoring.routes';
 import { startCrashRetention, stopCrashRetention } from './modules/monitoring/crashRetention';
 import { startScheduledJobs, stopScheduledJobs } from './services/scheduledJobsService';
@@ -167,6 +168,8 @@ app.use(
 );
 
 // ---- Common middlewares ----
+// Capture bounded diagnostics before body, URL and Kafka request logging.
+app.use('/api/diagnostics/app-errors', appErrorReportsRouter);
 morgan.token('safe-url', (req) => redactSensitiveUrl((req as any).originalUrl || req.url || ''));
 app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]'));
 // Must precede JSON parsing and debug/Kafka logging: signature covers original bytes.
