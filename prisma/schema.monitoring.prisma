@@ -21,6 +21,7 @@ model AppCrashEvent {
   screen        String?  @db.VarChar(160)
   deviceModel   String?  @db.VarChar(100)
   osVersion     String?  @db.VarChar(40)
+  details       Json?
 
   @@unique([project, eventId])
   @@index([occurredAt, id])
