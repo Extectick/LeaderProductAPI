@@ -1,3 +1,4 @@
+import {prepareScheduleReply} from './help.schedule-dialogue';
 import { withHelpPerformance, helpPerformanceSnapshot, timeHelpStage } from './help.performance';
 import {createHelpAnalysisEvidenceSink} from './help.analysis-evidence';
 import { bunnyConfiguration, HelpBunnyError, prepareHelpBunnyAnswer } from './help.bunny';
@@ -103,6 +104,7 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
   return withHelpPerformance(initial, async () => {
   let answer:string|undefined;
   let grounded:HelpGroundedAnswer|undefined;
+  let schedule: Awaited<ReturnType<typeof prepareScheduleReply>>;
   let preparedFiles:PreparedHelpAIFile[] = [], filesPublished = false;
   try {
     await helpActor(initial.ownerId);
@@ -112,7 +114,12 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
     }
     if (initial.provider === 't3' && !t3Active()) throw new HelpT3Error('HELP_T3_NOT_CONFIGURED');
     if(initial.step>=3||initial.provider==='openai'){
-      if(initial.provider==='t3') {
+      schedule = await prepareScheduleReply(initial.context, async before => {
+        const previous = await prisma.helpMessage.findFirst({where:{ticketId:initial.ticketId,sequence:{lt:before}},orderBy:{sequence:'desc'},select:{assistantState:true}});
+        return previous?.assistantState;
+      });
+      if (schedule) answer = schedule.text;
+      else if(initial.provider==='t3') {
         grounded=await withHelpAssistantLease(jobId,leaseToken,signal=>prepareHelpT3Answer({id:jobId,ticketId:initial.ticketId,ownerId:initial.ownerId,leaseToken},initial.context,signal),shutdown);
         answer=grounded.text;
       } else if(initial.provider==='bunny') {
@@ -178,7 +185,7 @@ export async function processHelpAssistantJob(jobId:string,leaseToken:string,pro
         const finalText = ordinaryFiles.length ? `${answer}\n\nПрикреплены файлы: ${ordinaryFiles.map(file=>file.name).join(', ')}.` : answer;
         await db.helpMessage.update({where:{id:job.messageId},data:{text:finalText,kind:'TEXT'}});
         await db.helpTicket.update({where:{id:job.ticketId},data:{updatedAt:new Date()}});
-        await updateState(db,next,'completed',grounded?{answerMode:grounded.mode,sources:grounded.sources,...(grounded.suggestions?.length?{suggestions:grounded.suggestions}:{}),...(grounded.questions?.length?{questions:grounded.questions}:{}),...(grounded.action?{action:grounded.action}:{}),...(grounded.generation?{generation:grounded.generation}:{}),...(grounded.handoffReason?{handoffReason:grounded.handoffReason,action:{type:'request_it'}}:{})}:{});
+        await updateState(db,next,'completed',schedule ? schedule.state : grounded?{answerMode:grounded.mode,sources:grounded.sources,...(grounded.suggestions?.length?{suggestions:grounded.suggestions}:{}),...(grounded.questions?.length?{questions:grounded.questions}:{}),...(grounded.action?{action:grounded.action}:{}),...(grounded.generation?{generation:grounded.generation}:{}),...(grounded.handoffReason?{handoffReason:grounded.handoffReason,action:{type:'request_it'}}:{})}:{});
       }else{
         const claimed=await db.helpAssistantJob.updateMany({where:{id:job.id,leaseToken,status:{in:ACTIVE},leaseUntil:{gt:new Date()}},data:{status:'QUEUED',step:job.step+1,attempts:0,leaseToken:null,leaseUntil:null,nextAt:new Date(Date.now()+job.durationMs/4)}});
         if(!claimed.count)return false;

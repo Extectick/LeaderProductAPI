@@ -6,6 +6,7 @@ model HelpSchemaVersion {
 }
 
 model HelpTicket {
+  schedules HelpSchedule[]
   id Int @id @default(autoincrement())
   ownerId Int
   owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict)
@@ -43,6 +44,7 @@ model HelpMember {
 }
 
 model HelpMessage {
+  schedule HelpSchedule?
   id Int @id @default(autoincrement())
   ticketId Int
   authorId Int?

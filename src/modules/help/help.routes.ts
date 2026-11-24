@@ -20,6 +20,8 @@ import {helpClientContextSchema} from './help.chat-context';
 import {helpItBrief} from './help.it-brief';
 import {helpAttachmentTranscript} from './help.audio-transcript';
 
+import helpSchedulesRouter from './help.schedules.routes';
+
 const router=express.Router();
 const idSchema=z.coerce.number().int().positive();
 const messageSchema=z.object({clientMessageId:z.string().min(8).max(100),text:z.string().max(20000).default(''),attachmentIds:z.array(z.string().uuid()).max(HELP_MAX_ATTACHMENTS).default([]).refine(a=>new Set(a).size===a.length),replyToId:idSchema.optional(),forwardedFromId:idSchema.optional(),rating:z.number().int().min(0).max(5).optional(),clientContext:helpClientContextSchema.optional()}).strict();
@@ -37,6 +39,7 @@ async function detail(res:Response,id:number,actor:service.HelpActor) {
 }
 router.use(authenticateToken);
 router.use((_req,res,next)=>{res.setHeader('Cache-Control','private, no-store');next();});
+router.use('/schedules',helpSchedulesRouter);
 router.get('/diagnostics',route(async(_req,res,actor)=>{if(!actor.canManage)throw new service.HelpError(403,'HELP_FORBIDDEN','Требуется право специалиста IT');res.json(await helpDeliveryDiagnostics());}));
 router.post('/notifications/:id/retry',route(async(req,res,actor)=>{
   if(!actor.canManage)throw new service.HelpError(403,'HELP_FORBIDDEN','Требуется право специалиста IT');

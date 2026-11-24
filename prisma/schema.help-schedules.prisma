@@ -1,0 +1,47 @@
+// Applied by the scoped Help migration. Partial indexes are defined in its SQL.
+model HelpSchedule {
+  id String @id
+  ownerId Int
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ticketId Int
+  ticket HelpTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  messageId Int @unique
+  message HelpMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  time String
+  timeZone String
+  warehouse String
+  metric String
+  active Boolean @default(true)
+  due DateTime @db.Timestamptz(6)
+  revision Int @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+  cancelled Boolean @default(false)
+  runs HelpScheduleRun[]
+  @@index([ownerId, createdAt(sort: Desc)])
+}
+
+model HelpScheduleRun {
+  id String @id
+  scheduleId String
+  schedule HelpSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  revision Int
+  slot DateTime? @db.Timestamptz(6)
+  requestId String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  finishedAt DateTime? @db.Timestamptz(6)
+  status String @default("queued")
+  rows Json @default("[]")
+  truncated Boolean @default(false)
+  error String?
+  onecProof Json?
+  readAt DateTime? @db.Timestamptz(6)
+  pushClaimedAt DateTime? @db.Timestamptz(6)
+  leaseToken String?
+  leaseUntil DateTime? @db.Timestamptz(6)
+  attempts Int @default(0)
+  @@unique([scheduleId,slot])
+  @@unique([scheduleId,requestId])
+  @@index([scheduleId,finishedAt(sort: Desc),id(sort: Desc)], map: "HelpScheduleRun_history_idx")
+  @@index([status,leaseUntil,createdAt], map: "HelpScheduleRun_worker_idx")
+}

@@ -286,6 +286,7 @@ enum AuthProvider {
 }
 
 model User {
+  helpSchedules HelpSchedule[]
   onecConnections OnecConnection[]
   helpOwnedTickets HelpTicket[]
   helpAssistantJobs HelpAssistantJob[]
