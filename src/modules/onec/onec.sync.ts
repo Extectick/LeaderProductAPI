@@ -1,3 +1,4 @@
+import { isStockRemoval } from './onec.schemas';
 import {
   CatalogChangeOperation,
   OnecStageResolveStatus,
@@ -2127,6 +2128,12 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
       const warehouse = warehouseMap.get(item.warehouseGuid);
       const organization = organizationMap.get(organizationGuid ?? '');
 
+      // A product FK is required on every StockBalance. A source-confirmed removal
+      // cannot leave a balance for a product absent from the local catalog.
+      if (!product && warehouse && organization && isStockRemoval(item)) {
+        summary.resolvedStageIds.push(stage.id);
+        continue;
+      }
       if (!product) {
         summary.blocked.push({ stageId: stage.id, message: `Product ${item.productGuid} not found` });
         continue;
@@ -2149,6 +2156,10 @@ async function applyStagedStock(tx: TxClient, sessionId: string, syncedAt: Date)
 
       const syncKey = `${product.id}|${warehouse.id}|${organization.id}|${item.seriesGuid ?? ''}`;
       const existing = current.get(syncKey);
+      if (!existing && isStockRemoval(item)) {
+        summary.resolvedStageIds.push(stage.id);
+        continue;
+      }
       const sourceUpdatedAt = item.updatedAt ? new Date(item.updatedAt) : stage.lastImportedAt;
       if (existing?.sourceUpdatedAt && existing.sourceUpdatedAt > sourceUpdatedAt) {
         summary.resolvedStageIds.push(stage.id);
