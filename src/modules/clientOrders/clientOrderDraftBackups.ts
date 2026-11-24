@@ -36,17 +36,38 @@ export async function saveDraftBackup(userId: number, clientOrderId: string, dat
       SELECT pg_advisory_xact_lock(hashtextextended(${`draft-backup:${userId}:${clientOrderId}`}, 0))
     ) SELECT 1::integer AS locked FROM draft_lock`;
     const where = { userId_clientOrderId: { userId, clientOrderId } };
-    const previous = await tx.clientOrderDraftBackup.findUnique({ where });
+    const previous = await tx.clientOrderDraftBackup.findUnique({ where, select: { clientRevision: true, payloadHash: true } });
     if (previous && data.clientRevision < previous.clientRevision) throw new DraftBackupConflict();
     if (previous && data.clientRevision === previous.clientRevision && payloadHash !== previous.payloadHash) throw new DraftBackupConflict();
-    const updated = !previous || data.clientRevision > previous.clientRevision;
-    const values = {
-      clientRevision: data.clientRevision, payloadHash, payload: data.payload as Prisma.InputJsonValue,
-      ...(data.order ? { orderSnapshot: data.order as Prisma.InputJsonValue } : {}),
-      ...(updated ? { review: Prisma.DbNull, submittedOrderGuid: null } : {}),
-    };
-    const saved = await tx.clientOrderDraftBackup.upsert({ where,
-      create: { userId, clientOrderId, ...values }, update: values });
+    const select = { clientRevision: true, updatedAt: true, submittedOrderGuid: true } as const;
+    let saved;
+    if (previous) {
+      // A retry refreshes savedAt. Preserve each unchanged JSONB separately so
+      // PostgreSQL can reuse its existing TOAST chunks. The business hash alone
+      // cannot detect changes to transport fields such as geoEvents.
+      const advance = data.clientRevision > previous.clientRevision;
+      [saved] = await tx.$queryRaw<{ clientRevision: number; updatedAt: Date; submittedOrderGuid: string | null }[]>`
+        WITH incoming AS (
+          SELECT ${JSON.stringify(data.payload)}::jsonb AS payload,
+                 ${data.order ? JSON.stringify(data.order) : null}::jsonb AS snapshot
+        )
+        UPDATE "ClientOrderDraftBackup" d
+        SET "clientRevision" = ${data.clientRevision}, "payloadHash" = ${payloadHash},
+            payload = CASE WHEN d.payload = i.payload THEN d.payload ELSE i.payload END,
+            "orderSnapshot" = CASE WHEN i.snapshot IS NULL OR d."orderSnapshot" = i.snapshot
+                                   THEN d."orderSnapshot" ELSE i.snapshot END,
+            review = CASE WHEN ${advance} THEN NULL ELSE d.review END,
+            "submittedOrderGuid" = CASE WHEN ${advance} THEN NULL ELSE d."submittedOrderGuid" END,
+            "updatedAt" = ${new Date()}
+        FROM incoming i WHERE d."userId" = ${userId} AND d."clientOrderId" = ${clientOrderId}
+        RETURNING d."clientRevision", d."updatedAt", d."submittedOrderGuid"`;
+    } else {
+      saved = await tx.clientOrderDraftBackup.create({ select, data: {
+        userId, clientOrderId, clientRevision: data.clientRevision, payloadHash,
+        payload: data.payload as Prisma.InputJsonValue,
+        ...(data.order ? { orderSnapshot: data.order as Prisma.InputJsonValue } : {}),
+      } });
+    }
     return { clientRevision: saved.clientRevision, savedAt: saved.updatedAt.toISOString(),
       submittedOrderGuid: saved.submittedOrderGuid };
   });
