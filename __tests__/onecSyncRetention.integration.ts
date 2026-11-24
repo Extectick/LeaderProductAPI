@@ -194,6 +194,142 @@ test('journal cleanup batches many small runs while preserving their summaries a
   expect(await prisma.syncRunItem.count({ where: { status: 'OK' } })).toBe(0);
 });
 
+async function dateStockSession(sessionId: string, at: Date) {
+  await prisma.onecSyncSession.update({ where: { id: sessionId }, data: {
+    startedAt: at, completedAt: at, lastActivityAt: at,
+  } });
+  await prisma.onecStageStock.updateMany({ where: { sessionId }, data: { lastImportedAt: at } });
+  await prisma.onecStageStock.updateMany({ where: { sessionId, resolveStatus: 'RESOLVED' }, data: { resolvedAt: at } });
+}
+
+test('compact stock keeps the latest two applied imports per organization and warehouse, including partial imports', async () => {
+  await prisma.organization.create({ data: { guid: 'o2', name: 'Second organization' } });
+  await prisma.warehouse.create({ data: { guid: 'w2', name: 'Second warehouse' } });
+  const first = await importStock([stock, { ...stock, warehouseGuid: 'w2' }, { ...stock, organizationGuid: 'o2' },
+    { ...stock, productGuid: 'missing' }]);
+  const second = await importStock([stock, { ...stock, warehouseGuid: 'w2' }]);
+  const third = await importStock([stock, { ...stock, productGuid: 'missing' }]);
+  expect(third.status).toBe('PARTIAL');
+  const fourth = await importStock([{ ...stock, quantity: 13, updatedAt: new Date(stamp.getTime() + 1000) }]);
+  const sessions = [first, second, third, fourth].map(result => result.sessionId);
+  for (const [index, id] of sessions.entries()) {
+    await dateStockSession(id, new Date(stamp.getTime() + index * 60_000));
+  }
+  const balances = await prisma.stockBalance.findMany({ orderBy: { syncKey: 'asc' } });
+  const revision = (await prisma.offlineDatasetState.findFirstOrThrow()).currentRevision;
+  const options = { compactStock: true, now: clock };
+  const preview = await runOnecSyncMaintenance(options);
+  expect(preview.counts.OnecStageStock).toBe(2);
+  expect(await prisma.onecStageStock.count()).toBe(9);
+
+  const one = await runOnecSyncMaintenance({ ...options, dryRun: false, batchSize: 1, maxRows: 1 });
+  expect(one.counts.OnecStageStock).toBe(1);
+  const rest = await runOnecSyncMaintenance({ ...options, dryRun: false });
+  expect(rest.counts.OnecStageStock).toBe(1);
+  expect((await runOnecSyncMaintenance(options)).counts.OnecStageStock).toBe(0);
+
+  const primaryRows = await prisma.onecStageStock.findMany({
+    where: { productGuid: 'p', organizationGuid: 'o', warehouseGuid: 'w' }, select: { sessionId: true },
+  });
+  expect(primaryRows.map(row => row.sessionId).sort()).toEqual([third.sessionId, fourth.sessionId].sort());
+  expect(await prisma.onecStageStock.count({ where: { warehouseGuid: 'w2' } })).toBe(2);
+  expect(await prisma.onecStageStock.count({ where: { organizationGuid: 'o2' } })).toBe(1);
+  expect(await prisma.onecStageStock.count({ where: { resolveStatus: 'BLOCKED' } })).toBe(2);
+  expect(await prisma.stockBalance.findMany({ orderBy: { syncKey: 'asc' } })).toEqual(balances);
+  expect((await prisma.offlineDatasetState.findFirstOrThrow()).currentRevision).toBe(revision);
+  expect(await complete(first.sessionId)).toEqual(first);
+});
+
+test('invalid, unfinished and empty imports cannot displace older diagnostic copies', async () => {
+  const baseline = await fixture('COMPLETED');
+  const previous = await fixture('PARTIAL');
+  await dateStockSession(baseline.session.id, old);
+  await dateStockSession(previous.session.id, stamp);
+  const protectedRows = await Promise.all([
+    fixture('COMPLETING'), fixture('ACCEPTING'), fixture('FAILED'),
+    fixture('PARTIAL', 'RESOLVED', { replaceMode: true }),
+    fixture('COMPLETED', 'RESOLVED', { notes: 'ambiguous' }),
+    fixture('PARTIAL', 'ERROR'), fixture('PARTIAL', 'PENDING'), fixture('PARTIAL', 'BLOCKED'),
+  ]);
+  for (const { session } of protectedRows) {
+    await dateStockSession(session.id, new Date(stamp.getTime() + 60_000));
+  }
+  const invalidResolved = await fixture('COMPLETED');
+  await dateStockSession(invalidResolved.session.id, new Date(stamp.getTime() + 60_000));
+  await prisma.onecStageStock.update({ where: { id: invalidResolved.row.id }, data: { lastResolveError: 'legacy error' } });
+  const unknownScope = await fixture('COMPLETED');
+  await prisma.onecStageStock.update({ where: { id: unknownScope.row.id }, data: { organizationGuid: null } });
+  const future = await fixture('COMPLETED');
+  await dateStockSession(future.session.id, new Date(clock.getTime() + 60_000));
+  await prisma.onecSyncSession.create({ data: {
+    requestId: randomUUID(), selectedEntities: ['stock'], status: 'COMPLETED', completedAt: clock, lastActivityAt: clock,
+  } });
+  const options = { compactStock: true, now: clock, dryRun: false };
+  expect((await runOnecSyncMaintenance(options)).counts.OnecStageStock).toBe(0);
+  const next = await fixture('COMPLETED');
+  await dateStockSession(next.session.id, new Date(stamp.getTime() + 120_000));
+  expect((await runOnecSyncMaintenance(options)).counts.OnecStageStock).toBe(1);
+  expect(await prisma.onecStageStock.count({ where: { sessionId: baseline.session.id } })).toBe(0);
+  expect(await prisma.onecStageStock.count({ where: { sessionId: { in: protectedRows.map(r => r.session.id) } } }))
+    .toBe(protectedRows.length);
+  const guardedIds = [invalidResolved.row.id, unknownScope.row.id, future.row.id];
+  expect(await prisma.onecStageStock.count({ where: { id: { in: guardedIds } } })).toBe(guardedIds.length);
+});
+
+test('a tie at the second newest completion does not discard an ambiguous diagnostic copy', async () => {
+  const ids: string[] = [];
+  for (const time of [old, stamp, stamp, new Date(stamp.getTime() + 60_000)]) {
+    const { session } = await fixture('COMPLETED');
+    await dateStockSession(session.id, time);
+    ids.push(session.id);
+  }
+  const result = await runOnecSyncMaintenance({ dryRun: false, compactStock: true, now: clock });
+  expect(result.counts.OnecStageStock).toBe(1);
+  const remaining = await prisma.onecStageStock.findMany({ select: { sessionId: true } });
+  expect(remaining.map(row => row.sessionId).sort()).toEqual(ids.slice(1).sort());
+});
+
+test('compact cleanup skips a locked session and resumes it without touching either recent copy', async () => {
+  const ids: string[] = [];
+  for (let index = 0; index < 4; index++) {
+    const { session } = await fixture('COMPLETED');
+    await dateStockSession(session.id, new Date(stamp.getTime() + index * 60_000));
+    ids.push(session.id);
+  }
+  const options = { compactStock: true, dryRun: false, now: clock };
+  const locker = await pool.connect();
+  try {
+    await locker.query('BEGIN');
+    await locker.query('SELECT id FROM "OnecSyncSession" WHERE id=$1 FOR UPDATE', [ids[0]]);
+    expect((await runOnecSyncMaintenance(options)).counts.OnecStageStock).toBe(1);
+    expect(await prisma.onecStageStock.count({ where: { sessionId: ids[0] } })).toBe(1);
+  } finally {
+    await locker.query('ROLLBACK');
+    locker.release();
+  }
+  expect((await runOnecSyncMaintenance(options)).counts.OnecStageStock).toBe(1);
+  const remaining = await prisma.onecStageStock.findMany({ select: { sessionId: true } });
+  expect(remaining.map(row => row.sessionId).sort()).toEqual(ids.slice(2).sort());
+});
+
+test('stock-only mode leaves other staging rows untouched and regular maintenance applies their original age cutoff', async () => {
+  const older = await fixture('COMPLETED');
+  const recent = await fixture('COMPLETED');
+  await dateStockSession(older.session.id, old);
+  await dateStockSession(recent.session.id, stamp);
+  for (const [sessionId, date] of [[older.session.id, old], [recent.session.id, stamp]] as const) {
+    await prisma.onecStageWarehouse.create({ data: {
+      sessionId, guid: 'w', sourceKey: 'w', payload: {}, payloadHash: 'hash',
+      resolveStatus: 'RESOLVED', resolvedAt: date, lastImportedAt: date,
+    } });
+  }
+  const options = { compactStock: true, dryRun: false, now: clock };
+  expect((await runOnecSyncMaintenance({ ...options, stockOnly: true })).total).toBe(0);
+  expect(await prisma.onecStageWarehouse.count()).toBe(2);
+  expect((await runOnecSyncMaintenance({ ...options, stockOnly: false })).counts.OnecStageWarehouse).toBe(1);
+  expect((await prisma.onecStageWarehouse.findFirstOrThrow()).sessionId).toBe(recent.session.id);
+});
+
 test('successful stock HTTP batch journals totals rather than one item per balance', async () => {
   const response: any = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   await handleStockBatch({ body: { secret: 'test', items: [stock] } } as any, response);

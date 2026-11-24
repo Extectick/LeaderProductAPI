@@ -7,18 +7,87 @@ export const ONEC_STAGE_TABLES = [
   'OnecStageProductPrice', 'OnecStageSpecialPrice',
 ] as const;
 const LOCK_NAME = 'onec-sync-retention-v1';
-const closedSession = `s.status IN ('COMPLETED', 'PARTIAL') AND s.notes IS NULL
-  AND NOT (s."replaceMode" AND s.status = 'PARTIAL')
-  AND s."completedAt" < $1 AND s."lastActivityAt" < $1`;
-const resolvedRow = `t."resolveStatus" = 'RESOLVED' AND t."lastResolveError" IS NULL
-  AND t."resolvedAt" < $1 AND t."lastImportedAt" < $1`;
+const usableSession = `s.status IN ('COMPLETED', 'PARTIAL') AND s.notes IS NULL
+  AND NOT (s."replaceMode" AND s.status = 'PARTIAL')`;
+const closedSession = `${usableSession} AND s."completedAt" < $1 AND s."lastActivityAt" < $1`;
+const cleanRow = `t."resolveStatus" = 'RESOLVED' AND t."lastResolveError" IS NULL`;
+const resolvedRow = `${cleanRow} AND t."resolvedAt" < $1 AND t."lastImportedAt" < $1`;
 const successfulRun = `${closedSession} AND r.entity = 'STOCK' AND r.direction = 'IMPORT'
   AND r.status IN ('COMPLETED', 'PARTIAL') AND r."finishedAt" < $1 AND r.notes IS NULL`;
 const successfulItem = `t.status = 'OK' AND t.error IS NULL AND t."createdAt" < $1`;
 
+// A stock delta needn't cover every warehouse. Only two usable, newer sessions
+// covering this exact organization/warehouse can retire an older session's rows.
+// Inspect a bounded set of recent stock imports once per invocation. A scope
+// absent from that window keeps its existing rows until it appears twice again.
+const stockBoundariesQuery = `
+  WITH latest AS MATERIALIZED (
+    SELECT s.id, s."completedAt" FROM "OnecSyncSession" s
+    WHERE ${usableSession} AND s."completedAt" <= $1 AND s."lastActivityAt" <= $1
+      AND (s."selectedEntities" IS NULL OR s."selectedEntities" = '[]'::jsonb OR s."selectedEntities" ? 'stock')
+    ORDER BY s."completedAt" DESC, s.id DESC LIMIT 128
+  ), recent AS MATERIALIZED (
+    SELECT s.id, s."completedAt" FROM latest s
+    WHERE EXISTS (SELECT 1 FROM "OnecStageStock" t WHERE t."sessionId" = s.id AND ${cleanRow}
+        AND t."organizationGuid" <> '' AND t."warehouseGuid" <> ''
+        AND t."resolvedAt" <= $1 AND t."lastImportedAt" <= $1 LIMIT 1 OFFSET 0)
+    ORDER BY s."completedAt" DESC, s.id DESC LIMIT 32
+  ), coverage AS (
+    SELECT DISTINCT r.id, r."completedAt", t."organizationGuid", t."warehouseGuid"
+    FROM recent r JOIN "OnecStageStock" t ON t."sessionId" = r.id
+    WHERE ${cleanRow} AND t."organizationGuid" <> '' AND t."warehouseGuid" <> ''
+      AND t."resolvedAt" <= $1 AND t."lastImportedAt" <= $1
+  ), ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY "organizationGuid", "warehouseGuid"
+      ORDER BY "completedAt" DESC, id DESC) AS position FROM coverage
+  )
+  SELECT coalesce(json_agg(json_build_object('org', "organizationGuid", 'warehouse', "warehouseGuid",
+    'boundary', "completedAt")), '[]'::json)::text AS scopes FROM ranked WHERE position = 2`;
+
+const stockScopes = `scopes AS MATERIALIZED (
+  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(org text, warehouse text, boundary timestamp)
+)`;
+const joinStockScope = `JOIN scopes w ON w.org = t."organizationGuid" AND w.warehouse = t."warehouseGuid"`;
+const supersededStock = `${cleanRow} AND s."completedAt" < w.boundary AND s."lastActivityAt" < w.boundary
+  AND t."resolvedAt" < w.boundary AND t."lastImportedAt" < w.boundary`;
+// Page an exact preview over session summaries. One count across many millions
+// of stock rows can exceed the statement timeout and hold a long MVCC snapshot.
+const previewPageSize = 32;
+const countCompactStock = `WITH ${stockScopes}, parents AS MATERIALIZED (
+    SELECT s.id, s."completedAt", s."lastActivityAt" FROM "OnecSyncSession" s
+    WHERE ${usableSession} AND s."completedAt" < (SELECT max(boundary) FROM scopes)
+      AND ($2::text IS NULL OR s.id > $2) ORDER BY s.id LIMIT ${previewPageSize}
+  )
+  SELECT coalesce(sum(m.n),0)::int AS count, max(s.id) AS cursor, count(*) = ${previewPageSize} AS more
+  FROM parents s CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM "OnecStageStock" t ${joinStockScope}
+    WHERE t."sessionId" = s.id AND ${supersededStock}
+  ) m`;
+// First order inexpensive session summaries; probe their indexed stage rows
+// only until a bounded worklist is full. Reusing IDs across batches avoids
+// rescanning thousands of historical sessions for every 1,000 deleted rows.
+const compactParentsQuery = `WITH ${stockScopes}, ordered AS MATERIALIZED (
+    SELECT s.id, s."completedAt", s."lastActivityAt" FROM "OnecSyncSession" s
+    WHERE ${usableSession} AND s."completedAt" < (SELECT max(boundary) FROM scopes)
+    ORDER BY s."completedAt" DESC, s.id DESC
+  ) SELECT s.id FROM ordered s CROSS JOIN LATERAL (
+    SELECT 1 FROM "OnecStageStock" t ${joinStockScope}
+    WHERE t."sessionId" = s.id AND ${supersededStock} LIMIT 1
+  ) matched LIMIT $2`;
+const deleteCompactStock = `WITH ${stockScopes}, parent AS MATERIALIZED (
+    SELECT s.id, s."completedAt", s."lastActivityAt" FROM "OnecSyncSession" s
+    WHERE s.id = $3 AND ${usableSession} FOR UPDATE OF s SKIP LOCKED
+  ), candidates AS MATERIALIZED (
+    SELECT t.id FROM parent s JOIN "OnecStageStock" t ON t."sessionId" = s.id ${joinStockScope}
+    WHERE ${supersededStock} LIMIT $2 FOR UPDATE OF t SKIP LOCKED
+  ), deleted AS (DELETE FROM "OnecStageStock" t USING candidates c WHERE t.id = c.id RETURNING 1)
+  SELECT count(*)::int AS count FROM deleted`;
+
 export type OnecRetentionOptions = {
   dryRun?: boolean;
   now?: Date;
+  compactStock?: boolean;
+  stockOnly?: boolean;
   retentionHours?: number;
   batchSize?: number;
   maxRows?: number;
@@ -31,13 +100,16 @@ function bounded(value: number | undefined, fallback: number, min: number, max: 
 /** Defaults to read-only. Sessions/summaries, errors, live balances and offline datasets are never deleted. */
 export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {}) {
   const dryRun = options.dryRun !== false;
+  const compactStock = options.compactStock ?? process.env.ONEC_STOCK_COMPACT_ENABLED === 'true';
+  const stockOnly = options.stockOnly ?? (compactStock && process.env.ONEC_SYNC_RETENTION_ENABLED !== 'true');
   const hours = bounded(options.retentionHours, 24, 24, 365 * 24);
   const batchSize = bounded(options.batchSize, 1000, 1, 2000);
   const maxRows = bounded(options.maxRows, 50_000, 1, 200_000);
   const budgetMs = bounded(options.budgetMs, 15_000, 1, 45_000);
-  const cutoff = new Date((options.now ?? new Date()).getTime() - hours * 3600_000);
+  const now = options.now ?? new Date();
+  const cutoff = new Date(now.getTime() - hours * 3600_000);
   const counts: Record<string, number> = {};
-  const result = { dryRun, cutoff: cutoff.toISOString(), counts, skipped: false, total: 0, bounded: false };
+  const result = { dryRun, compactStock, stockOnly, cutoff: cutoff.toISOString(), counts, skipped: false, total: 0, bounded: false };
   const client = await pool.connect();
   let locked = false;
   let discardConnection = false;
@@ -47,7 +119,12 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
     locked = lock.rows[0].locked;
     if (!locked) return { ...result, skipped: true };
     const deadline = Date.now() + budgetMs;
-    let targets: string[] = [...ONEC_STAGE_TABLES, 'SyncRunItem'];
+    let stockScopesJson: string | undefined;
+    let stockParents: string[] | undefined;
+    let moreStockParents = false;
+    let previewCursor: string | null = null;
+    let morePreview = false;
+    let targets: string[] = stockOnly ? ['OnecStageStock'] : [...ONEC_STAGE_TABLES, 'SyncRunItem'];
     for (;;) {
       let passTotal = 0;
       const exhausted = new Set<string>();
@@ -64,7 +141,37 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
           await client.query(`SET LOCAL statement_timeout = '${dryRun ? 30000 : 5000}ms'`);
           const limit = Math.min(batchSize, maxRows - result.total);
           let sql: string;
-          if (table === 'SyncRunItem') {
+          const compacting = table === 'OnecStageStock' && compactStock;
+          // Scope the production stock transaction to its staging-only role.
+          // SET LOCAL is undone by COMMIT/ROLLBACK before the next entity runs.
+          if (compacting && process.env.NODE_ENV === 'production') {
+            await client.query('SET LOCAL ROLE leader_stock_stage_maintenance');
+          }
+          // Prisma timestamp columns store UTC wall time. pg serializes JS Date
+          // in the process timezone, whose offset PostgreSQL ignores for timestamp.
+          let params: (string | number | null)[] = dryRun ? [cutoff.toISOString()] : [cutoff.toISOString(), limit];
+          if (compacting) {
+            if (stockScopesJson === undefined) {
+              stockScopesJson = String((await client.query(stockBoundariesQuery, [now.toISOString()])).rows[0].scopes);
+            }
+            if (!dryRun && stockParents === undefined && stockScopesJson !== '[]') {
+              const parentLimit = Math.min(maxRows, 512);
+              const parents = await client.query<{ id: string }>(compactParentsQuery, [stockScopesJson, parentLimit + 1]);
+              moreStockParents = parents.rows.length > parentLimit;
+              stockParents = parents.rows.slice(0, parentLimit).map(row => row.id).reverse();
+            }
+            const nextParent = stockParents?.[stockParents.length - 1];
+            if (stockScopesJson === '[]' || (!dryRun && nextParent === undefined)) {
+              sql = 'SELECT 0 AS count';
+              params = [];
+            } else if (nextParent !== undefined) {
+              sql = deleteCompactStock;
+              params = [stockScopesJson, limit, nextParent];
+            } else {
+              sql = countCompactStock;
+              params = [stockScopesJson, previewCursor];
+            }
+          } else if (table === 'SyncRunItem') {
             const from = `"SyncRunItem" t JOIN "SyncRun" r ON r.id = t."runId"
               JOIN "OnecSyncSession" s ON s.id = r.meta->>'sessionId'`;
             sql = dryRun ? `SELECT count(*)::int AS count FROM ${from} WHERE ${successfulRun} AND ${successfulItem}` : `
@@ -93,13 +200,27 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
                 DELETE FROM "${table}" t USING candidates c WHERE t.id = c.id RETURNING 1
               ) SELECT count(*)::int AS count FROM deleted`;
           }
-          const query = await client.query(sql, dryRun ? [cutoff] : [cutoff, limit]);
+          const query = await client.query(sql, params);
           await client.query('COMMIT');
           const count = query.rows[0].count as number;
           counts[table] = (counts[table] ?? 0) + count;
           result.total += count;
           passTotal += count;
-          if (count === 0) exhausted.add(table);
+          if (dryRun) {
+            if (compacting) {
+              morePreview = query.rows[0].more === true;
+              previewCursor = query.rows[0].cursor ?? null;
+            }
+            if (!compacting || !morePreview) exhausted.add(table);
+          } else if (compacting) {
+            // Fewer than requested also covers rows or a session locked by an
+            // importer: move on, re-discover anything skipped on the next run.
+            if (count < limit) stockParents?.pop();
+            if (!stockParents?.length) {
+              exhausted.add(table);
+              if (moreStockParents) result.bounded = true;
+            }
+          } else if (count === 0) exhausted.add(table);
         } catch (error) {
           await client.query('ROLLBACK');
           const failure = new Error(`Retention stopped at ${table}: ${error instanceof Error ? error.message : String(error)}`);
@@ -107,12 +228,13 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
           throw failure;
         }
       }
-      if (dryRun || passTotal === 0) return result;
+      if (dryRun && !morePreview) return result;
+      if (!dryRun && passTotal === 0 && !stockParents?.length) return result;
       // The cutoff is fixed for this run. Do not repeatedly scan already-empty
       // historical partitions while draining another table's large backlog.
       targets = targets.filter(table => !exhausted.has(table));
       // Yield between rounds for normal imports/HTTP traffic and WAL flushing.
-      await new Promise(resolve => setTimeout(resolve, 50));
+      if (!dryRun) await new Promise(resolve => setTimeout(resolve, 50));
     }
   } finally {
     if (locked) {
@@ -125,8 +247,8 @@ export async function runOnecSyncMaintenance(options: OnecRetentionOptions = {})
 
 let timer: ReturnType<typeof setTimeout> | undefined;
 let stopped = true;
-export function startOnecSyncMaintenance() {
-  if (process.env.ONEC_SYNC_RETENTION_ENABLED !== 'true' || !stopped) return;
+export function startOnecSyncMaintenance({ keepProcessAlive = false } = {}) {
+  if (!stopped || (process.env.ONEC_SYNC_RETENTION_ENABLED !== 'true' && process.env.ONEC_STOCK_COMPACT_ENABLED !== 'true')) return;
   stopped = false;
   const run = async () => {
     try {
@@ -135,11 +257,14 @@ export function startOnecSyncMaintenance() {
     } catch (error) {
       console.warn('[onec-retention] failed; committed batches are safe to retry', error);
     } finally {
-      if (!stopped) { timer = setTimeout(run, 15 * 60_000); timer.unref(); }
+      if (!stopped) schedule(15 * 60_000);
     }
   };
-  timer = setTimeout(run, 60_000);
-  timer.unref();
+  function schedule(delay: number) {
+    timer = setTimeout(run, delay);
+    if (!keepProcessAlive) timer.unref();
+  }
+  schedule(60_000);
 }
 export function stopOnecSyncMaintenance() {
   stopped = true;

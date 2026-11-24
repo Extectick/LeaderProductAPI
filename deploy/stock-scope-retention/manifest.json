@@ -1,0 +1,10 @@
+{
+  "baseImage": "sha256:08d130bb0aad8ef81f6f478e7762723f157482b72bbaaa49389b0116a85250eb",
+  "files": {
+    "dist/services/onecSyncMaintenanceService.js": {
+      "before": "9ac7ac2ca30d917ffc09fa178379e411000cd23bdf451f4b91f0069910797a21",
+      "after": "fe10ccdc5e246f64913f133de5321fd15ef0002d58d618aef47f84f542a68056"
+    }
+  },
+  "baseTag": "leader-api-prod:common-sale-prices-20261124-r1"
+}

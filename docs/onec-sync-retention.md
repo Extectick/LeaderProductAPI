@@ -2,12 +2,31 @@
 
 ## Policy
 
-- Successful stage rows: retain at least 24 hours after both session completion/activity and row import/resolution.
+- In the ordinary time-based mode, successful stage rows are retained for at least 24 hours after both session completion/activity and row import/resolution.
 - Only final `COMPLETED` and `PARTIAL` sessions without notes are eligible. Legacy partial replace-mode sessions are excluded (old code could mark rolled-back rows resolved).
 - Never delete `PENDING`, `BLOCKED`, `ERROR`, failed/active sessions, session summaries, current balances or offline datasets.
 - Stock import journal: retain totals and all errors. New successful stock items are not duplicated in `SyncRunItem`. Old OK details are removed only when their linked source session is safely finalized and older than 24h. Other entities/order logs are untouched.
 - Successful rows of a partial delta session are disposable; the failed rows and counters remain available for diagnosis.
 - `OfflineDatasetRow` is a live snapshot, not history. Manager deltas retain the existing 30-day policy and revision/epoch safeguards. This cleanup does not modify either offline table.
+
+### Compact stock history
+
+`StockBalance` holds the latest applied value for each product, warehouse, organization and series. A delta can omit any of those keys. Keep the saved balance until the source sends a newer value, including an explicit zero.
+
+Set `ONEC_STOCK_COMPACT_ENABLED=true` to clean successful staging rows by exchange instead of age. For each organization and warehouse, two newer finalized imports with successfully applied stock for that pair can supersede older staging rows. A partial delta qualifies only through its successfully applied rows. Unknown scopes, unresolved rows, active or failed imports and partial replacements remain protected. Two newer imports for a different warehouse do not qualify. This is a staging history policy; the two imports need not be full inventory snapshots.
+
+| Scheduled mode | `ONEC_SYNC_RETENTION_ENABLED` | `ONEC_STOCK_COMPACT_ENABLED` |
+| --- | --- | --- |
+| Off | false | false |
+| Existing 24-hour rules | true | false |
+| Compact stock only | false | true |
+| Compact stock plus usual rules for other entities and the journal | true | true |
+
+The CLI previews the configured scope without writing by default. With both flags off, a manual invocation uses the original time-based rules. Compare the eligibility count before and after a bounded apply, and check the next stock exchange, current balances and unresolved rows. Protected errors and abandoned sessions may remain even when there are zero eligible rows. Review their cause separately.
+
+On production, compact-stock transactions switch to the non-login role `leader_stock_stage_maintenance` with `SET LOCAL ROLE`. Before enabling compaction, run `deploy/onec-retention/stock-role.sql` as the existing production database administrator on PostgreSQL 16. The script verifies role attributes, existing memberships and privileges. Row locking requires column-level UPDATE on the two primary keys. The role can delete staging stock only. On commit or rollback the connection resumes its previous identity. Rehearse restoration and cleanup on an isolated database named `LeaderAPI_retention_copy` before changing production.
+
+The production API is the only scheduler for this database. Keep both retention flags enabled to apply compact stock and the existing rules for other entities. To revert just stock compaction, disable `ONEC_STOCK_COMPACT_ENABLED` and restore the prior pinned API image; the existing general retention schedule then resumes its age-based stock policy. This does not recreate previously pruned stage rows. Preserve the verified dump separately from the application disk.
 
 ## Correctness and performance
 
