@@ -1,0 +1,30 @@
+{
+  "baseImage": "sha256:02e5a0877a59638f56a45f6e5cca137adb2f7b13ea9e30481f91e829ab8e2327",
+  "baseTag": "leader-api-prod:client-orders-defaults-20261120-r2",
+  "files": {
+    "dist/modules/clientOrders/clientOrders.backgroundReferences.js": {
+      "before": "07a7ce838d5f7270ece9290f459c3be99ae05707db899b73c7ca23a2e5a5b35d",
+      "after": "bf18c94cdec1e4e6993fec38dc7013e6b8ec790219786fc674721225f3dcceb5"
+    },
+    "dist/modules/clientOrders/clientOrders.localProducts.js": {
+      "before": "1ecf579832528526fe687352611a52975510933abe66081adc869ab0e75c2985",
+      "after": "62ec9833489ecfa89794d8e009a0dbaa1471bc5da9e22e2ae47e4166dcac2f92"
+    },
+    "dist/modules/clientOrders/clientOrders.manualPrices.js": {
+      "before": null,
+      "after": "55334321be47a2abacc8dccb5b7866142bc39cbc17f2b569ce5e9b5bd559bb09"
+    },
+    "dist/modules/clientOrders/clientOrders.onecLive.js": {
+      "before": "7ebf620e37f993404ae0491270d6ee7181db7d00587b4064b546252fb2b132ac",
+      "after": "27417a09705a1a49a91e2027979ca90ef64c99099ff9185e1a3d61c1237125c8"
+    },
+    "dist/modules/clientOrders/clientOrders.service.js": {
+      "before": "2cd543975bd1438a3b24cf2ac6b7be6dfdcf0850ac91e7516f43782a2123c7a5",
+      "after": "229f570ded8ab7ddb11323598aeb78578505bb5b3d11158f0451b8f6d9ff1a98"
+    },
+    "dist/modules/clientOrders/offlineExportPolicy.js": {
+      "before": "a7bf5f6d46079d17f23e6bfdba31d2188d8eb30e47d6d5df94f6ff218d650d0e",
+      "after": "134e76d9218e9e72299365f903dc734a06e6b651edaa0aac02ae49de3d12b795"
+    }
+  }
+}

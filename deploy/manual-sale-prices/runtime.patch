@@ -1,0 +1,361 @@
+--- a/dist/modules/clientOrders/clientOrders.backgroundReferences.js
++++ b/dist/modules/clientOrders/clientOrders.backgroundReferences.js
+@@ -12,6 +12,7 @@
+ exports.readBackgroundReferenceData = readBackgroundReferenceData;
+ exports.readBackgroundReferenceDetails = readBackgroundReferenceDetails;
+ const client_1 = __importDefault(require("../../prisma/client"));
++const clientOrders_manualPrices_1 = require("./clientOrders.manualPrices");
+ const clientOrders_service_1 = require("./clientOrders.service");
+ const apiResponse_1 = require("../../utils/apiResponse");
+ const offlineClientOrders_service_1 = require("./offlineClientOrders.service");
+@@ -77,7 +78,7 @@
+             throw badContext();
+     }
+     const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Omsk', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+-    const key = { userId, managerGuid, profileUpdatedAt: actor.updatedAt?.toISOString(), policy: policy?.fingerprint ?? 'legacy', day };
++    const key = { userId, managerGuid, profileUpdatedAt: actor.updatedAt?.toISOString(), policy: policy?.manualPriceFingerprint ?? policy?.fingerprint ?? 'legacy', day };
+     return { key, managerGuid, policy };
+ }
+ function restrictionProjection(item, verified) {
+@@ -133,7 +134,7 @@
+             break;
+         case 'price-types':
+             model = client_1.default.priceType;
+-            where = { isActive: true, guid: { in: await (0, offlineClientOrders_service_1.accessiblePriceTypeGuids)(managerGuid, policy) }, AND: text(['name', 'code']) };
++            where = { isActive: true, guid: { in: await (0, clientOrders_manualPrices_1.manualPriceTypeGuids)(managerGuid, policy) }, AND: text(['name', 'code']) };
+             select = { ...identity, code: true, lastSyncedAt: true };
+             break;
+         case 'delivery-addresses':
+@@ -180,20 +181,37 @@
+             const permitted = await localReferencePage(kind, { ...query, search: '', offset: 0, limit: 100,
+                 _guids: items.map(item => item.guid) }, scope);
+             const allowed = new Set(permitted.items.map((item) => item.guid));
++            if (kind === 'price-types' && scope.policy?.commonSalePriceTypeGuids?.length) {
++                // A new source price can reach the policy and the live directory before
++                // the local price catalog. Never override a locally recorded revocation.
++                const common = new Set(scope.policy.commonSalePriceTypeGuids);
++                const missing = items.filter(item => !allowed.has(item.guid) && common.has(item.guid) && item.isActive === true)
++                    .map(item => item.guid);
++                if (missing.length) {
++                    const inactive = await client_1.default.priceType.findMany({ where: { guid: { in: missing }, isActive: false }, select: { guid: true } });
++                    const denied = new Set(inactive.map(item => item.guid));
++                    for (const guid of missing)
++                        if (!denied.has(guid))
++                            allowed.add(guid);
++                }
++            }
+             items = items.filter(item => allowed.has(item.guid) && selectableLiveReference(kind, item));
+         }
+         const incomplete = items.length !== cached.value.items.length;
+         if (incomplete)
+             readState.verificationRequired = true;
++        // A verified price page can contain only records outside the employee's
++        // current scope. Filtering those rows does not start another 1C check.
++        const checking = kind !== 'price-types' || readState.refreshPending;
+         return { ...cached.value, items, total: incomplete ? items.length : cached.value.total,
+-            pending: incomplete && !items.length, incomplete, readState };
++            pending: checking && incomplete && !items.length, incomplete, readState };
+     }
+     const local = await localReferencePage(kind, query, scope);
+     const readState = (0, clientOrders_referenceSnapshots_1.referenceReadState)(local.items.length ? 'local' : 'none', freshness(local.items), clientOrders_referenceSnapshots_1.referenceSnapshots.pending(key));
+     return { ...local, items: local.items.map((row) => {
+             const { lastSyncedAt: _time, ...item } = row;
+             return kind === 'counterparties' ? restrictionProjection(item, false) : item;
+-        }), pending: !local.items.length && !noCustomer, incomplete: true, readState };
++        }), pending: !local.items.length && !noCustomer && (kind !== 'price-types' || readState.refreshPending), incomplete: true, readState };
+ }
+ /** Local defaults are suggestions, not verification of commercial permission.
+  * Recheck nested remembered references against this exact customer/org before
+@@ -293,7 +311,7 @@
+         contract: { model: client_1.default.clientContract, page: 'contracts', where: { counterparty: customer, status: 'Действует', purpose: 'Реализация', AND: dateWindow() },
+             select: { number: true, status: true, purpose: true, counterparty: { select: { guid: true } }, organization: { select: { guid: true } } } },
+         warehouse: { model: client_1.default.warehouse, page: 'warehouses', where: scope.policy ? { guid: { in: scope.policy.warehouseGuids } } : {}, select: { code: true, isPickup: true } },
+-        'price-type': { model: client_1.default.priceType, page: 'price-types', where: { guid: { in: kind === 'price-type' ? await (0, offlineClientOrders_service_1.accessiblePriceTypeGuids)(scope.managerGuid, scope.policy) : [] } }, select: { code: true } },
++        'price-type': { model: client_1.default.priceType, page: 'price-types', where: { guid: { in: kind === 'price-type' ? await (0, clientOrders_manualPrices_1.manualPriceTypeGuids)(scope.managerGuid, scope.policy) : [] } }, select: { code: true } },
+         'delivery-address': { model: client_1.default.deliveryAddress, page: 'delivery-addresses', where: { counterparty: customer }, select: { fullAddress: true, counterparty: { select: { guid: true } } } },
+     };
+     const spec = specs[kind];
+@@ -301,6 +319,18 @@
+         throw new clientOrders_service_1.ClientOrdersError(400, apiResponse_1.ErrorCodes.VALIDATION_ERROR, 'Неизвестный справочник');
+     const local = await spec.model.findFirst({ where: { AND: [{ guid, isActive: true }, spec.where] },
+         select: { ...identity, ...spec.select, lastSyncedAt: true } });
++    if (!local && kind === 'price-type' && scope.policy?.commonSalePriceTypeGuids?.includes(guid)) {
++        const page = await (0, clientOrders_onecLive_1.getLiveReferencePageSingle)('price-types', { guid, limit: 1, offset: 0 });
++        const item = page.items.find(row => row.guid === guid && row.isActive === true && selectableLiveReference('price-types', row));
++        const current = await backgroundReferenceScope(userId, {});
++        if (item && current.policy?.commonSalePriceTypeGuids?.includes(guid) &&
++            !await client_1.default.priceType.findFirst({ where: { guid, isActive: false }, select: { id: true } })) {
++            return { kind, guid, title: item.name, subtitle: item.code ?? null,
++                sections: [{ title: 'Основное', rows: [{ label: 'Наименование', value: item.name }] }],
++                debug: { guid, name: item.name, code: item.code, isActive: true }, pending: false, incomplete: false,
++                readState: (0, clientOrders_referenceSnapshots_1.referenceReadState)('verified-snapshot', new Date().toISOString(), false) };
++        }
++    }
+     if (!local)
+         throw new clientOrders_service_1.ClientOrdersError(404, apiResponse_1.ErrorCodes.NOT_FOUND, 'Реквизит недоступен');
+     const context = { counterpartyGuid: local.counterparty?.guid, organizationGuid: local.organization?.guid };
+--- a/dist/modules/clientOrders/clientOrders.localProducts.js
++++ b/dist/modules/clientOrders/clientOrders.localProducts.js
+@@ -6,7 +6,9 @@
+ exports.localProductSearchEnabled = void 0;
+ exports.localFuzzyProductIds = localFuzzyProductIds;
+ exports.projectLocalStocks = projectLocalStocks;
++exports.assertLiveProductPriceScope = assertLiveProductPriceScope;
+ exports.getLocalProducts = getLocalProducts;
++const clientOrders_manualPrices_1 = require("./clientOrders.manualPrices");
+ const client_1 = require("@prisma/client");
+ const client_2 = __importDefault(require("../../prisma/client"));
+ const apiResponse_1 = require("../../utils/apiResponse");
+@@ -124,12 +126,30 @@
+             AND: [{ OR: [{ validFrom: null }, { validFrom: { lte: new Date() } }] },
+                 { OR: [{ validTo: null }, { validTo: { gte: new Date() } }] }] }, select: { id: true } }))
+         deny();
+-    if (query.priceTypeGuid && !(await (0, offlineClientOrders_service_1.accessiblePriceTypeGuids)(managerGuid, policy)).includes(query.priceTypeGuid))
+-        deny();
+-    const scope = { userId, managerGuid, policy: policy?.fingerprint ?? 'legacy',
++    if (query.priceTypeGuid) {
++        if (!(await (0, clientOrders_manualPrices_1.manualPriceTypeGuids)(managerGuid, policy)).includes(query.priceTypeGuid))
++            deny();
++        if (await client_2.default.priceType.findFirst({ where: { guid: query.priceTypeGuid, isActive: false }, select: { id: true } }))
++            deny();
++    }
++    const scope = { userId, managerGuid, policy: policy?.manualPriceFingerprint ?? policy?.fingerprint ?? 'legacy',
+         organizationGuid: query.organizationGuid, counterpartyGuid: query.counterpartyGuid,
+         agreementGuid: query.agreementGuid, warehouseGuid: query.warehouseGuid, priceTypeGuid: query.priceTypeGuid };
+     return { policy, scope };
++}
++/** The direct batch and purchase-history readers use the same commercial context
++ * as the picker. Validate both sides of the live/cache read in case rights change. */
++async function assertLiveProductPriceScope(query, userId, managerGuid) {
++    if (!query.priceTypeGuid || process.env.CLIENT_ORDERS_BACKGROUND_READS_ENABLED !== 'true')
++        return;
++    if (!userId || !managerGuid)
++        throw new clientOrders_service_1.ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Контекст подбора недоступен этому менеджеру');
++    const actor = await client_2.default.employeeProfile.findUnique({ where: { userId },
++        select: { status: true, onecUserGuid: true, user: { select: { isActive: true } } } });
++    if (actor?.status !== 'ACTIVE' || !actor.user.isActive || actor.onecUserGuid?.trim() !== managerGuid) {
++        throw new clientOrders_service_1.ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Контекст подбора недоступен этому менеджеру');
++    }
++    await resolveScope(query, userId, managerGuid);
+ }
+ /** Read-only projection; synchronous dependencies are PostgreSQL/Redis only. */
+ async function getLocalProducts(query, userId, managerGuid) {
+--- /dev/null
++++ b/dist/modules/clientOrders/clientOrders.manualPrices.js
+@@ -0,0 +1,37 @@
++"use strict";
++var __importDefault = (this && this.__importDefault) || function (mod) {
++    return (mod && mod.__esModule) ? mod : { "default": mod };
++};
++Object.defineProperty(exports, "__esModule", { value: true });
++exports.manualPriceTypeGuids = manualPriceTypeGuids;
++exports.mayUseOrderPriceTypes = mayUseOrderPriceTypes;
++exports.mayQueueStoredOrderPrices = mayQueueStoredOrderPrices;
++const client_1 = __importDefault(require("../../prisma/client"));
++const offlineExportPolicy_1 = require("./offlineExportPolicy");
++const offlineClientOrders_service_1 = require("./offlineClientOrders.service");
++/** The source's general wholesale choices are independent of client defaults.
++ * Their formula dependencies do not become manual choices or offline data. */
++async function manualPriceTypeGuids(managerGuid, policy, db = client_1.default) {
++    const assigned = await (0, offlineClientOrders_service_1.accessiblePriceTypeGuids)(managerGuid, policy, db);
++    return [...new Set([...assigned, ...(policy?.commonSalePriceTypeGuids ?? [])])];
++}
++async function mayUseOrderPriceTypes(managerGuid, guids, db = client_1.default) {
++    if (!guids.length)
++        return true;
++    if (!managerGuid)
++        return false;
++    const policy = await (0, offlineExportPolicy_1.getOfflineExportPolicy)(db);
++    const permitted = new Set(await manualPriceTypeGuids(managerGuid, policy, db));
++    if (guids.some(guid => !permitted.has(guid)))
++        return false;
++    return !await db.priceType.findFirst({ where: { guid: { in: guids }, isActive: false }, select: { id: true } });
++}
++async function mayQueueStoredOrderPrices(tx, userId, order) {
++    const guids = [...new Set([order.priceType?.guid, ...order.items.filter(item => !item.isCancelled)
++                .map(item => item.priceType?.guid)].filter((value) => !!value))];
++    if (!guids.length)
++        return true;
++    const actor = await tx.employeeProfile.findUnique({ where: { userId },
++        select: { status: true, onecUserGuid: true, user: { select: { isActive: true } } } });
++    return actor?.status === 'ACTIVE' && actor.user.isActive && mayUseOrderPriceTypes(actor.onecUserGuid?.trim(), guids, tx);
++}
+--- a/dist/modules/clientOrders/clientOrders.onecLive.js
++++ b/dist/modules/clientOrders/clientOrders.onecLive.js
+@@ -565,6 +565,7 @@
+         guid,
+         name,
+         code: text(record, ['code', 'priceTypeCode', 'Код']),
++        ...(typeof record.isSelectable === 'boolean' ? { isSelectable: record.isSelectable } : {}),
+         isActive: !bool(record, ['deletionMark', 'DeletionMark', 'ПометкаУдаления'], false) && bool(record, ['isActive', 'priceTypeIsActive', 'active'], true),
+     };
+ }
+--- a/dist/modules/clientOrders/clientOrders.service.js
++++ b/dist/modules/clientOrders/clientOrders.service.js
+@@ -1,5 +1,6 @@
+ "use strict";
+ const clientOrders_writeVerification_1 = require("./clientOrders.writeVerification");
++const clientOrders_manualPrices_1 = require("./clientOrders.manualPrices");
+ const clientOrders_backgroundReads_1 = require("./clientOrders.backgroundReads");
+ const clientOrders_optionalReads_1 = require("./clientOrders.optionalReads");
+ const clientOrders_referenceReads_1 = require("./clientOrders.referenceReads");
+@@ -1757,6 +1758,9 @@
+     const explicitPriceTypeGuids = [
+         ...new Set([body.priceTypeGuid, ...body.items.map((item) => item.priceTypeGuid)].filter(Boolean)),
+     ];
++    if ((0, clientOrders_backgroundReads_1.backgroundOrderReadsEnabled)() && !await (0, clientOrders_manualPrices_1.mayUseOrderPriceTypes)(managerGuid, explicitPriceTypeGuids)) {
++        throw new ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Выбранный вид цены недоступен этому сотруднику.');
++    }
+     const productGuids = [...new Set(body.items.map((item) => item.productGuid))];
+     const [organization, counterparty, agreement, contract, warehouse, deliveryAddress, explicitPriceTypes, productsResult] = await Promise.all([
+         loadLiveReferenceWithCache(() => (0, clientOrders_cache_1.readThroughClientOrdersCache)('reference:organization', { guid: body.organizationGuid }, clientOrders_cache_1.CLIENT_ORDERS_CACHE_TTL.referenceDetails, () => (0, clientOrders_onecLive_1.findLiveOrganization)(body.organizationGuid)), () => findCachedOrganization(body.organizationGuid), 'Ошибка получения организации из 1С'),
+@@ -1781,6 +1785,9 @@
+     // during a rolling deployment.
+     if (organization?.isSelectable === false) {
+         throw new ClientOrdersError(400, apiResponse_1.ErrorCodes.VALIDATION_ERROR, 'Выбранная организация больше недоступна для новых заказов. Обновите список и выберите организацию заново.');
++    }
++    if (explicitPriceTypes.some(type => type?.isSelectable === false)) {
++        throw new ClientOrdersError(400, apiResponse_1.ErrorCodes.VALIDATION_ERROR, 'Выбранный вид цены больше недоступен. Обновите список видов цен.');
+     }
+     if (warehouse?.isSelectable === false) {
+         throw new ClientOrdersError(400, apiResponse_1.ErrorCodes.VALIDATION_ERROR, 'Выбранный склад больше недоступен для новых заказов. Обновите список и выберите склад заново.');
+@@ -4316,6 +4323,7 @@
+         const local = await localProducts.getLocalProducts(query, userId, managerGuid);
+         return { ...local, items: await (0, clientOrders_productImages_1.enrichProductsWithImages)(local.items, { lazySyncMissing: false }) };
+     }
++    await require('./clientOrders.localProducts').assertLiveProductPriceScope(query, userId, managerGuid);
+     const liveQuery = managerGuid ? { ...query, managerGuid } : query;
+     const result = await onecLive(() => (0, clientOrders_cache_1.readThroughClientOrdersCache)('products', liveQuery, clientOrders_cache_1.CLIENT_ORDERS_CACHE_TTL.products, () => (0, clientOrders_onecLive_1.getLiveProducts)(liveQuery), { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }), 'Ошибка получения номенклатуры из 1С', { allowCachedWhenCircuitOpen: true });
+     const search = normalizeSearch(query.search);
+@@ -4329,6 +4337,7 @@
+             ].slice(0, query.limit);
+             const primaryHasMore = result.total > query.offset + result.items.length || result.hasMore === true;
+             const hasMore = primaryHasMore || fuzzy.hasMore;
++            await require('./clientOrders.localProducts').assertLiveProductPriceScope(query, userId, managerGuid);
+             return {
+                 ...result,
+                 items: await (0, clientOrders_productImages_1.enrichProductsWithImages)(mergedItems),
+@@ -4342,6 +4351,7 @@
+             console.warn('[client-orders] Fuzzy product search fallback failed:', error instanceof Error ? error.message : error);
+         }
+     }
++    await require('./clientOrders.localProducts').assertLiveProductPriceScope(query, userId, managerGuid);
+     return {
+         ...result,
+         items: await (0, clientOrders_productImages_1.enrichProductsWithImages)(result.items),
+@@ -4547,11 +4557,13 @@
+ }
+ async function getClientOrdersProductsByGuids(body, userId) {
+     const managerGuid = userId ? await getManagerGuidForUser(userId) : null;
++    await require('./clientOrders.localProducts').assertLiveProductPriceScope(body, userId, managerGuid);
+     const liveBody = managerGuid ? { ...body, managerGuid } : body;
+     const cacheTtl = liveBody.receiptPriceAt
+         ? clientOrders_cache_1.CLIENT_ORDERS_CACHE_TTL.historicalProductsBatch
+         : clientOrders_cache_1.CLIENT_ORDERS_CACHE_TTL.productsBatch;
+     const items = await onecLive(() => (0, clientOrders_cache_1.readThroughClientOrdersCache)('products:batch', { ...liveBody, productGuids: [...new Set(liveBody.productGuids)].sort() }, cacheTtl, () => (0, clientOrders_onecLive_1.getLiveProductsByGuids)(liveBody), { shouldOpenCircuit: shouldOpenClientOrdersOnecCircuit }), 'Ошибка получения номенклатуры из 1С', { allowCachedWhenCircuitOpen: true });
++    await require('./clientOrders.localProducts').assertLiveProductPriceScope(body, userId, managerGuid);
+     return (0, clientOrders_productImages_1.enrichProductsWithImages)(items);
+     /*
+     const uniqueGuids = [...new Set(body.productGuids)];
+@@ -4720,7 +4732,7 @@
+         if (body.warehouseGuid && (!warehouse || warehouse.isActive === false || warehouse.isSelectable === false)) {
+             referenceStale('Склад', body.warehouseGuid);
+         }
+-        if (body.priceTypeGuid && (!priceType || priceType.isActive === false)) {
++        if (body.priceTypeGuid && (!priceType || priceType.isActive === false || priceType.isSelectable === false)) {
+             referenceStale('Вид цены', body.priceTypeGuid);
+         }
+         if (body.deliveryAddressGuid && (!deliveryAddress || deliveryAddress.isActive === false)) {
+@@ -4978,7 +4990,8 @@
+                 warehouseId: true,
+                 deliveryAddressId: true,
+                 deliveryDate: true,
+-                items: { select: { quantity: true, basePrice: true, isCancelled: true } },
++                priceType: { select: { guid: true } },
++                items: { select: { quantity: true, basePrice: true, isCancelled: true, priceType: { select: { guid: true } } } },
+             },
+         });
+         const storedClientRevision = existing?.clientRevision ?? 0;
+@@ -5011,6 +5024,9 @@
+             ensureEditable(existing);
+             assertClientOrderWriteVerification(existing, writeVerification);
+             assertClientOrderCanBeSubmitted(existing);
++            if ((0, clientOrders_backgroundReads_1.backgroundOrderReadsEnabled)() && !await (0, clientOrders_manualPrices_1.mayQueueStoredOrderPrices)(tx, userId, existing)) {
++                throw new ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Выбранный вид цены недоступен этому сотруднику.');
++            }
+             const queuedAt = now();
+             const nextRevision = existing.revision + 1;
+             const trackingSnapshot = await resolveActiveTrackingOrderSnapshot(tx, userId);
+@@ -5614,6 +5630,7 @@
+                 hasRealization: true,
+                 organizationId: true,
+                 agreementId: true,
++                priceType: { select: { guid: true } },
+                 contractId: true,
+                 warehouseId: true,
+                 deliveryAddressId: true,
+@@ -5625,6 +5642,7 @@
+                         quantity: true,
+                         basePrice: true,
+                         isCancelled: true,
++                        priceType: { select: { guid: true } },
+                     },
+                 },
+             },
+@@ -5635,6 +5653,9 @@
+         ensureEditable(order);
+         assertClientOrderWriteVerification(order, writeVerification);
+         assertRevision(order.revision, body.revision);
++        if ((0, clientOrders_backgroundReads_1.backgroundOrderReadsEnabled)() && !await (0, clientOrders_manualPrices_1.mayQueueStoredOrderPrices)(tx, userId, order)) {
++            throw new ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Выбранный вид цены недоступен этому сотруднику.');
++        }
+         const review = order.draftReview;
+         if (review?.code === apiResponse_1.ErrorCodes.STOCK_SHORTAGE) {
+             throw new ClientOrdersError(422, apiResponse_1.ErrorCodes.STOCK_SHORTAGE, 'Заказ сохранён как черновик. Откройте документ и повторите проверку остатков перед отправкой.', { ...review.details, draftSaved: true, serverGuid: guid });
+@@ -5778,7 +5799,8 @@
+                 number1c: true,
+                 isPostedIn1c: true,
+                 sentTo1cAt: true,
+-                items: { select: { id: true, isCancelled: true, quantity: true, basePrice: true } },
++                priceType: { select: { guid: true } },
++                items: { select: { id: true, isCancelled: true, quantity: true, basePrice: true, priceType: { select: { guid: true } } } },
+             },
+         });
+         if (!order) {
+@@ -5787,6 +5809,9 @@
+         ensureEditable(order);
+         assertClientOrderWriteVerification(order, writeVerification);
+         assertRevision(order.revision, body.revision);
++        if ((0, clientOrders_backgroundReads_1.backgroundOrderReadsEnabled)() && !await (0, clientOrders_manualPrices_1.mayQueueStoredOrderPrices)(tx, userId, order)) {
++            throw new ClientOrdersError(403, apiResponse_1.ErrorCodes.FORBIDDEN, 'Выбранный вид цены недоступен этому сотруднику.');
++        }
+         const activeItems = order.items.filter((item) => !item.isCancelled);
+         if (!activeItems.length || activeItems.some((item) => item.quantity.lte(0) || item.basePrice === null || item.basePrice.lte(0))) {
+             throw new ClientOrdersError(400, apiResponse_1.ErrorCodes.VALIDATION_ERROR, 'Исправьте строки с нулевым количеством или ценой перед повторной отправкой');
+--- a/dist/modules/clientOrders/offlineExportPolicy.js
++++ b/dist/modules/clientOrders/offlineExportPolicy.js
+@@ -22,6 +22,7 @@
+     asOfDate: day,
+     products: zod_1.z.array(zod_1.z.object({ guid, lastMovementDate: day })).max(200000),
+     priceTypes: zod_1.z.array(zod_1.z.object({ guid, dependencies: zod_1.z.array(guid).max(2000) })).max(20000),
++    commonSalePriceTypeGuids: zod_1.z.array(guid).max(20000).optional(),
+     organizationGuids: zod_1.z.array(guid).max(1000),
+     warehouseGuids: zod_1.z.array(guid).max(10000),
+     // Legacy stock export attaches warehouse-wide balances to one technical organization.
+@@ -52,7 +53,15 @@
+     const fingerprint = (0, node_crypto_1.createHash)('sha256').update(JSON.stringify({
+         productGuids, priceTypes, organizationGuids, warehouseGuids, stockOrganizationGuid,
+     })).digest('hex');
+-    return { productGuids, priceTypes, organizationGuids, warehouseGuids, stockOrganizationGuid, fingerprint };
++    // Common manual sale choices expire at the next source business day. Private
++    // and billing-only kinds never enter this list. A legacy export revokes it.
++    const commonSalePriceTypeGuids = payload.asOfDate === today
++        ? [...new Set((payload.commonSalePriceTypeGuids ?? []).map(id => id.toLowerCase()))].sort()
++        : [];
++    const manualPriceFingerprint = commonSalePriceTypeGuids.length
++        ? (0, node_crypto_1.createHash)('sha256').update(JSON.stringify([fingerprint, commonSalePriceTypeGuids])).digest('hex') : fingerprint;
++    return { productGuids, priceTypes, organizationGuids, warehouseGuids, stockOrganizationGuid, fingerprint,
++        commonSalePriceTypeGuids, manualPriceFingerprint };
+ }
+ function priceTypeClosure(roots, graph) {
+     const edges = new Map(graph.map(item => [item.guid, item.dependencies]));
