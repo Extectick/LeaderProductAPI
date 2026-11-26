@@ -25,8 +25,12 @@ export const stockProductsQuery = z.object({
   groupByWarehouse: z.enum(['0', '1']).default('0'),
 });
 type Query = z.infer<typeof stockProductsQuery>;
+// Stock imports always resolve an organization. Order lookups cache a separate
+// warehouse-wide quantity with no organization in this same table.
+export const importedStock = { organizationId: { not: null } };
 export function stockScope(query: Query): Prisma.StockBalanceWhereInput {
   return {
+    ...importedStock,
     ...(query.warehouseGuids?.length ? { warehouse: { guid: { in: [...new Set(query.warehouseGuids)] } } }
       : query.warehouseGuid ? { warehouse: { guid: query.warehouseGuid } } : {}),
     ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
@@ -79,7 +83,7 @@ export async function listStockProducts(query: Query, userId?: number, productGu
       MAX(COALESCE(s."lastSyncedAt", s."updatedAt")) AS "updatedAt"
     FROM "StockBalance" s
     JOIN "Warehouse" w ON w.id = s."warehouseId"
-    LEFT JOIN "Organization" o ON o.id = s."organizationId"
+    JOIN "Organization" o ON o.id = s."organizationId"
     WHERE s."productId" IN (${Prisma.join(page.map(p => p.id))})
     ${query.warehouseGuids?.length ? Prisma.sql`AND w.guid IN (${Prisma.join([...new Set(query.warehouseGuids)])})`
       : query.warehouseGuid ? Prisma.sql`AND w.guid = ${query.warehouseGuid}` : Prisma.empty}
@@ -107,14 +111,18 @@ export async function listWarehouseBalances(guid: string, query: Query, userId?:
       SUM(COALESCE(s.shipping,0)) AS shipping,
       MAX(COALESCE(s."lastSyncedAt",s."updatedAt")) AS "updatedAt"
     FROM "StockBalance" s JOIN "Product" p ON p.id=s."productId" JOIN "Warehouse" w ON w.id=s."warehouseId"
+    JOIN "Organization" o ON o.id=s."organizationId"
     WHERE p.guid=${guid}
     ${query.warehouseGuids?.length ? Prisma.sql`AND w.guid IN (${Prisma.join([...new Set(query.warehouseGuids)])})`
       : query.warehouseGuid ? Prisma.sql`AND w.guid=${query.warehouseGuid}` : Prisma.empty}
+    ${query.organizationGuid ? Prisma.sql`AND o.guid = ${query.organizationGuid}` : Prisma.empty}
     GROUP BY w.id,w.guid,w.name ORDER BY w.name,w.id OFFSET ${query.offset} LIMIT ${query.limit + 1}
   `);
   const managerGuid = await stockManagerGuid(userId);
   const own = managerGuid ? await prisma.managerStockReservation.groupBy({ by: ['warehouseId'],
-    where: { managerGuid, product: { guid }, warehouseId: { in: rows.map(r => r.warehouseId) } }, _sum: { reserved: true } }) : [];
+    where: { managerGuid, product: { guid }, warehouseId: { in: rows.map(r => r.warehouseId) },
+      ...(query.organizationGuid ? { organization: { guid: query.organizationGuid } } : {}),
+    }, _sum: { reserved: true } }) : [];
   const items = rows.slice(0, query.limit).map(row => {
     const metrics = stockMetrics(row);
     const myReserved = Number(own.find(r => r.warehouseId === row.warehouseId)?._sum.reserved ?? 0);
@@ -150,8 +158,8 @@ const access = [authenticateToken, checkUserStatus, authorizeServiceAccess('stoc
 router.get('/filters', ...access, async (_req, res) => {
   try {
     const [warehouses, organizations] = await Promise.all([
-      prisma.warehouse.findMany({ where: { stocks: { some: {} } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
-      prisma.organization.findMany({ where: { stocks: { some: {} } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.warehouse.findMany({ where: { stocks: { some: importedStock } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.organization.findMany({ where: { stocks: { some: importedStock } }, select: { guid: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
     res.json(successResponse({ warehouses: await enrichStockWarehouseGroups(warehouses), organizations }));
   } catch { res.status(500).json(errorResponse('Не удалось загрузить фильтры остатков', ErrorCodes.INTERNAL_ERROR)); }

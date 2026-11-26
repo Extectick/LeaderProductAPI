@@ -5,11 +5,11 @@ import { authorizeServiceAccess } from '../middleware/serviceAccess';
 import { checkUserStatus } from '../middleware/checkUserStatus';
 import { ErrorCodes, errorResponse, successResponse } from '../utils/apiResponse';
 import { cacheGet, cacheSet } from '../utils/cache';
-import stockBalancesProducts from './stockBalancesProducts';
+import stockBalancesProducts, { importedStock } from './stockBalancesProducts';
 
 const router = express.Router();
 router.use(stockBalancesProducts);
-const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:';
+const STOCK_BALANCES_CACHE_PREFIX = 'stock-balances:imported:';
 const STOCK_BALANCES_META_TTL_SEC = 60;
 const STOCK_BALANCES_TREE_TTL_SEC = 30;
 const TREE_PAGE_LIMIT_MAX = 200;
@@ -189,6 +189,7 @@ function buildChildrenCacheKey(params: {
 
 function buildBalancesWhere(search: string, organizationGuid: string) {
   return {
+    ...importedStock,
     ...(organizationGuid ? { organization: { guid: organizationGuid } } : {}),
     ...(search
       ? {
@@ -355,6 +356,7 @@ router.get(
           },
         }),
         prisma.stockBalance.findFirst({
+          where: importedStock,
           orderBy: [{ lastSyncedAt: 'desc' }, { updatedAt: 'desc' }],
           select: { lastSyncedAt: true, updatedAt: true },
         }),

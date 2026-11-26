@@ -35,7 +35,7 @@ it('validates bounds, GUIDs and search types instead of allowing unbounded scans
   for (const value of [{ limit: 101 }, { offset: -1 }, { offset: 'bad' }, { search: ['a'] }, { search: 'a'.repeat(201) }, { warehouseGuid: 'bad' }]) {
     expect(stockProductsQuery.safeParse(value).success).toBe(false);
   }
-  expect(stockScope(stockProductsQuery.parse({ warehouseGuid: guid, organizationGuid: guid }))).toEqual({ warehouse: { guid }, organization: { guid } });
+  expect(stockScope(stockProductsQuery.parse({ warehouseGuid: guid, organizationGuid: guid }))).toEqual({ organizationId: { not: null }, warehouse: { guid }, organization: { guid } });
 });
 it('preserves zero and legacy null stock semantics', () => {
   expect(stockMetrics({ quantity: '10.5', reserved: '2.25' })).toMatchObject({ inStock: 10.5, available: 8.25 });
@@ -43,7 +43,7 @@ it('preserves zero and legacy null stock semantics', () => {
 });
 it('accepts multiple warehouses, deduplicates scope and rejects malformed or oversized lists', () => {
   const second = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-  expect(stockScope(stockProductsQuery.parse({ warehouseGuids: `${guid},${second},${guid}` }))).toEqual({ warehouse: { guid: { in: [guid, second] } } });
+  expect(stockScope(stockProductsQuery.parse({ warehouseGuids: `${guid},${second},${guid}` }))).toEqual({ organizationId: { not: null }, warehouse: { guid: { in: [guid, second] } } });
   for (const warehouseGuids of ['', `${guid},bad`, Array(101).fill(guid).join(',')]) {
     expect(stockProductsQuery.safeParse({ warehouseGuids }).success).toBe(false);
   }
@@ -79,7 +79,7 @@ it('bounds series details and preserves nullable organization and unit-independe
   const response = await request(app).get(`/products/${guid}/balances?limit=1`).set('Authorization', 'test').set('x-test-permission', 'yes');
   expect(response.status).toBe(200);
   expect(response.body.data).toMatchObject({ hasMore: true, nextOffset: 1, items: [{ id: 's1', available: 3, organization: null }] });
-  expect(prisma.stockBalance.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 2, where: { product: { guid } } }));
+  expect(prisma.stockBalance.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 2, where: { organizationId: { not: null }, product: { guid } } }));
 });
 it('uses only the authenticated manager personal reserve and keeps legacy free stock intact', async () => {
   jest.mocked(prisma.employeeProfile.findUnique).mockResolvedValue({ onecUserGuid: 'manager-1' } as any);
@@ -115,7 +115,7 @@ it('exact app product lookup keeps GUID, scope, images and reserve rules without
  jest.mocked(prisma.$queryRaw).mockResolvedValue([{productId:'p1',quantity:10,reserved:2}]);
  const result=await request(app).get(`/products/${guid}?baseKey=qa&warehouseGuid=${guid}`).set('Authorization','test').set('x-test-permission','yes');
  expect(result.status).toBe(200);expect(result.body.data).toMatchObject({guid,name:'Молоко',inStock:10,reserved:2});
- expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({where:expect.objectContaining({guid,stocks:{some:{warehouse:{guid}}}}),skip:0,take:2}));
+ expect(prisma.product.findMany).toHaveBeenCalledWith(expect.objectContaining({where:expect.objectContaining({guid,stocks:{some:{organizationId:{not:null},warehouse:{guid}}}}),skip:0,take:2}));
  expect(stockProductBaseAllowed).toHaveBeenCalledWith('qa');expect(enrichProductsWithImages).toHaveBeenCalledWith(expect.any(Array),{lazySyncMissing:false});
 });
 it('unknown app GUID and unapproved legacy base never fall back to another catalog',async()=>{
@@ -129,4 +129,22 @@ it('unknown app GUID and unapproved legacy base never fall back to another catal
 it('bad exact lookup parameters fail before database access',async()=>{
  for(const path of ['/products/bad',`/products/${guid}?baseKey=bad/path`])expect((await request(app).get(path).set('Authorization','test').set('x-test-permission','yes')).status).toBe(400);
  expect(prisma.product.findMany).not.toHaveBeenCalled();
+});
+
+it('only lists filters with imported stock and scopes warehouse personal reserves to the selected organization', async () => {
+  jest.mocked(prisma.warehouse.findMany).mockResolvedValue([]);
+  jest.mocked(prisma.organization.findMany).mockResolvedValue([]);
+  const filters = await request(app).get('/filters').set('Authorization', 'test').set('x-test-permission', 'yes');
+  expect(filters.status).toBe(200);
+  for (const lookup of [prisma.warehouse.findMany, prisma.organization.findMany]) {
+    expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ where: { stocks: { some: { organizationId: { not: null } } } } }));
+  }
+  jest.mocked(prisma.employeeProfile.findUnique).mockResolvedValue({ onecUserGuid: 'manager-1' } as any);
+  jest.mocked(prisma.$queryRaw).mockResolvedValue([{ warehouseId: 'w1', guid, name: 'Склад', quantity: 10, reserved: 6 }]);
+  jest.mocked(prisma.managerStockReservation.groupBy).mockResolvedValue([{ warehouseId: 'w1', _sum: { reserved: 2 } }] as any);
+  const result = await listWarehouseBalances(guid, stockProductsQuery.parse({ organizationGuid: guid }), 42);
+  expect(prisma.managerStockReservation.groupBy).toHaveBeenCalledWith(expect.objectContaining({
+    where: { managerGuid: 'manager-1', product: { guid }, warehouseId: { in: ['w1'] }, organization: { guid } },
+  }));
+  expect(result.items[0]).toMatchObject({ availableForManager: 6 });
 });
