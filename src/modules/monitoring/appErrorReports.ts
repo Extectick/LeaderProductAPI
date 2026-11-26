@@ -7,8 +7,8 @@ import { checkUserStatus } from '../../middleware/checkUserStatus';
 import prisma from '../../prisma/client';
 
 const project = 'leaderproduct-app-errors';
-const kind = z.enum(['maximum_update_depth', 'type_error', 'range_error', 'reference_error', 'syntax_error', 'error', 'unknown', 'java_exception', 'native_crash', 'anr']);
-const source = z.enum(['react_boundary', 'global_js', 'captured', 'android_native']);
+const kind = z.enum(['maximum_update_depth', 'type_error', 'range_error', 'reference_error', 'syntax_error', 'error', 'unknown', 'java_exception', 'native_crash', 'anr', 'slow_operation']);
+const source = z.enum(['react_boundary', 'global_js', 'captured', 'android_native', 'performance']);
 const screen = z.enum(['orders', 'help', 'profile', 'auth', 'services', 'home', 'admin', 'unknown']);
 const stage = z.enum(['unknown', 'orders', 'editor-header', 'editor-items', 'product-picker', 'reference-picker', 'line-editor', 'linked-order', 'filters', 'web-workspace']);
 const titles: Record<z.infer<typeof kind>, string> = {
@@ -22,6 +22,7 @@ const titles: Record<z.infer<typeof kind>, string> = {
   java_exception: 'Android Java exception',
   native_crash: 'Android native crash',
   anr: 'Application not responding',
+  slow_operation: 'Slow order interaction',
 };
 const version = z.string().max(40).regex(/^\d+(?:\.\d+){0,3}$/);
 const component = z.string().max(100).regex(/^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*$/);
@@ -46,10 +47,17 @@ const schema = z.strictObject({
   components: z.array(component).max(32),
   jsFrames: z.array(z.string().regex(/^\d{1,9}:\d{1,9}$/)).max(24),
   nativeEvidence: nativeEvidence.optional(),
+  timing: z.strictObject({
+    metric: z.enum(['js_event_loop', 'input_dispatch', 'draft_read_all', 'draft_read_changed']),
+    durationMs: z.number().int().min(500).max(120000),
+  }).optional(),
 }).refine(report => {
   const androidCrash = report.source === 'android_native';
   const nativeKind = ['java_exception', 'native_crash', 'anr'].includes(report.kind);
-  return androidCrash === nativeKind && androidCrash === Boolean(report.nativeEvidence)
+  const measured = report.kind === 'slow_operation';
+  return measured === (report.source === 'performance') && measured === Boolean(report.timing) &&
+    (!measured || (report.platform === 'android' && report.screen === 'orders' && !report.components.length && !report.jsFrames.length))
+    && androidCrash === nativeKind && androidCrash === Boolean(report.nativeEvidence)
     && (!androidCrash || report.platform === 'android');
 });
 
@@ -75,7 +83,8 @@ appErrorReportsRouter.post('/', express.json({ limit: '8kb', inflate: false }), 
   const env = process.env.APP_ERROR_REPORTING_ENVIRONMENT;
   const environment = env === 'development' || env === 'production' ? env : 'unknown';
   const details = JSON.stringify({ eventId: report.eventId.toLowerCase(), kind: report.kind, source: report.source,
-    stage: report.stage, components: report.components, jsFrames: report.jsFrames, nativeEvidence: report.nativeEvidence });
+    stage: report.stage, components: report.components, jsFrames: report.jsFrames, nativeEvidence: report.nativeEvidence, timing: report.timing });
+  const level = report.timing ? 'warning' : 'error';
   try {
     const accepted = await prisma.$transaction(async tx => {
       // Serialize the rate check and insert per user across all API replicas.
@@ -85,7 +94,7 @@ appErrorReportsRouter.post('/', express.json({ limit: '8kb', inflate: false }), 
           SELECT 1 FROM "AppCrashEvent" WHERE project = ${project} AND "eventId" = ${eventId}
         ) AS duplicate, EXISTS (
           SELECT 1 FROM "AppCrashEvent" WHERE project = ${project} AND "reportedUserId" = ${userId}
-            AND "receivedAt" > CURRENT_TIMESTAMP - INTERVAL '1 hour' OFFSET 11 LIMIT 1
+            AND level = ${level} AND "receivedAt" > CURRENT_TIMESTAMP - INTERVAL '1 hour' OFFSET ${report.timing ? 3 : 11} LIMIT 1
         ) AS exhausted`;
       if (budget.duplicate) return true;
       if (budget.exhausted) return false;
@@ -93,7 +102,7 @@ appErrorReportsRouter.post('/', express.json({ limit: '8kb', inflate: false }), 
         INSERT INTO "AppCrashEvent" (id, project, "eventId", environment, "occurredAt", title, level, platform,
           "reportedUserId", "appVersion", "buildNumber", "otaUpdateId", "runtimeVersion", screen, details)
         VALUES (${randomUUID()}, ${project}, ${eventId}, ${environment}, ${occurredAt}, ${titles[report.kind]},
-          'error', ${report.platform}, ${userId}, ${report.appVersion ?? null}, ${report.buildNumber ?? null},
+          ${level}, ${report.platform}, ${userId}, ${report.appVersion ?? null}, ${report.buildNumber ?? null},
           ${report.otaUpdateId?.toLowerCase() ?? null}, ${report.runtimeVersion ?? null}, ${report.screen}, ${details}::jsonb)
         ON CONFLICT (project, "eventId") DO NOTHING`;
       return true;

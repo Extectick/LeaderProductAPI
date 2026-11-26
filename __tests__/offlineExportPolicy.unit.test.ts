@@ -12,7 +12,8 @@ jest.mock('../src/prisma/client', () => {
 });
 import prisma from '../src/prisma/client';
 import { buildOfflinePolicy, priceTypeClosure, scopedEpoch, threeMonthsBefore, offlineExportPolicySchema } from '../src/modules/clientOrders/offlineExportPolicy';
-import { getOfflineSnapshot, getOfflineChanges, itemsForEntity, itemKey } from '../src/modules/clientOrders/offlineClientOrders.service';
+import * as projection from '../src/modules/clientOrders/offlineProjection';
+import { getOfflineManifest, getOfflineSnapshot, getOfflineChanges, itemsForEntity, itemKey } from '../src/modules/clientOrders/offlineClientOrders.service';
 import { getCatalogSnapshot, getCatalogChanges } from '../src/modules/catalog/catalog.service';
 
 const db = prisma as any;
@@ -151,4 +152,30 @@ test('catalog deltas delete out-of-scope products without deleting shared API re
   const result = await getCatalogChanges({ afterRevision: '4', limit: 100 });
   expect(result.changes).toEqual([{ revision: '5', productGuid: id(2), operation: 'DELETE', item: null }]);
   expect(db.product.deleteMany).not.toHaveBeenCalled();
+});
+
+it('resolves manager access once per manifest and rechecks it for the next snapshot', async () => {
+  db.$executeRaw = jest.fn();
+  db.onecSyncSession = { findMany: jest.fn().mockResolvedValue([]) };
+  db.offlineDatasetState.findMany.mockResolvedValue([{ entity: 'stock', epoch: id(1), currentRevision: 1n }]);
+  db.catalogState.findUnique.mockResolvedValue(null);
+  let allowed = id(70);
+  db.clientAgreement.findMany.mockImplementation(async (args: any) => args.distinct ? [{ priceType: { guid: allowed } }] : []);
+  db.sellingPrice.findMany.mockImplementation(async (args: any) =>
+    args.where.syncKey ? [] : Array.from({ length: 1000 }, (_, n) => ({ syncKey: String(n) })));
+  const rebuild = jest.spyOn(projection, 'reconcileOfflineProjection').mockImplementation(async (_tx, input) => {
+    for await (const _page of input.pages()) { /* consume all pages */ }
+    return { ...state, entity: input.entity } as any;
+  });
+  try {
+    await getOfflineManifest(7);
+    allowed = id(80);
+    await getOfflineManifest(7);
+    expect(db.clientAgreement.findMany.mock.calls.filter(([args]: any[]) => args.distinct)).toHaveLength(2);
+    expect(db.counterparty.findMany.mock.calls.filter(([args]: any[]) => args.select?.id && !args.select?.guid)).toHaveLength(2);
+    const scopes = db.sellingPrice.findMany.mock.calls.map(([args]: any[]) => args.where.priceType.guid.in);
+    expect(scopes).toEqual([[id(70)], [id(70)], [id(80)], [id(80)]]);
+  } finally {
+    rebuild.mockRestore();
+  }
 });

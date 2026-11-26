@@ -59,9 +59,9 @@ afterAll(() => {
 
 test('ingests an authenticated report while Sentry is disabled and stores only structured details', async () => {
   await post().set('test-user', '7').send(payload()).expect(204).expect('Cache-Control', 'no-store');
-  const [, , project, eventId, environment, , title, platform, userId, , , , , screen, details] = tx.$executeRaw.mock.calls[1];
-  expect({ project, environment, title, platform, userId, screen }).toEqual({
-    project: 'leaderproduct-app-errors', environment: 'development', title: 'Maximum update depth exceeded',
+  const [, , project, eventId, environment, , title, level, platform, userId, , , , , screen, details] = tx.$executeRaw.mock.calls[1];
+  expect({ project, environment, title, level, platform, userId, screen }).toEqual({
+    project: 'leaderproduct-app-errors', environment: 'development', title: 'Maximum update depth exceeded', level: 'error',
     platform: 'android', userId: '7', screen: 'orders',
   });
   expect(eventId).toMatch(/^[0-9a-f]{32}$/);
@@ -163,5 +163,18 @@ test('when only first-party reporting is enabled retention removes only its own 
   } finally {
     stopCrashRetention();
     jest.useRealTimers();
+  }
+});
+
+test('stores numeric performance evidence with its own hourly budget and rejects arbitrary telemetry', async () => {
+  const timing = {metric:'input_dispatch', durationMs:1200};
+  const body = {...payload(), kind:'slow_operation', source:'performance', components:[], jsFrames:[], timing};
+  await post().send(body).expect(204);
+  expect(tx.$queryRaw.mock.calls[0]).toEqual(expect.arrayContaining(['warning', 3]));
+  expect(tx.$executeRaw.mock.calls[1]).toEqual(expect.arrayContaining(['warning','Slow order interaction']));
+  expect(JSON.parse(tx.$executeRaw.mock.calls[1][tx.$executeRaw.mock.calls[1].length - 1])).toMatchObject({timing});
+  for (const invalid of [{kind:'error'}, {source:'captured'}, {components:['PersonalData']}, {screen:'help'},
+    {timing:{...timing, extra:'private'}}, {timing:{...timing, durationMs:150000}}, {timing:{...timing,metric:'custom'}}]) {
+    await post().send({...body, ...invalid}).expect(400);
   }
 });

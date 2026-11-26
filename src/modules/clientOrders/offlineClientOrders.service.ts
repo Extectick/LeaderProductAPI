@@ -144,10 +144,20 @@ async function decorateStockBalances(balances: any[], policy: ResolvedOfflinePol
   });
 }
 
-export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: string, policy: ResolvedOfflinePolicy | null, db: Tx = prisma): Promise<Array<Record<string, unknown>>> {
-  const counterpartyIds = entity === 'organizations' || entity === 'warehouses' || entity === 'stock' || entity === 'manager-stock'
-    ? []
-    : await accessibleCounterpartyIds(managerGuid, db);
+function createProjectionAccess(managerGuid: string, policy: ResolvedOfflinePolicy | null, db: Tx) {
+  // Reuse identical access checks only within this manager's RepeatableRead snapshot.
+  let customers: Promise<string[]> | undefined;
+  let prices: Promise<string[]> | undefined;
+  return {
+    counterpartyIds: () => customers ??= accessibleCounterpartyIds(managerGuid, db),
+    priceTypeGuids: () => prices ??= accessiblePriceTypeGuids(managerGuid, policy, db),
+  };
+}
+
+export async function itemsForEntity(
+  entity: OfflineDatasetEntity, managerGuid: string, policy: ResolvedOfflinePolicy | null,
+  db: Tx = prisma, access = createProjectionAccess(managerGuid, policy, db),
+): Promise<Array<Record<string, unknown>>> {
 
   switch (entity) {
     case 'organizations':
@@ -167,7 +177,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
       });
     case 'counterparties':
       return db.counterparty.findMany({
-        where: { id: { in: counterpartyIds }, isActive: true },
+        where: { id: { in: await access.counterpartyIds() }, isActive: true },
         orderBy: { guid: 'asc' },
         select: {
           guid: true, name: true, fullName: true, inn: true, kpp: true,
@@ -176,7 +186,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
       });
     case 'agreements':
       return db.clientAgreement.findMany({
-        where: { ...activeAgreementWhere, counterpartyId: { in: counterpartyIds } },
+        where: { ...activeAgreementWhere, counterpartyId: { in: await access.counterpartyIds() } },
         orderBy: { guid: 'asc' },
         select: {
           guid: true, name: true, number: true, date: true, validFrom: true, validTo: true,
@@ -191,7 +201,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
       });
     case 'contracts':
       return db.clientContract.findMany({
-        where: { ...activeContractWhere, counterpartyId: { in: counterpartyIds } },
+        where: { ...activeContractWhere, counterpartyId: { in: await access.counterpartyIds() } },
         orderBy: { guid: 'asc' },
         select: {
           guid: true, name: true, printName: true, number: true, date: true,
@@ -204,7 +214,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
       });
     case 'delivery-addresses':
       return db.deliveryAddress.findMany({
-        where: { isActive: true, counterpartyId: { in: counterpartyIds }, guid: { not: null } },
+        where: { isActive: true, counterpartyId: { in: await access.counterpartyIds() }, guid: { not: null } },
         orderBy: [{ guid: 'asc' }, { counterpartyId: 'asc' }],
         select: {
           guid: true, name: true, fullAddress: true, city: true, street: true,
@@ -214,7 +224,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
         },
       }) as Promise<Array<Record<string, unknown>>>;
     case 'price-types': {
-      const guids = await accessiblePriceTypeGuids(managerGuid, policy, db);
+      const guids = await access.priceTypeGuids();
       return db.priceType.findMany({
         where: { isActive: true, guid: { in: guids } },
         orderBy: { guid: 'asc' },
@@ -224,11 +234,11 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
     case 'order-options': {
       const [agreements, contracts] = await Promise.all([
         db.clientAgreement.findMany({
-          where: { ...activeAgreementWhere, counterpartyId: { in: counterpartyIds } },
+          where: { ...activeAgreementWhere, counterpartyId: { in: await access.counterpartyIds() } },
           select: { paymentForm: true, deliveryTerm: true, sourceUpdatedAt: true },
         }),
         db.clientContract.findMany({
-          where: { ...activeContractWhere, counterpartyId: { in: counterpartyIds } },
+          where: { ...activeContractWhere, counterpartyId: { in: await access.counterpartyIds() } },
           select: { deliveryMethod: true, sourceUpdatedAt: true },
         }),
       ]);
@@ -258,7 +268,7 @@ export async function itemsForEntity(entity: OfflineDatasetEntity, managerGuid: 
       return [...values.values()].sort((left, right) => String(left.guid).localeCompare(String(right.guid), 'ru'));
     }
     case 'selling-prices': {
-      const guids = await accessiblePriceTypeGuids(managerGuid, policy, db);
+      const guids = await access.priceTypeGuids();
       return db.sellingPrice.findMany({
         where: { isActive: true, product: productWhere(policy), priceType: { isActive: true, guid: { in: guids } } },
         orderBy: { syncKey: 'asc' },
@@ -315,14 +325,15 @@ async function getLargeEntityPage(
   cursor: string | null | undefined,
   limit: number,
   policy: ResolvedOfflinePolicy | null,
-  db: Tx = prisma
+  db: Tx,
+  access: ReturnType<typeof createProjectionAccess>
 ): Promise<Array<Record<string, unknown>>> {
   if (entity === 'selling-prices') {
     return db.sellingPrice.findMany({
       where: {
         isActive: true,
         product: productWhere(policy),
-        priceType: { isActive: true, guid: { in: await accessiblePriceTypeGuids(managerGuid, policy, db) } },
+        priceType: { isActive: true, guid: { in: await access.priceTypeGuids() } },
         ...(cursor ? { syncKey: { gt: cursor } } : {}),
       },
       orderBy: { syncKey: 'asc' },
@@ -408,6 +419,7 @@ async function prepareOfflineProjection(managerGuid: string) {
         const scopeKey = projectionScope(managerGuid);
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))`;
         const policy = await getOfflineExportPolicy(tx);
+        const access = createProjectionAccess(managerGuid, policy, tx);
         const source = await tx.offlineDatasetState.findMany({ where: { scopeKey: OFFLINE_DATASET_SCOPE } });
         if (!source.length) throw new ClientOrdersError(409, ErrorCodes.CONFLICT, 'Офлайн-данные ещё не подготовлены на сервере');
         const sourceByEntity = new Map(source.map(row => [row.entity, row]));
@@ -437,13 +449,13 @@ async function prepareOfflineProjection(managerGuid: string) {
               if (entity === 'selling-prices' || entity === 'stock' || entity === 'manager-stock') {
                 let cursor: string | null = null;
                 while (true) {
-                  const rows = await getLargeEntityPage(entity, managerGuid, cursor, 1000, policy, tx);
+                  const rows = await getLargeEntityPage(entity, managerGuid, cursor, 1000, policy, tx, access);
                   yield rows.map(item => ({ key: itemKey(entity, item), item: jsonSafe(item) }));
                   if (rows.length < 1000) break;
                   cursor = String(rows[rows.length - 1].syncKey);
                 }
               } else {
-                const rows = await itemsForEntity(entity, managerGuid, policy, tx);
+                const rows = await itemsForEntity(entity, managerGuid, policy, tx, access);
                 for (let offset = 0; offset < rows.length; offset += 1000) {
                   yield rows.slice(offset, offset + 1000).map(item => ({ key: itemKey(entity, item), item: jsonSafe(item) }));
                 }
