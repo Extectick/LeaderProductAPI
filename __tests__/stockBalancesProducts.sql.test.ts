@@ -19,6 +19,7 @@ beforeAll(async () => {
     INSERT INTO "StockBalance" VALUES
       ('p1','w1','o1',10,2,NULL,NULL,1,1,1,'2026-10-13','2026-10-12'),
       ('p1','w1','o1',3.5,1,3.5,0,0,1,0,NULL,'2026-10-11'),
+      ('p1','w1',NULL,80,0,80,80,0,0,0,NULL,'2026-10-10'),
       ('p1','w2',NULL,100,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'2026-10-10'),
       ('p2','w1','o1',999,0,999,999,0,0,0,NULL,'2026-10-10');`);
   await db.query(`ALTER TABLE "Warehouse" ADD COLUMN name text; UPDATE "Warehouse" SET name=id;
@@ -32,13 +33,22 @@ it('executes the actual parameterized aggregation with warehouse, organization a
   const scoped = await listStockProducts(stockProductsQuery.parse({ warehouseGuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', organizationGuid: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }));
   expect(scoped.items[0]).toMatchObject({ quantity: 13.5, inStock: 13.5, available: 8, reserved: 3, shipping: 1 });
   const all = await listStockProducts(stockProductsQuery.parse({}));
-  expect(all.items[0]).toMatchObject({ quantity: 115.5, available: 109 });
+  expect(all.items[0]).toMatchObject({ quantity: 15.5, available: 9 });
   const multi = await listStockProducts(stockProductsQuery.parse({ warehouseGuids: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb,aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }));
-  expect(multi.items[0]).toMatchObject({ quantity: 115.5, available: 109 });
+  expect(multi.items[0]).toMatchObject({ quantity: 15.5, available: 9 });
   expect(new Date(all.items[0].updatedAt!).getTime()).toBe(new Date(2026, 9, 13).getTime());
 });
 it('adds two organizations into one warehouse row, never duplicates the warehouse total', async () => {
   const result = await listWarehouseBalances('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', stockProductsQuery.parse({ groupByWarehouse: '1' }));
-  expect(result.items).toHaveLength(2);
+  expect(result.items).toHaveLength(1);
   expect(result.items[0]).toMatchObject({ inStock: 15.5, reserved: 4, available: 9 });
+});
+
+it('applies the organization to warehouse totals and excludes a warehouse containing only an order cache', async () => {
+  const productGuid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const scoped = await listWarehouseBalances(productGuid, stockProductsQuery.parse({ organizationGuid: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }));
+  expect(scoped.items).toHaveLength(1);
+  expect(scoped.items[0]).toMatchObject({ inStock: 13.5, reserved: 3, available: 8 });
+  const cachedOnly = await listWarehouseBalances(productGuid, stockProductsQuery.parse({ warehouseGuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }));
+  expect(cachedOnly.items).toEqual([]);
 });
