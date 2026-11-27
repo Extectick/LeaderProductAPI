@@ -75,6 +75,22 @@ test('allows non-order reports and an absent stack; supports seven days offline'
   await post().send({ eventId: id, occurredAt, kind: 'type_error', source: 'global_js',
     screen: 'help', platform: 'web', stage: 'unknown', components: [], jsFrames: [] }).expect(204);
 });
+test.each(['react_boundary', 'global_js'])('stores ordered picker actions with Hermes coordinates for %s', async source => {
+  const pickerActions = ['picker_open', 'page_load', 'search_changed', 'search_cleared', 'page_append',
+    'quantity_plus', 'quantity_plus', 'quantity_minus', 'quantity_input', 'editor_open', 'editor_close'];
+  const jsFrames = ['1:657281', '1:7822'];
+  await post().send({ ...payload(), source, pickerActions, jsFrames }).expect(204);
+  const insert = tx.$executeRaw.mock.calls[1];
+  expect(JSON.parse(insert[insert.length - 1])).toMatchObject({ pickerActions, jsFrames });
+});
+test.each([
+  { pickerActions: [] }, { pickerActions: Array(13).fill('page_load') },
+  { pickerActions: ['arbitrary search text'] }, { pickerActions: [{ action: 'search_changed', value: 'private' }] },
+  { screen: 'profile' }, { platform: 'web' }, { source: 'captured' },
+])('rejects invalid picker context and action data', async invalid => {
+  await post().send({ ...payload(), pickerActions: ['picker_open'], ...invalid }).expect(400);
+  expect(db.$transaction).not.toHaveBeenCalled();
+});
 const nativeReport = () => ({ ...payload(), kind: 'java_exception', source: 'android_native', screen: 'unknown', stage: 'unknown',
   nativeEvidence: { androidApi: 28, exceptionClass: 'java.lang.ClassCastException', frames: ['com.example.App$Inner.run:19'] } });
 test.each(['java_exception', 'native_crash', 'anr'])('preserves bounded Android native evidence for %s', async kind => {

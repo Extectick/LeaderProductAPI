@@ -28,6 +28,10 @@ const version = z.string().max(40).regex(/^\d+(?:\.\d+){0,3}$/);
 const component = z.string().max(100).regex(/^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*$/);
 const javaClass = z.string().max(160).regex(/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/);
 const javaFrame = z.string().max(160).regex(/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?::\d{1,9})?$/);
+const pickerAction = z.enum([
+  'picker_open', 'search_changed', 'search_cleared', 'page_load', 'page_append',
+  'quantity_plus', 'quantity_minus', 'quantity_input', 'editor_open', 'editor_close',
+]);
 const nativeEvidence = z.strictObject({
   androidApi: z.number().int().min(1).max(999),
   exceptionClass: javaClass.optional(),
@@ -46,6 +50,7 @@ const schema = z.strictObject({
   otaUpdateId: z.uuid().optional(),
   components: z.array(component).max(32),
   jsFrames: z.array(z.string().regex(/^\d{1,9}:\d{1,9}$/)).max(24),
+  pickerActions: z.array(pickerAction).min(1).max(12).optional(),
   nativeEvidence: nativeEvidence.optional(),
   timing: z.strictObject({
     metric: z.enum(['js_event_loop', 'input_dispatch', 'draft_read_all', 'draft_read_changed']),
@@ -55,6 +60,8 @@ const schema = z.strictObject({
   const androidCrash = report.source === 'android_native';
   const nativeKind = ['java_exception', 'native_crash', 'anr'].includes(report.kind);
   const measured = report.kind === 'slow_operation';
+  if (report.pickerActions && (report.platform !== 'android' || report.screen !== 'orders'
+    || (report.source !== 'react_boundary' && report.source !== 'global_js'))) return false;
   return measured === (report.source === 'performance') && measured === Boolean(report.timing) &&
     (!measured || (report.platform === 'android' && report.screen === 'orders' && !report.components.length && !report.jsFrames.length))
     && androidCrash === nativeKind && androidCrash === Boolean(report.nativeEvidence)
@@ -83,7 +90,8 @@ appErrorReportsRouter.post('/', express.json({ limit: '8kb', inflate: false }), 
   const env = process.env.APP_ERROR_REPORTING_ENVIRONMENT;
   const environment = env === 'development' || env === 'production' ? env : 'unknown';
   const details = JSON.stringify({ eventId: report.eventId.toLowerCase(), kind: report.kind, source: report.source,
-    stage: report.stage, components: report.components, jsFrames: report.jsFrames, nativeEvidence: report.nativeEvidence, timing: report.timing });
+    stage: report.stage, components: report.components, jsFrames: report.jsFrames, pickerActions: report.pickerActions,
+    nativeEvidence: report.nativeEvidence, timing: report.timing });
   const level = report.timing ? 'warning' : 'error';
   try {
     const accepted = await prisma.$transaction(async tx => {
